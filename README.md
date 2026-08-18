@@ -50,6 +50,7 @@ worse than one that refuses to start.
 
   programs.opencode-secret-guard = {
     enable = true;
+    mode = "shell+files";
     settings = {
       denyRoots = [ "~/.config/secrets" ];
       exemptRoots = [ "~/notes/agent-memory" ];
@@ -58,9 +59,9 @@ worse than one that refuses to start.
   };
 
   programs.opencode.settings = {
-    shell = config.programs.opencode-secret-guard.shellPath;
-    plugin = [ config.programs.opencode-secret-guard.pluginPath ];
-  };
+    plugin = lib.optional (guard.pluginPath != null) guard.pluginPath;
+  }
+  // lib.optionalAttrs (guard.shellPath != null) { shell = guard.shellPath; };
 }
 ```
 
@@ -68,6 +69,12 @@ The module writes the policy and installs the package, but deliberately does not
 write into `programs.opencode` itself: consumers assemble their own OpenCode
 settings, and reaching into another module's option tree invites merge conflicts
 over values this module cannot see.
+
+`shellPath` and `pluginPath` are **null when they do not apply** — `shellPath`
+whenever the guard is disabled or in `files-only` mode, since the wrapper
+refuses to run there. Wiring them unconditionally therefore fails at evaluation
+rather than producing a configuration that looks installed and aborts every
+command.
 
 ## Install without Nix
 

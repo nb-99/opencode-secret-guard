@@ -74,19 +74,33 @@ in
     # programs.opencode: consumers assemble their own opencode settings, and
     # reaching into another module's option tree invites merge conflicts over
     # values this module cannot see.
+    #
+    # Both are null when they do not apply, so a consumer that wires them
+    # unconditionally fails at evaluation instead of producing a configuration
+    # that looks installed and aborts every command.
     shellPath = mkOption {
-      type = types.str;
+      type = types.nullOr types.str;
       readOnly = true;
-      default = "${cfg.package}/bin/opencode-secret-guard";
-      defaultText = literalExpression "\"\${package}/bin/opencode-secret-guard\"";
-      description = "Set this as `programs.opencode.settings.shell`.";
+      default =
+        if cfg.enable && cfg.mode == "shell+files" then
+          "${cfg.package}/bin/opencode-secret-guard"
+        else
+          null;
+      defaultText = literalExpression ''"''${package}/bin/opencode-secret-guard", or null'';
+      description = ''
+        Set this as `programs.opencode.settings.shell`.
+
+        Null unless the guard is enabled in `shell+files` mode: the wrapper
+        refuses to run under `files-only`, so configuring it as the shell there
+        would break every command.
+      '';
     };
 
     pluginPath = mkOption {
-      type = types.str;
+      type = types.nullOr types.str;
       readOnly = true;
-      default = "file://${cfg.package}/lib/plugin.ts";
-      defaultText = literalExpression "\"file://\${package}/lib/plugin.ts\"";
+      default = if cfg.enable then "file://${cfg.package}/lib/plugin.ts" else null;
+      defaultText = literalExpression ''"file://''${package}/lib/plugin.ts", or null'';
       description = "Add this to `programs.opencode.settings.plugin`.";
     };
 
