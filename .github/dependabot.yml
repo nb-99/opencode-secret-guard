@@ -21,6 +21,11 @@ updates:
       interval: weekly
     commit-message:
       prefix: build
+    ignore:
+      # nixpkgs decides the compiler version, and a check asserts package.json
+      # agrees with it. Proposing whatever npm has newest only produces PRs
+      # that cannot pass until nixpkgs catches up.
+      - dependency-name: typescript
 
 # Not covered: the nixpkgs flake input, which pins bun, tsc and the build
 # itself. Dependabot has no Nix ecosystem; `nix flake update` handles it.

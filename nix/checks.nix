@@ -18,16 +18,24 @@ in
 {
   # 40 KB of security-critical TypeScript, otherwise checked by nothing but the
   # tests that happen to execute a given branch.
-  #
-  # tsc comes from nixpkgs, which is authoritative for CI; package.json names a
-  # version so `bun install && bun run typecheck` works outside Nix. A patch
-  # difference between the two does not change what is accepted.
   typecheck =
     pkgs.runCommand "secret-guard-typecheck"
       {
         nativeBuildInputs = [ pkgs.typescript ];
       }
       ''
+        # nixpkgs is authoritative for the compiler; package.json names it so
+        # `bun install && bun run typecheck` works outside Nix. Assert they
+        # agree: unchecked, that field can claim any version — a Dependabot
+        # bump to TypeScript 7 passed CI green while the build still used 5.9.
+        expected="${packageJson.devDependencies.typescript}"
+        actual="$(tsc --version | cut -d' ' -f2)"
+        if [ "$expected" != "$actual" ]; then
+          echo "package.json pins typescript $expected, but this build uses $actual." >&2
+          echo "nixpkgs decides the version; set package.json to $actual." >&2
+          exit 1
+        fi
+
         cp -r ${../src} src
         cp ${../tsconfig.json} tsconfig.json
         mkdir -p node_modules/@types/node
