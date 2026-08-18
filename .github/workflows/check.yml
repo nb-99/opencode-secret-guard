@@ -9,9 +9,13 @@ jobs:
   check:
     # sandbox-exec is macOS-only, and the kernel suite is the point.
     runs-on: macos-15
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v5
-      - uses: cachix/install-nix-action@v31
+      # Pinned by commit rather than tag: a mutable tag is a supply-chain hole,
+      # and this repository's whole job is not leaving those open.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
         with:
           extra_nix_config: |
             experimental-features = nix-command flakes

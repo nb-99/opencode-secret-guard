@@ -1,17 +1,27 @@
 { pkgs, package }:
 
 let
-  # Pinned rather than fetched by a package manager: the typecheck must be
-  # reproducible and must not reach the network from a build. @opencode-ai/plugin
-  # is deliberately absent — see the comment in src/plugin.ts.
+  packageJson = builtins.fromJSON (builtins.readFile ../package.json);
+
+  # Version comes from package.json so it is declared once; the hash is the
+  # only thing stated twice, and Nix fails loudly when the two disagree.
+  # Pinned rather than resolved by a package manager: the typecheck must be
+  # reproducible and must not reach the network from a build.
+  # @opencode-ai/plugin is deliberately absent — see the comment in src/plugin.ts.
   typesNode = pkgs.fetchurl {
-    url = "https://registry.npmjs.org/@types/node/-/node-26.2.0.tgz";
+    url = "https://registry.npmjs.org/@types/node/-/node-${
+      packageJson.devDependencies."@types/node"
+    }.tgz";
     hash = "sha256-ATysqeRVcLEeqPuz+LnjJ0NpNrNiiAZAtZ+f4qz93sk=";
   };
 in
 {
   # 40 KB of security-critical TypeScript, otherwise checked by nothing but the
   # tests that happen to execute a given branch.
+  #
+  # tsc comes from nixpkgs, which is authoritative for CI; package.json names a
+  # version so `bun install && bun run typecheck` works outside Nix. A patch
+  # difference between the two does not change what is accepted.
   typecheck =
     pkgs.runCommand "secret-guard-typecheck"
       {
