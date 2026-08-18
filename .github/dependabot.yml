@@ -1,0 +1,26 @@
+version: 2
+
+updates:
+  # Workflow actions are pinned by commit, so Dependabot rewrites the SHA and
+  # keeps the trailing version comment in step.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: build
+
+  # package.json is the single source for the @types/node version, but the
+  # typecheck fetches that tarball with a pinned hash. A bump here therefore
+  # fails `nix flake check` until nix/checks.nix carries the new hash — which
+  # is the intended behaviour: a dependency must not change without the hash
+  # that proves what was fetched. Nix prints the correct hash on failure.
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: build
+
+# Not covered: the nixpkgs flake input, which pins bun, tsc and the build
+# itself. Dependabot has no Nix ecosystem; `nix flake update` handles it.

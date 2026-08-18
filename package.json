@@ -1,6 +1,6 @@
 {
   "name": "opencode-secret-guard",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "private": true,
   "description": "Keeps secrets out of an OpenCode agent's context",
   "type": "module",
