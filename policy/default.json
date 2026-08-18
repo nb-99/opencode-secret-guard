@@ -1,0 +1,170 @@
+{
+  "configVersion": 1,
+  "mode": "shell+files",
+  "secretPatterns": [
+    "/\\.env$",
+    "/\\.env\\.[^/]*$",
+    "\\.pem$",
+    "\\.key$",
+    "\\.p12$",
+    "\\.pfx$",
+    "\\.jks$",
+    "\\.p8$",
+    "\\.keystore$",
+    "/id_rsa$",
+    "/id_dsa$",
+    "/id_ecdsa$",
+    "/id_ed25519$",
+    "/\\.netrc$",
+    "/\\.npmrc$",
+    "/\\.pypirc$",
+    "/\\.pgpass$",
+    "/\\.my\\.cnf$",
+    "/\\.git-credentials$",
+    "/secrets/",
+    "/\\.secrets/",
+    "\\.secret$",
+    "/secret\\.(json|ya?ml|txt|env|toml)$",
+    "[-_.]secret[-_.][^/]*\\.(json|ya?ml|txt|env|toml)$",
+    "/credentials$",
+    "/credentials\\.(json|ya?ml|toml)$",
+    "/kubeconfig$",
+    "\\.kubeconfig$",
+    "\\.tfstate$",
+    "\\.tfstate\\.backup$",
+    "\\.tfvars$",
+    "/\\.terraform/",
+    "/\\.ssh/",
+    "/\\.gnupg/",
+    "/\\.aws/",
+    "/\\.azure/",
+    "/\\.kube/",
+    "/\\.config/gcloud/",
+    "/\\.docker/config\\.json$"
+  ],
+  "secretExceptions": [
+    "/\\.env\\.(example|sample|template|dist)$",
+    "^/private/etc/ssl/cert\\.pem$",
+    "^/nix/store/"
+  ],
+  "artifactAllowlist": [
+    ".gitignore",
+    "node_modules",
+    "dist",
+    "build",
+    "out",
+    "target",
+    "result",
+    ".direnv",
+    ".next",
+    ".nuxt",
+    ".turbo",
+    "coverage",
+    ".venv",
+    "venv",
+    "vendor",
+    "__pycache__",
+    ".gradle",
+    ".pytest_cache",
+    ".mypy_cache"
+  ],
+  "relaxationGroups": {
+    "aws": {
+      "allowPaths": [
+        ".aws"
+      ],
+      "binaries": [
+        "aws",
+        "terraform",
+        "tofu",
+        "terragrunt",
+        "packer",
+        "sam"
+      ]
+    },
+    "azure": {
+      "allowPaths": [
+        ".azure"
+      ],
+      "binaries": [
+        "az"
+      ]
+    },
+    "gcp": {
+      "allowPaths": [
+        ".config/gcloud"
+      ],
+      "binaries": [
+        "gcloud",
+        "gsutil"
+      ]
+    },
+    "kube": {
+      "allowPaths": [
+        ".kube"
+      ],
+      "binaries": [
+        "kubectl",
+        "helm",
+        "k9s",
+        "kubectx",
+        "kubens",
+        "stern",
+        "flux",
+        "argocd",
+        "kustomize"
+      ]
+    },
+    "npm": {
+      "allowPaths": [
+        ".npmrc"
+      ],
+      "binaries": [
+        "npm",
+        "pnpm",
+        "yarn",
+        "bun",
+        "npx"
+      ]
+    },
+    "oci": {
+      "allowPaths": [
+        ".docker"
+      ],
+      "binaries": [
+        "docker",
+        "podman",
+        "nerdctl",
+        "skopeo",
+        "crane"
+      ]
+    },
+    "ssh": {
+      "allowPaths": [
+        ".ssh",
+        ".gnupg",
+        ".git-credentials",
+        ".netrc"
+      ],
+      "binaries": [
+        "git",
+        "ssh",
+        "scp",
+        "sftp",
+        "rsync",
+        "gh",
+        "glab",
+        "fj",
+        "fgj",
+        "hub",
+        "jj"
+      ]
+    }
+  },
+  "denyRoots": [
+    "~/.config/secrets"
+  ],
+  "exemptRoots": [],
+  "secretEnvironment": [],
+  "cacheTtlMs": 2000
+}
