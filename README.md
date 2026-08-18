@@ -2,7 +2,7 @@
 
 Keeps secrets out of an [OpenCode](https://opencode.ai) agent's context.
 
-OpenCode's `permission.bash` rules match the command *string*. That is fine for
+OpenCode's `permission.bash` rules match the command _string_. That is fine for
 "should this be confirmed?" but useless as a boundary: `F=.env; cat $F`,
 `cat .en?`, `base64 < .env` and `python3 -c "open('.env')"` all read the same
 file without containing a matchable pattern. Anything built on string inspection
@@ -27,10 +27,10 @@ See [docs/design.md](docs/design.md) for the full design and
 
 ## Requirements
 
-| Mode | bash tool | file tools | Requires |
-| --- | --- | --- | --- |
-| `shell+files` (default) | kernel-enforced | guarded | macOS with `sandbox-exec` |
-| `files-only` | **unguarded** | guarded | anything |
+| Mode                    | bash tool       | file tools | Requires                  |
+| ----------------------- | --------------- | ---------- | ------------------------- |
+| `shell+files` (default) | kernel-enforced | guarded    | macOS with `sandbox-exec` |
+| `files-only`            | **unguarded**   | guarded    | anything                  |
 
 `files-only` is a real reduction — any command can read any secret — so it must
 be requested explicitly, it announces itself at startup, and the shell wrapper
@@ -96,18 +96,18 @@ The plugin reads `~/.config/opencode/secret-guard.json`, or the path in
 Start from [`policy/default.json`](policy/default.json). Roots may be written
 with a leading `~`, expanded at runtime, so a policy is portable between hosts.
 
-| Key | Meaning |
-| --- | --- |
-| `configVersion` | File format; rejected if unsupported |
-| `mode` | `shell+files` or `files-only` |
-| `secretPatterns` | Regexes denied in both layers |
-| `secretExceptions` | Re-allowed after the deny block |
+| Key                 | Meaning                                                |
+| ------------------- | ------------------------------------------------------ |
+| `configVersion`     | File format; rejected if unsupported                   |
+| `mode`              | `shell+files` or `files-only`                          |
+| `secretPatterns`    | Regexes denied in both layers                          |
+| `secretExceptions`  | Re-allowed after the deny block                        |
 | `artifactAllowlist` | Path components re-allowed against the gitignore layer |
-| `relaxationGroups` | Per-binary credential access, e.g. `git` → `~/.ssh` |
-| `denyRoots` | Never relaxed, never excepted |
-| `exemptRoots` | Overrides everything above |
-| `secretEnvironment` | Variables scrubbed before a command runs |
-| `cacheTtlMs` | How often a profile is regenerated |
+| `relaxationGroups`  | Per-binary credential access, e.g. `git` → `~/.ssh`    |
+| `denyRoots`         | Never relaxed, never excepted                          |
+| `exemptRoots`       | Overrides everything above                             |
+| `secretEnvironment` | Variables scrubbed before a command runs               |
+| `cacheTtlMs`        | How often a profile is regenerated                     |
 
 Validation fails closed: an unsupported version, a wrong type, a non-absolute
 root, an `allowPaths` entry that is not `$HOME`-relative, or a pattern that does

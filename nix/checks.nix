@@ -75,6 +75,24 @@ in
     touch $out
   '';
 
+  # The kernel suite cannot run in a Nix build, so a helper it resolves through
+  # REPO_ROOT can go missing and only fail on a developer's machine — which is
+  # exactly what happened when the tests moved out of tests/secret-guard/.
+  # shellcheck does not resolve paths, so check them here.
+  paths = pkgs.runCommand "secret-guard-test-paths" { nativeBuildInputs = [ pkgs.ripgrep ]; } ''
+    cp -r ${../tests} tests
+    missing=0
+    while read -r reference; do
+      if [[ ! -e "$reference" ]]; then
+        echo "sandbox.test.sh references a missing path: $reference" >&2
+        missing=1
+      fi
+    done < <(rg -o --no-filename '\$REPO_ROOT/[A-Za-z0-9_./-]+' tests/sandbox.test.sh |
+      sed "s|\$REPO_ROOT/||" | sort -u)
+    [[ "$missing" -eq 0 ]]
+    touch $out
+  '';
+
   # Proves the installed layout is what the plugin's own shell check expects:
   # <package>/bin/opencode-secret-guard beside <package>/lib.
   layout = pkgs.runCommand "secret-guard-layout" { nativeBuildInputs = [ pkgs.bun ]; } ''

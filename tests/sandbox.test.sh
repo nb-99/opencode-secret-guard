@@ -12,9 +12,20 @@ set -uo pipefail
 SECRET="S3CRET-LEAK-CANARY"
 PUBLIC="PUBLIC-OK-MARKER"
 
-REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 CONFIG="${OPENCODE_SECRET_GUARD_CONFIG:?OPENCODE_SECRET_GUARD_CONFIG must be set}"
 GUARD_SHELL="${SECRET_GUARD_SHELL:?SECRET_GUARD_SHELL must be set}"
+
+# Name a missing helper directly. Resolved through REPO_ROOT, one that has moved
+# otherwise surfaces far below as "could not generate strict profile", which
+# points at the generator rather than at the path.
+for helper in gen-profile.ts classify.ts; do
+  if [[ ! -f "$REPO_ROOT/tests/$helper" ]]; then
+    echo "FATAL: missing $REPO_ROOT/tests/$helper" >&2
+    echo "  REPO_ROOT is $REPO_ROOT -- set it to the repository root." >&2
+    exit 2
+  fi
+done
 
 pass=0
 fail=0
@@ -110,7 +121,7 @@ git init -q "$public_fixture"
 gen_profile() {
   SG_EXEMPT_ROOTS="$vault/memory" \
   SG_DENY_ROOTS="$vault" \
-    bun "$REPO_ROOT/tests/secret-guard/gen-profile.ts" \
+    bun "$REPO_ROOT/tests/gen-profile.ts" \
       "$CONFIG" "$fixture" "$fakehome" "$1"
 }
 
@@ -303,7 +314,7 @@ find "$fixture" "$public_fixture" "$vault" "$fakehome" \
 
 drift_verdicts="$scratch/drift-verdicts"
 if ! SG_EXEMPT_ROOTS="$vault/memory" SG_DENY_ROOTS="$vault" HOME="$fakehome" \
-  bun "$REPO_ROOT/tests/secret-guard/classify.ts" "$CONFIG" "$fakehome" \
+  bun "$REPO_ROOT/tests/classify.ts" "$CONFIG" "$fakehome" \
   < "$drift_paths" > "$drift_verdicts"; then
   echo "FATAL: could not classify fixture paths" >&2
   exit 1
@@ -339,7 +350,7 @@ mkdir -p "$(dirname "$cache_marker")"
 printf '%s\n' "$PUBLIC" > "$cache_marker"
 expect_allowed "kernel lets a command read its own profile cache" "cat '$cache_marker'"
 cache_verdict="$(SG_EXEMPT_ROOTS="$vault/memory" SG_DENY_ROOTS="$vault" HOME="$fakehome" \
-  bun "$REPO_ROOT/tests/secret-guard/classify.ts" "$CONFIG" "$fakehome" <<<"$cache_marker")"
+  bun "$REPO_ROOT/tests/classify.ts" "$CONFIG" "$fakehome" <<<"$cache_marker")"
 if [[ "$cache_verdict" == deny\ * ]]; then
   pass=$((pass + 1))
   printf '  ok    file tools hide the profile cache\n'
