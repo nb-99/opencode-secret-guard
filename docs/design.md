@@ -312,10 +312,11 @@ identical verdicts, so the fast path cannot drift from the audited one.
 
 ## Roots
 
-`denyRoots` (`~/.config/secrets`, the Obsidian vault) are opaque: `subpath`
-denies block `readdir` too, so the directory cannot even be listed.
-`exemptRoots` (the `agent-memory` subtree) is emitted *after* them, which is
-what lets a readable subtree sit inside an unreadable parent.
+`denyRoots` (for example `~/.config/secrets`, or a notes vault) are opaque:
+`subpath` denies block `readdir` too, so the directory cannot even be listed.
+`exemptRoots` is emitted *after* them, which is what lets a readable subtree sit
+inside an unreadable parent — a memory directory inside an otherwise private
+vault, say.
 
 This hardens a boundary that was previously enforced only by a command pattern.
 The `*agent-vault*` bash rule does fire, but it matches parsed command

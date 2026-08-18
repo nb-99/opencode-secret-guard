@@ -443,9 +443,22 @@ fi
 expect_shell_strict "a redirected cd falls back to strict" \
   "cd '$fixture' > /dev/null && kubectl"
 
-shell_env_output="$(cd "$fixture" && HOMEASSISTANT_TOKEN="$SECRET" SG_CANARY_ENV="$PUBLIC" \
+# The scrub list comes from the policy, and the shipped default deliberately
+# names no variables — only a user knows theirs. Asserting the mechanism against
+# whichever policy the run was handed would therefore pass or fail depending on
+# the caller, so this derives a policy naming a canary of its own.
+scrub_config="$scratch/scrub-policy.json"
+SG_SRC="$CONFIG" SG_DEST="$scrub_config" bun -e '
+  const fs = require("node:fs");
+  const policy = JSON.parse(fs.readFileSync(process.env.SG_SRC, "utf8"));
+  policy.secretEnvironment = ["SG_SCRUBBED_ENV"];
+  fs.writeFileSync(process.env.SG_DEST, JSON.stringify(policy));
+' || { echo "FATAL: could not derive the scrub policy" >&2; exit 1; }
+
+shell_env_output="$(cd "$fixture" && OPENCODE_SECRET_GUARD_CONFIG="$scrub_config" \
+  SG_SCRUBBED_ENV="$SECRET" SG_CANARY_ENV="$PUBLIC" \
   HOME="$fakehome" PATH="$fakebin:$PATH" "$GUARD_SHELL" -c \
-  'printenv HOMEASSISTANT_TOKEN; printenv SG_CANARY_ENV' 2>&1)"
+  'printenv SG_SCRUBBED_ENV; printenv SG_CANARY_ENV' 2>&1)"
 if [[ "$shell_env_output" == "$PUBLIC" ]]; then
   pass=$((pass + 1))
   printf '  ok    shell scrubs inherited secret environment\n'
