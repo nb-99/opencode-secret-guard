@@ -25,10 +25,10 @@ Roots may be written with a leading `~`, expanded against the real home.
 `shell+files`, so a policy written before the field existed keeps its full
 boundary rather than silently weakening.
 
-| Mode | Bash tool | File tools | Requires |
-| --- | --- | --- | --- |
-| `shell+files` (default) | kernel-enforced | predicate | macOS with `sandbox-exec` |
-| `files-only` | **unguarded** | predicate | anything |
+| Mode                    | Bash tool       | File tools | Requires                  |
+| ----------------------- | --------------- | ---------- | ------------------------- |
+| `shell+files` (default) | kernel-enforced | predicate  | macOS with `sandbox-exec` |
+| `files-only`            | **unguarded**   | predicate  | anything                  |
 
 `files-only` exists so the portable half of the guard is usable on hosts that
 have no `sandbox-exec`. It is genuinely weaker: any command can read any secret.
@@ -44,7 +44,7 @@ reader assumes is the worst of the available options.
 
 ## Why not command patterns
 
-OpenCode's `permission.bash` rules match the command *string*. That is fine for
+OpenCode's `permission.bash` rules match the command _string_. That is fine for
 "should this be confirmed?" but useless as a boundary: `F=.env; cat $F`,
 `cat .en?`, `base64 < .env`, and `python3 -c "open('.env')"` all read the same
 file without ever containing a matchable pattern. Anything built on string
@@ -71,7 +71,7 @@ opencode-secret-guard/
 Neither file is substituted at build time. The wrapper locates the resolver
 relative to itself and takes `bun` from `SECRET_GUARD_BUN` or `PATH`, so the
 package works from a Nix store path or a plain checkout. In return, the plugin
-verifies at startup that OpenCode's configured shell *is* this package's own
+verifies at startup that OpenCode's configured shell _is_ this package's own
 `bin/opencode-secret-guard`, comparing realpaths rather than matching a store
 path — which keeps the check valid through a Home Manager profile symlink while
 still rejecting a wrapper from a different installation.
@@ -119,16 +119,16 @@ Three non-obvious constraints, all verified empirically:
 - **Paths are canonicalized before matching.** `/etc` is really `/private/etc`,
   so a rule anchored on `^/etc/` never fires. Every emitted path is `realpath`'d
   and every pattern is suffix- or component-anchored.
-- **Last-rule-wins applies per operation name.** `(allow file-read*)` does *not*
+- **Last-rule-wins applies per operation name.** `(allow file-read*)` does _not_
   override `(deny file-read-data)`. An allow must repeat the deny's exact
   operation list.
 - **Deny `file-read-data`, not `file-read*`.** The latter includes metadata, so
   denying it makes `ls -la` fail on every secret rather than merely hiding its
   contents.
 
-Ignored *directories* become a `^<dir>/` regex rather than `(subpath …)`, so
+Ignored _directories_ become a `^<dir>/` regex rather than `(subpath …)`, so
 `readdir` still works on the ignored directory itself and `find` does not error
-on every ignored directory. That prefix does, however, cover the *sub*
+on every ignored directory. That prefix does, however, cover the _sub_
 directories of the tree, and enumerating a directory is a `file-read-data`
 operation on the directory — which is why every directory below an ignored tree
 is re-allowed individually in step 3. Without it, any tree walker (eslint,
@@ -161,28 +161,28 @@ a permissive one. File tools cannot access the cache.
 **A profile is a snapshot.** Because directories inside ignored trees are listed
 individually, one created after generation is not enumerable until the profile
 is rebuilt. Shortening the TTL narrows that window but cannot close it: a single
-compound command (`pnpm test && eslint .`) creates the directories *after* its
+compound command (`pnpm test && eslint .`) creates the directories _after_ its
 own profile was built. Two structural alternatives exist, neither adopted:
 re-validating every recorded directory's mtime on a cache hit costs more than
-regenerating, and denying ignored *files* individually instead of the tree
+regenerating, and denying ignored _files_ individually instead of the tree
 prefix would make enumeration deterministic at the price of leaving a
 just-created ignored file readable until the next rebuild.
 
 ## Per-binary relaxation
 
 `~/.ssh`, `~/.aws`, `~/.kube` and friends are exactly the files the agent must
-be able to read *indirectly* — denying them outright breaks git-over-SSH,
+be able to read _indirectly_ — denying them outright breaks git-over-SSH,
 `kubectl`, `aws`, and `terraform`. Each group re-allows only its own paths:
 
-| Group | Binaries | Re-allows |
-| --- | --- | --- |
-| `ssh` | `git`, `ssh`, `scp`, `rsync`, `gh`, `glab`, `fj`, `jj`, … | `~/.ssh`, `~/.gnupg`, `~/.git-credentials`, `~/.netrc` |
-| `kube` | `kubectl`, `helm`, `k9s`, `stern`, `flux`, `argocd`, … | `~/.kube` |
-| `aws` | `aws`, `terraform`, `tofu`, `terragrunt`, `packer`, `sam` | `~/.aws` |
-| `oci` | `docker`, `podman`, `nerdctl`, `skopeo`, `crane` | `~/.docker` |
-| `npm` | `npm`, `pnpm`, `yarn`, `bun`, `npx` | `~/.npmrc` |
-| `gcp` | `gcloud`, `gsutil` | `~/.config/gcloud` |
-| `azure` | `az` | `~/.azure` |
+| Group   | Binaries                                                  | Re-allows                                              |
+| ------- | --------------------------------------------------------- | ------------------------------------------------------ |
+| `ssh`   | `git`, `ssh`, `scp`, `rsync`, `gh`, `glab`, `fj`, `jj`, … | `~/.ssh`, `~/.gnupg`, `~/.git-credentials`, `~/.netrc` |
+| `kube`  | `kubectl`, `helm`, `k9s`, `stern`, `flux`, `argocd`, …    | `~/.kube`                                              |
+| `aws`   | `aws`, `terraform`, `tofu`, `terragrunt`, `packer`, `sam` | `~/.aws`                                               |
+| `oci`   | `docker`, `podman`, `nerdctl`, `skopeo`, `crane`          | `~/.docker`                                            |
+| `npm`   | `npm`, `pnpm`, `yarn`, `bun`, `npx`                       | `~/.npmrc`                                             |
+| `gcp`   | `gcloud`, `gsutil`                                        | `~/.config/gcloud`                                     |
+| `azure` | `az`                                                      | `~/.azure`                                             |
 
 This is a credential-scoping boundary, not a capability sandbox for the group
 binary itself. Once selected, the binary and its subprocesses can read that
@@ -218,17 +218,15 @@ strict.
 The substitution scan is **quote-aware**, because the same characters are
 ordinary text nearly everywhere they appear. Judged per region, matching zsh:
 
-| region | `` ` `` and `$(` | `<(`, `>(`, `=(`, and zsh evaluation forms |
-| --- | --- | --- |
-| unquoted | expands → strict | expands → strict |
-| double-quoted | expands → strict | literal → allowed |
-| single-quoted | literal → allowed | literal → allowed |
-| backslash-escaped | literal → allowed | literal → allowed |
+| region            | `` ` `` and `$(`  | `<(`, `>(`, `=(`, and zsh evaluation forms |
+| ----------------- | ----------------- | ------------------------------------------ |
+| unquoted          | expands → strict  | expands → strict                           |
+| double-quoted     | expands → strict  | literal → allowed                          |
+| single-quoted     | literal → allowed | literal → allowed                          |
+| backslash-escaped | literal → allowed | literal → allowed                          |
 
 So a commit message may contain backticks — ``git commit -m 'fix `2>&1`'`` and
-`git commit -m "fix \`2>&1\`"` both keep their group — while
-`git commit -m "$(cat ~/.ssh/id_ed25519)"` still runs strict. Verified against
-`/bin/zsh`: the escaped forms print literally and execute nothing, the unescaped
+`git commit -m "fix \`2>&1\`"`both keep their group — while`git commit -m "$(cat ~/.ssh/id_ed25519)"`still runs strict. Verified against`/bin/zsh`: the escaped forms print literally and execute nothing, the unescaped
 form runs.
 
 `eval`, `exec`, `source`, and `.` are **not** pattern-matched. They only run
@@ -293,15 +291,15 @@ command carrying `2>&1` silently ran strict.
 `read`, `write`, `edit`, `patch`, `list`, `glob`, and `grep` run the same
 predicate. `glob` results are filtered per line and `grep` results per hit
 group. The predicate mirrors the
-profile's ordering, resolves each target's *own* repository root, and defaults
+profile's ordering, resolves each target's _own_ repository root, and defaults
 to **allow** whenever it cannot classify a result — the opposite of the
 `opencode-ignore` plugin it replaces, which defaulted to dropping and silently
 lost every hit outside the current project.
 
-Ignored *directories* classify as allow so `list` can enumerate them, matching
+Ignored _directories_ classify as allow so `list` can enumerate them, matching
 the profile; the files inside them stay denied.
 
-This layer is the *only* gate for the file tools — they run inside opencode's
+This layer is the _only_ gate for the file tools — they run inside opencode's
 process and never touch `sandbox-exec` — so it is on the hot path of every
 search. Verdicts for a whole result set are resolved by `classifyPaths`, which
 issues one `git check-ignore -z --stdin` per repository instead of one per
@@ -314,7 +312,7 @@ identical verdicts, so the fast path cannot drift from the audited one.
 
 `denyRoots` (for example `~/.config/secrets`, or a notes vault) are opaque:
 `subpath` denies block `readdir` too, so the directory cannot even be listed.
-`exemptRoots` is emitted *after* them, which is what lets a readable subtree sit
+`exemptRoots` is emitted _after_ them, which is what lets a readable subtree sit
 inside an unreadable parent — a memory directory inside an otherwise private
 vault, say.
 
