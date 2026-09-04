@@ -1,6 +1,7 @@
 {
-  "configVersion": 1,
+  "configVersion": 2,
   "mode": "shell+files",
+  "cleanupRoot": null,
   "secretPatterns": [
     "/\\.env$",
     "/\\.env\\.[^/]*$",

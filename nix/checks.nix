@@ -2,6 +2,7 @@
 
 let
   packageJson = builtins.fromJSON (builtins.readFile ../package.json);
+  zod = pkgs.callPackage ./zod.nix { };
 
   # Version comes from package.json so it is declared once; the hash is the
   # only thing stated twice, and Nix fails loudly when the two disagree.
@@ -39,6 +40,7 @@ in
         cp -r ${../src} src
         cp ${../tsconfig.json} tsconfig.json
         mkdir -p node_modules/@types/node
+        ln -s ${zod} node_modules/zod
         tar -xzf ${typesNode} -C node_modules/@types/node --strip-components=1
         tsc --noEmit
         touch $out
@@ -57,11 +59,13 @@ in
       ''
         cp -r ${../src} src
         cp -r ${../tests} tests
+        mkdir -p node_modules
+        ln -s ${zod} node_modules/zod
         export HOME="$TMPDIR"
         export OPENCODE_SECRET_GUARD_CONFIG=${../policy/default.json}
         git config --global user.email test@example.com
         git config --global user.name test
-        bun test tests/group.test.ts tests/predicate.test.ts
+        bun test tests/group.test.ts tests/predicate.test.ts tests/cleanup.test.ts
         touch $out
       '';
 
@@ -117,6 +121,8 @@ in
     test -x ${package}/bin/opencode-secret-guard
     test -f ${package}/lib/plugin.ts
     test -f ${package}/lib/cli.ts
+    test -f ${package}/lib/cleanup.ts
+    test -f ${package}/lib/node_modules/zod/package.json
     export OPENCODE_SECRET_GUARD_CONFIG=${../policy/default.json}
     bun -e '
       const { expectedShell } = await import("${package}/lib/shell.ts");

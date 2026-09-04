@@ -321,6 +321,36 @@ The `*agent-vault*` bash rule does fire, but it matches parsed command
 structure, so binding the path to a shell variable first slips past it — the
 usual failure mode of string matching. The kernel rule has no such gap.
 
+## Structured cleanup
+
+`cleanupRoot` opts into `cleanup_temp` in `src/cleanup.ts`. The root is policy,
+not a model argument. OpenCode validates the public Zod schema, and the tool
+validates it again inside `execute` because preceding hooks can rewrite
+arguments. The package vendors only Zod, not the OpenCode SDK.
+
+The tool resolves every target beneath an existing root, rejects symlink
+operands and traversal, inventories descendants without following symlinks,
+and awaits native `edit` permission for every entry. Permission patterns
+retain the configured root spelling; execution paths use the canonical root.
+The root identity, resolved targets, and inventory are checked again after
+approval. The edit prompt receives a path-only deletion manifest in the native
+`filepath` and `diff` metadata fields.
+
+Preflight checks provide useful errors, not a race-proof guarantee. The fixed
+`/bin/rm -rf -- ...` worker runs under the base profile with no credential
+relaxation. Additional deny rules restrict writes to exact inventoried paths,
+protect the root itself, and deny data writes and creation. They never add an
+allow rule, so secret denies and the profile-cache restriction remain effective.
+The profile is passed directly with `sandbox-exec -p`; it does not introduce a
+scope-dependent cache entry or nest an existing sandbox. Literal path rules
+leave newly created descendants undeletable even after the preflight checks.
+
+Custom tools do not inherit OpenCode's configured shell. Explicitly starting
+this confined worker is therefore part of the tool's contract. The plugin
+exposes it only when configured and requires successful shell validation before
+execution. Cancellation and worker errors propagate; a failed recursive delete
+may already have removed some allowed descendants.
+
 ## Residual gaps
 
 - MCP servers and the LSP run outside the sandbox. See
