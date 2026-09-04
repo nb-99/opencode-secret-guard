@@ -13,6 +13,7 @@ import { expectedShell, resolveForShell, resolveProfile } from "../src/shell.ts"
 type GuardConfig = {
   configVersion: number;
   mode: "shell+files" | "files-only";
+  cleanupRoot: string | null;
   secretPatterns: string[];
   secretExceptions: string[];
   artifactAllowlist: string[];
@@ -117,7 +118,7 @@ describe("configuration loading", () => {
   });
 
   test("the generated policy validates", () => {
-    expect(baseConfig.configVersion).toBe(1);
+    expect(baseConfig.configVersion).toBe(2);
     expect(baseConfig.secretPatterns.length).toBeGreaterThan(0);
   });
 
@@ -131,7 +132,7 @@ describe("configuration loading", () => {
   });
 
   test.each([
-    ["a newer configVersion", { configVersion: 2 }, /unsupported configVersion 2/],
+    ["a newer configVersion", { configVersion: 3 }, /unsupported configVersion 3/],
     ["a missing configVersion", { configVersion: undefined }, /unsupported configVersion/],
     ["a non-string list entry", { artifactAllowlist: ["dist", 7] }, /must be an array of strings/],
     ["a negative cacheTtlMs", { cacheTtlMs: -1 }, /"cacheTtlMs"/],

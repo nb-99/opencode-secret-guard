@@ -7,7 +7,7 @@ import * as path from "node:path";
  * reader refuses anything else, so a newer policy paired with an older plugin
  * fails by name instead of silently ignoring fields it does not know.
  */
-export const SUPPORTED_CONFIG_VERSION = 1;
+export const SUPPORTED_CONFIG_VERSION = 2;
 
 /** Overrides the policy location; otherwise the XDG default path is used. */
 export const CONFIG_ENVIRONMENT = "OPENCODE_SECRET_GUARD_CONFIG";
@@ -20,6 +20,7 @@ export interface RelaxationGroup {
 export interface GuardConfig {
   configVersion: number;
   mode: GuardMode;
+  cleanupRoot: string | null;
   secretPatterns: string[];
   secretExceptions: string[];
   artifactAllowlist: string[];
@@ -162,7 +163,7 @@ export function validateConfig(raw: unknown, source: string, home: string): Guar
   }
   const record = raw as Record<string, unknown>;
 
-  if (record.configVersion !== SUPPORTED_CONFIG_VERSION) {
+  if (record.configVersion !== 1 && record.configVersion !== SUPPORTED_CONFIG_VERSION) {
     throw configError(
       source,
       `unsupported configVersion ${JSON.stringify(record.configVersion)}, this build requires ${SUPPORTED_CONFIG_VERSION}`,
@@ -187,9 +188,29 @@ export function validateConfig(raw: unknown, source: string, home: string): Guar
     );
   }
 
+  let cleanupRoot: string | null = null;
+  if (record.cleanupRoot != null) {
+    if (typeof record.cleanupRoot !== "string" || !record.cleanupRoot.trim() || /[\0\r\n]/.test(record.cleanupRoot)) {
+      throw configError(source, '"cleanupRoot" must be an absolute directory or null');
+    }
+    cleanupRoot = expandHome(record.cleanupRoot, home);
+  }
+  if (cleanupRoot !== null) {
+    if (record.configVersion !== SUPPORTED_CONFIG_VERSION) {
+      throw configError(source, '"cleanupRoot" requires configVersion 2');
+    }
+    if (!path.isAbsolute(cleanupRoot) || path.resolve(cleanupRoot) === path.parse(cleanupRoot).root) {
+      throw configError(source, '"cleanupRoot" must be an absolute directory below the filesystem root');
+    }
+    if (mode !== "shell+files") {
+      throw configError(source, '"cleanupRoot" requires mode "shell+files"');
+    }
+  }
+
   return {
     configVersion: SUPPORTED_CONFIG_VERSION,
     mode: mode as GuardMode,
+    cleanupRoot,
     secretPatterns: requireRegexArray(record.secretPatterns, "secretPatterns", source),
     secretExceptions: requireRegexArray(record.secretExceptions, "secretExceptions", source),
     artifactAllowlist: requireStringArray(record.artifactAllowlist, "artifactAllowlist", source),
@@ -225,4 +246,3 @@ export function loadConfig(source = configPath(), home = os.homedir()): GuardCon
 
   return validateConfig(raw, source, home);
 }
-

@@ -107,6 +107,7 @@ with a leading `~`, expanded at runtime, so a policy is portable between hosts.
 | ------------------- | ------------------------------------------------------ |
 | `configVersion`     | File format; rejected if unsupported                   |
 | `mode`              | `shell+files` or `files-only`                          |
+| `cleanupRoot`       | Opt-in root for `cleanup_temp`; `null` disables it and files-only mode cannot enable it |
 | `secretPatterns`    | Regexes denied in both layers                          |
 | `secretExceptions`  | Re-allowed after the deny block                        |
 | `artifactAllowlist` | Path components re-allowed against the gitignore layer |
@@ -121,6 +122,51 @@ root, an `allowPaths` entry that is not `$HOME`-relative, or a pattern that does
 not compile all abort startup. Patterns are compiled at load time because the
 matcher treats an uncompilable pattern as "no match" — an unvalidated typo in a
 deny pattern would otherwise silently stop guarding.
+
+The current policy format is version 2. Version-1 policies still load with
+cleanup disabled. To enable cleanup in a manually managed policy, set
+`configVersion` to `2` and add `cleanupRoot`. Home Manager writes the current
+version automatically.
+
+## Guarded temporary cleanup
+
+Set `cleanupRoot` to an existing directory such as
+`/tmp/agent-temporary-workspace` to expose the `cleanup_temp` tool:
+
+```json
+{"paths": ["my-task/output", "my-task/download"]}
+```
+
+Paths are relative to the configured root. Keep each task's files in its own
+subdirectory. The tool rejects absolute paths, `..`, deletion of the root,
+and symlink operands or ancestors. Missing targets are safe to repeat if the
+root still exists. Symlinks inside a requested directory are unlinked rather
+than followed.
+
+The tool inventories descendants and awaits OpenCode's `edit` permission for
+every path before deleting anything. Read-only agents and descendant-specific
+denials remain effective; approval displays a deletion manifest without file
+contents. To avoid prompting for this root, configure
+an OpenCode `permission.edit` allowance for
+`/tmp/agent-temporary-workspace/**`. Use the same spelling as `cleanupRoot`;
+the worker independently resolves macOS aliases such as `/private/tmp`.
+Keep ordinary bash `rm` rules at `ask`; no command-string exemption is needed.
+
+Deletion runs as fixed `/bin/rm` arguments under `sandbox-exec`, not as shell
+text or a filesystem call in the plugin process. Its profile retains the
+secret policy and additionally denies writes outside the inventoried entries,
+writes to the root, and file creation or data writes. There is no credential
+relaxation or automatic fallback to an unguarded worker.
+
+New entries that appear after approval are not deletable. Requests are bounded
+to 4,096 entries and a 128 KiB generated profile; select smaller subtrees when a
+request exceeds those limits.
+
+All requested paths are validated before execution, but deletion itself is
+not transactional. A protected `.env` inside a requested directory can produce
+a partial-cleanup error while remaining intact. A refusal is not a reason to
+retry through unrestricted bash. This feature confines the cleanup tool, not
+all writes by ordinary shell commands.
 
 ## Tests
 

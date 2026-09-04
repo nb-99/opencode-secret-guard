@@ -1,13 +1,16 @@
 {
   "name": "opencode-secret-guard",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "description": "Keeps secrets out of an OpenCode agent's context",
   "type": "module",
   "license": "MIT",
   "scripts": {
-    "test": "bun test tests/group.test.ts tests/predicate.test.ts",
+    "test": "bun test tests/group.test.ts tests/predicate.test.ts tests/cleanup.test.ts",
     "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "zod": "4.3.6"
   },
   "devDependencies": {
     "@types/node": "26.2.0",

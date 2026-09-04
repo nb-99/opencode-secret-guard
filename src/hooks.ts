@@ -3,6 +3,7 @@ import { fileURLToPath } from "node:url";
 import type { GuardConfig } from "./policy.ts";
 import { FILE_PATH_ARGS, FILE_TOOLS, classifyPath, filterSearchOutput } from "./predicate.ts";
 import { validatePlatform, validateShell } from "./shell.ts";
+import { createCleanupTool } from "./cleanup.ts";
 
 /** This module's own directory: <package>/lib when installed. */
 export const MODULE_DIRECTORY = path.dirname(fileURLToPath(import.meta.url));
@@ -10,9 +11,14 @@ export const MODULE_DIRECTORY = path.dirname(fileURLToPath(import.meta.url));
 export function createHooks(guardConfig: GuardConfig, moduleDirectory = MODULE_DIRECTORY) {
   const searchArgs = new Map<string, Record<string, unknown>>();
   validatePlatform(guardConfig);
+  let shellValidated = false;
 
   return {
+    ...(guardConfig.cleanupRoot ? {
+      tool: { cleanup_temp: createCleanupTool(guardConfig, () => shellValidated) },
+    } : {}),
     config: async (config: { shell?: unknown }) => {
+      shellValidated = false;
       if (guardConfig.mode === "files-only") {
         // Loud, once, on the channel a user actually sees. A weaker boundary
         // that announces itself is defensible; one that does not is not.
@@ -23,6 +29,7 @@ export function createHooks(guardConfig: GuardConfig, moduleDirectory = MODULE_D
         return;
       }
       validateShell(config.shell, moduleDirectory);
+      shellValidated = true;
     },
 
     "tool.execute.before": async (
@@ -65,4 +72,3 @@ export function createHooks(guardConfig: GuardConfig, moduleDirectory = MODULE_D
     },
   };
 }
-
