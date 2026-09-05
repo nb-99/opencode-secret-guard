@@ -2,19 +2,25 @@
 
 let
   packageJson = builtins.fromJSON (builtins.readFile ../package.json);
+  packageLock = builtins.fromJSON (builtins.readFile ../package-lock.json);
   zod = pkgs.callPackage ./zod.nix { };
 
-  # Version comes from package.json so it is declared once; the hash is the
-  # only thing stated twice, and Nix fails loudly when the two disagree.
-  # Pinned rather than resolved by a package manager: the typecheck must be
-  # reproducible and must not reach the network from a build.
+  typesNodeVersion = packageJson.devDependencies."@types/node";
+  typesNodeLock = packageLock.packages."node_modules/@types/node";
+  typesNodeUrl = "https://registry.npmjs.org/@types/node/-/node-${typesNodeVersion}.tgz";
+
   # @opencode-ai/plugin is deliberately absent — see the comment in src/plugin.ts.
-  typesNode = pkgs.fetchurl {
-    url = "https://registry.npmjs.org/@types/node/-/node-${
-      packageJson.devDependencies."@types/node"
-    }.tgz";
-    hash = "sha256-ATysqeRVcLEeqPuz+LnjJ0NpNrNiiAZAtZ+f4qz93sk=";
-  };
+  typesNode =
+    assert pkgs.lib.assertMsg (
+      typesNodeLock.version == typesNodeVersion
+    ) "@types/node versions in package.json and package-lock.json differ";
+    assert pkgs.lib.assertMsg (
+      typesNodeLock.resolved == typesNodeUrl
+    ) "@types/node in package-lock.json does not resolve from the npm registry";
+    pkgs.fetchurl {
+      url = typesNodeUrl;
+      hash = typesNodeLock.integrity;
+    };
 in
 {
   # 40 KB of security-critical TypeScript, otherwise checked by nothing but the
