@@ -131,7 +131,7 @@ version automatically.
 ## Guarded temporary cleanup
 
 Set `cleanupRoot` to an existing directory such as
-`/tmp/agent-temporary-workspace` to expose the `cleanup_temp` tool:
+`/tmp/opencode` to expose the `cleanup_temp` tool:
 
 ```json
 {"paths": ["my-task/output", "my-task/download"]}
@@ -148,7 +148,7 @@ every path before deleting anything. Read-only agents and descendant-specific
 denials remain effective; approval displays a deletion manifest without file
 contents. To avoid prompting for this root, configure
 an OpenCode `permission.edit` allowance for
-`/tmp/agent-temporary-workspace/**`. Use the same spelling as `cleanupRoot`;
+`/tmp/opencode/**`. Use the same spelling as `cleanupRoot`;
 the worker independently resolves macOS aliases such as `/private/tmp`.
 Keep ordinary bash `rm` rules at `ask`; no command-string exemption is needed.
 

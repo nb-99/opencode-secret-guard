@@ -267,7 +267,7 @@ group while `jq . ~/.kube/config` does not.
 A file search cannot safely stay in the same compound command: a path that
 looks harmless may be a parent directory or may be resolved after `cd`, and a
 relaxed search process can then descend into the credential directory. Use two
-shell calls instead: write to `/tmp/agent-temporary-workspace/`, then search the
+shell calls instead: write to `/tmp/opencode/`, then search the
 file separately under the strict profile.
 
 `tee`, `sed`, and `awk` are excluded because they write files or shell out;
