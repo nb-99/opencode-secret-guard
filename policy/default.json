@@ -34,7 +34,6 @@
     "\\.tfstate$",
     "\\.tfstate\\.backup$",
     "\\.tfvars$",
-    "/\\.terraform/",
     "/\\.ssh/",
     "/\\.gnupg/",
     "/\\.aws/",
@@ -45,6 +44,7 @@
   ],
   "secretExceptions": [
     "/\\.env\\.(example|sample|template|dist)$",
+    "/\\.terraform/terraform\\.tfstate$",
     "^/private/etc/ssl/cert\\.pem$",
     "^/nix/store/"
   ],
@@ -67,7 +67,8 @@
     "__pycache__",
     ".gradle",
     ".pytest_cache",
-    ".mypy_cache"
+    ".mypy_cache",
+    ".terraform"
   ],
   "relaxationGroups": {
     "aws": {
