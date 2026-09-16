@@ -352,6 +352,104 @@ export function hasOpaqueConstruct(command: string): boolean {
 // ---------------------------------------------------------------------------
 
 /**
+ * Removes heredoc bodies so the opaque-construct and segment scans see only
+ * commands. Without this, every body line reads as a segment whose leading
+ * word belongs to no group, and a commit subject such as `fix(policy): …`
+ * reads as a subshell — so `git commit -F - <<'EOF'` always ran strict and
+ * failed inside gpg.
+ *
+ * A body behind a quoted delimiter (`<<'EOF'`, `<<"EOF"`, `<<\EOF`) is literal
+ * text on stdin: the same reach as `echo '…' | cmd`, which is already
+ * permitted. Behind an unquoted delimiter zsh expands `$…` and backticks inside
+ * the body, so such a body is accepted only when it contains neither.
+ *
+ * Returns null — strict — when the heredoc cannot be understood: an operand
+ * that is not a plain word, a second heredoc on the same line, a missing
+ * terminator, or an expanding body.
+ */
+export function stripHeredocs(command: string): string | null {
+  let out = "";
+  let quote: string | null = null;
+  let pending: { delimiter: string; literal: boolean; stripTabs: boolean } | null = null;
+
+  for (let i = 0; i < command.length; i++) {
+    const c = command[i]!;
+
+    if (quote) {
+      if (c === "\\" && quote === '"') {
+        out += c + (command[i + 1] ?? "");
+        i++;
+        continue;
+      }
+      if (c === quote) quote = null;
+      out += c;
+      continue;
+    }
+    if (c === "\\") {
+      out += c + (command[i + 1] ?? "");
+      i++;
+      continue;
+    }
+    if (c === "'" || c === '"') {
+      quote = c;
+      out += c;
+      continue;
+    }
+
+    // `<<` or `<<-`, but not the here-string `<<<`, which has no body.
+    if (c === "<" && command[i + 1] === "<") {
+      if (command[i + 2] === "<") {
+        out += "<<<";
+        i += 2;
+        continue;
+      }
+      if (pending) return null;
+      let j = i + 2;
+      let stripTabs = false;
+      if (command[j] === "-") {
+        stripTabs = true;
+        j++;
+      }
+      const word = /^[ \t]*(?:'([^'\n]+)'|"([^"\n]+)"|\\([A-Za-z0-9_.-]+)|([A-Za-z0-9_.-]+))/.exec(
+        command.slice(j),
+      );
+      if (!word) return null;
+      const delimiter = word[1] ?? word[2] ?? word[3] ?? word[4]!;
+      pending = { delimiter, literal: word[4] === undefined, stripTabs };
+      out += command.slice(i, j + word[0].length);
+      i = j + word[0].length - 1;
+      continue;
+    }
+
+    if (c === "\n" && pending) {
+      out += c;
+      let consumed = 0;
+      let terminated = false;
+      for (const line of command.slice(i + 1).split("\n")) {
+        consumed += line.length + 1;
+        const candidate = pending.stripTabs ? line.replace(/^\t+/, "") : line;
+        if (candidate === pending.delimiter) {
+          terminated = true;
+          break;
+        }
+        if (!pending.literal && /[$`]/.test(line)) return null;
+      }
+      if (!terminated) return null;
+      // Lands on the terminator's newline, which the loop increment skips; the
+      // newline already emitted above keeps the next line a separate segment.
+      i += consumed;
+      pending = null;
+      continue;
+    }
+
+    out += c;
+  }
+
+  if (pending) return null;
+  return out;
+}
+
+/**
  * Splits a command on shell control operators, respecting quoting. Returns null
  * when quoting is unbalanced, which callers must treat as "use strict".
  */
@@ -504,9 +602,10 @@ export function isInertFilter(segment: string, binary: string, args: string): bo
  * is denied by the kernel — while `kubectl get pods | cat` does not.
  */
 export function resolveGroup(command: string, config: GuardConfig): string | null {
-  if (hasOpaqueConstruct(command)) return null;
+  const visible = stripHeredocs(command);
+  if (visible === null || hasOpaqueConstruct(visible)) return null;
 
-  const segments = analyzeSegments(command);
+  const segments = analyzeSegments(visible);
   if (!segments || segments.length === 0) return null;
 
   const binaryToGroup = new Map<string, string>();

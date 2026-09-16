@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { hasOpaqueConstruct, leadingBinary, resolveGroup, splitSegments } from "../src/command-policy.ts";
+import { hasOpaqueConstruct, leadingBinary, resolveGroup, splitSegments, stripHeredocs } from "../src/command-policy.ts";
 
 type RelaxationGroup = { binaries: string[]; allowPaths: string[] };
 
@@ -70,6 +70,53 @@ describe("splitSegments", () => {
     expect(splitSegments("git status >& out ~/.ssh/id_ed25519")).toEqual([
       "git status >& out ~/.ssh/id_ed25519",
     ]);
+  });
+});
+
+describe("stripHeredocs", () => {
+  test("removes the body and keeps the following line a separate segment", () => {
+    expect(stripHeredocs("git commit -F - <<'EOF'\nsubject\n\nbody\nEOF\ngit push")).toBe(
+      "git commit -F - <<'EOF'\ngit push",
+    );
+  });
+
+  test("keeps the rest of the operator line", () => {
+    expect(stripHeredocs("git commit -F - <<'EOF' 2>&1 | tail -3\nsubject\nEOF")).toBe(
+      "git commit -F - <<'EOF' 2>&1 | tail -3\n",
+    );
+  });
+
+  test("strips leading tabs from the terminator after <<-", () => {
+    expect(stripHeredocs("git commit -F - <<-EOF\n\tsubject\n\tEOF")).toBe("git commit -F - <<-EOF\n");
+  });
+
+  test.each([
+    ["a double-quoted delimiter", 'git commit -F - <<"EOF"\n$(cat ~/.ssh/id_ed25519)\nEOF'],
+    ["a backslash-quoted delimiter", "git commit -F - <<\\EOF\n`cat ~/.ssh/id_ed25519`\nEOF"],
+  ])("treats the body behind %s as literal", (_label, command) => {
+    expect(stripHeredocs(command)).toBe(command.slice(0, command.indexOf("\n") + 1));
+  });
+
+  test("leaves a here-string alone", () => {
+    expect(stripHeredocs('git commit -F - <<< "subject"')).toBe('git commit -F - <<< "subject"');
+  });
+
+  test("leaves << inside quotes alone", () => {
+    expect(stripHeredocs('git commit -m "a <<EOF b"')).toBe('git commit -m "a <<EOF b"');
+  });
+
+  test.each([
+    ["the body expands a substitution", "git commit -F - <<EOF\n$(cat ~/.ssh/id_ed25519)\nEOF"],
+    ["the body expands a backtick", "git commit -F - <<EOF\n`cat ~/.ssh/id_ed25519`\nEOF"],
+    ["the body expands a variable", "git commit -F - <<EOF\n$HOME\nEOF"],
+    ["a single-quoted substitution still expands in an unquoted body", "git commit -F - <<EOF\n'$(x)'\nEOF"],
+    ["the terminator is missing", "git commit -F - <<'EOF'\nsubject\n"],
+    ["the terminator has trailing text", "git commit -F - <<'EOF'\nsubject\nEOF "],
+    ["the terminator is indented without <<-", "git commit -F - <<'EOF'\nsubject\n\tEOF"],
+    ["the delimiter is not a plain word", "git commit -F - <<$(x)\nsubject\nx"],
+    ["two heredocs share a line", "git commit -F - <<'A' <<'B'\na\nA\nb\nB"],
+  ])("returns null when %s", (_label, command) => {
+    expect(stripHeredocs(command)).toBeNull();
   });
 });
 
@@ -185,6 +232,14 @@ describe("resolveGroup — relaxation applies", () => {
     ['git commit -m "refactor eval handling"', "ssh"],
     ["git push origin source-maps", "ssh"],
     ['git commit -m "line one\n\nline two"', "ssh"],
+    // The body is stdin text, the same reach as `echo … | git`. Parentheses,
+    // substitutions and backticks in it are literal behind a quoted delimiter.
+    ["git commit -F - <<'EOF'\nfix(policy): subject\n\n$(cat ~/.ssh/id_ed25519) `x`\nEOF", "ssh"],
+    ["git commit -F - <<'EOF'\nsubject\nEOF\ngit push", "ssh"],
+    ["git commit -F - <<'EOF' 2>&1 | tail -3\nsubject\nEOF", "ssh"],
+    ["git commit -F - <<EOF\nplain body (no expansion)\nEOF", "ssh"],
+    ["cd /tmp/repo && git commit -F - <<-EOF\n\tsubject\n\tEOF", "ssh"],
+    ['git commit -F - <<< "subject"', "ssh"],
     ["git log --oneline -3 && echo done", "ssh"],
     ["git status || true", "ssh"],
     ["git fetch; printf '%s\\n' finished", "ssh"],
@@ -227,7 +282,11 @@ describe("resolveGroup — falls back to strict", () => {
     ["a redirection makes echo able to write", "echo x > ~/.ssh/config && git status"],
     ["a redirection makes an inert builtin able to write", "cd /tmp > ~/.ssh/config && git status"],
     ["a redirection makes sleep able to write", "sleep 1 > ~/.ssh/config && git status"],
-    ["a heredoc body is scanned as commands", "git commit -F - <<'EOF'\nmessage body\nEOF"],
+    ["an unquoted heredoc body expands a substitution", "git commit -F - <<EOF\n$(cat ~/.ssh/id_ed25519)\nEOF"],
+    ["an unquoted heredoc body expands a backtick", "git commit -F - <<EOF\n`cat ~/.ssh/id_ed25519`\nEOF"],
+    ["a heredoc has no terminator", "git commit -F - <<'EOF'\nsubject\n"],
+    ["a heredoc feeds a reader in the chain", "git status && cat <<'EOF' > ~/.ssh/config\nx\nEOF"],
+    ["a heredoc feeds a non-group binary", "tee ~/.ssh/config <<'EOF'\nx\nEOF"],
     ["a filter is given a path operand", "git log | cat ~/.ssh/id_ed25519"],
     ["a filter is given a relative operand", "git log | tail config"],
     ["a filter flag carries a path", "git log | sort -o/tmp/out"],

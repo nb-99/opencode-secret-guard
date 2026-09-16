@@ -273,13 +273,18 @@ file separately under the strict profile.
 `tee`, `sed`, and `awk` are excluded because they write files or shell out;
 `less` because `LESSOPEN` lets it run a preprocessor.
 
-Falling back to strict is always safe but not always obvious. A **heredoc** does
-it too: the segment scanner splits on newlines, so the body reads as a list of
-commands that belong to no group. Write the payload to a file first — which is
-also what the file tools are for — rather than piping a heredoc into a command
-that needs a credential. A long commit message needs no such workaround:
-newlines inside quotes are not boundaries, so `git commit -m "…"` spanning many
-lines keeps its group.
+Falling back to strict is always safe but not always obvious. A **heredoc** used
+to do it: the segment scanner splits on newlines, so the body read as a list of
+commands that belong to no group, and a subject such as `fix(policy): …` read
+as a subshell. Bodies are now stripped before either scan. Behind a quoted
+delimiter (`<<'EOF'`) the body is literal stdin text — the same reach as
+`echo '…' | git`, which was already allowed. Behind an unquoted delimiter zsh
+expands `$…` and backticks inside the body even when they sit in single quotes
+(verified against `/bin/zsh`), so such a body keeps its group only when it
+contains neither character. A missing terminator, a terminator with trailing
+text, or two heredocs on one line still run strict. A long commit message never
+needed a heredoc anyway: newlines inside quotes are not boundaries, so
+`git commit -m "…"` spanning many lines keeps its group.
 
 Redirection operators are **not** segment boundaries even though they contain
 `&`: `2>&1`, `>&2`, and `&>file` stay inside their segment. Splitting there used
