@@ -537,6 +537,20 @@ else
   printf '  FAIL  shell applies credential relaxation -- %s\n' "$shell_output"
 fi
 
+# The same binary, invoked in a shape the policy lists as printing a
+# credential, must not run at all — the fake kubectl would happily cat the
+# kubeconfig under its own group.
+refused_output="$(cd "$fixture" && HOME="$fakehome" PATH="$fakebin:$PATH" \
+  "$GUARD_SHELL" -c 'kubectl config view --raw' 2>&1)"
+refused_status=$?
+if [[ "$refused_status" -ne 0 && "$refused_output" != *"$SECRET"* && "$refused_output" == *"refusing to run"* ]]; then
+  pass=$((pass + 1))
+  printf '  ok    shell refuses a credential-printing invocation\n'
+else
+  fail=$((fail + 1)); failures+=("SHELL RAN PRINTER: status $refused_status -- $refused_output")
+  printf '  FAIL  shell refuses a credential-printing invocation -- %s\n' "$refused_output"
+fi
+
 for tool in "rg" "grep" "jq"; do
   case "$tool" in
     rg)   command='kubectl | rg S3CRET-LEAK-CANARY' ;;

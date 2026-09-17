@@ -1,8 +1,9 @@
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
+import { findSecretPrinting } from "./command-policy.ts";
 import type { GuardConfig } from "./policy.ts";
 import { FILE_PATH_ARGS, FILE_TOOLS, WRITE_TOOLS, classifyPath, filterSearchOutput } from "./predicate.ts";
-import { validatePlatform, validateShell } from "./shell.ts";
+import { refusalMessage, validatePlatform, validateShell } from "./shell.ts";
 import { createCleanupTool } from "./cleanup.ts";
 
 /** This module's own directory: <package>/lib when installed. */
@@ -40,6 +41,14 @@ export function createHooks(guardConfig: GuardConfig, moduleDirectory = MODULE_D
       const args = output?.args;
       if (!args || typeof args !== "object") return;
       const record = args as Record<string, unknown>;
+
+      // The configured shell refuses these too; rejecting here as well gives a
+      // clear error before anything runs, and covers files-only mode.
+      if ((tool === "bash" || tool === "shell") && typeof record.command === "string") {
+        const refusal = findSecretPrinting(record.command, guardConfig.secretPrintingCommands);
+        if (refusal) throw new Error(`secret-guard: ${refusalMessage(refusal)}`);
+        return;
+      }
 
       if (!FILE_TOOLS.has(tool)) return;
       if ((tool === "glob" || tool === "grep") && typeof input.callID === "string") {

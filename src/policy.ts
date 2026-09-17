@@ -33,6 +33,17 @@ export interface GuardTools {
   git: string;
 }
 
+/**
+ * An invocation whose purpose is to print a credential. `binary` is matched
+ * against the segment's program name; every `args` entry is a regex that some
+ * shell word of the segment must match in full. An empty `args` matches any
+ * invocation of the binary.
+ */
+export interface SecretPrintingCommand {
+  binary: string;
+  args: string[];
+}
+
 export interface GuardConfig {
   configVersion: number;
   mode: GuardMode;
@@ -42,6 +53,7 @@ export interface GuardConfig {
   secretExceptions: string[];
   artifactAllowlist: string[];
   relaxationGroups: Record<string, RelaxationGroup>;
+  secretPrintingCommands: SecretPrintingCommand[];
   denyRoots: string[];
   exemptRoots: string[];
   secretEnvironment: string[];
@@ -193,6 +205,22 @@ export function requireTools(value: unknown, source: string): GuardTools {
   return { git };
 }
 
+export function requireSecretPrintingCommands(value: unknown, source: string): SecretPrintingCommand[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) throw configError(source, '"secretPrintingCommands" must be an array');
+  return value.map((entry, index) => {
+    const key = `secretPrintingCommands[${index}]`;
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      throw configError(source, `${key} must be an object`);
+    }
+    const record = entry as Record<string, unknown>;
+    if (typeof record.binary !== "string" || !record.binary || record.binary.includes("/")) {
+      throw configError(source, `${key}.binary must be a program name without a slash`);
+    }
+    return { binary: record.binary, args: requireRegexArray(record.args, `${key}.args`, source) };
+  });
+}
+
 /**
  * Environment names are passed to the shell wrapper one per line, so a name
  * carrying a newline would let a policy inject an argument into the scrub list.
@@ -270,6 +298,7 @@ export function validateConfig(raw: unknown, source: string, home: string): Guar
     secretExceptions: requireRegexArray(record.secretExceptions, "secretExceptions", source),
     artifactAllowlist: requireStringArray(record.artifactAllowlist, "artifactAllowlist", source),
     relaxationGroups: requireRelaxationGroups(record.relaxationGroups, source),
+    secretPrintingCommands: requireSecretPrintingCommands(record.secretPrintingCommands, source),
     denyRoots: requireRoots(record.denyRoots, "denyRoots", source, home),
     exemptRoots: requireRoots(record.exemptRoots, "exemptRoots", source, home),
     secretEnvironment: requireEnvironmentNames(

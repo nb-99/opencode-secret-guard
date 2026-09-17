@@ -529,6 +529,21 @@ describe("shell resolver protocol", () => {
     expect(resolveForShell("cat README.md", quiet()).split("\n")[1]).toBe("");
   });
 
+  test("refuses to plan a credential-printing command at all", () => {
+    // No profile would make `gh auth token` safe: its output is the secret.
+    expect(() => resolveForShell("gh auth token", quiet())).toThrow(/refusing to run `gh auth token`/);
+    expect(() => resolveForShell("echo $(aws eks get-token)", quiet())).toThrow(/aws eks get-token/);
+  });
+
+  test("the shipped default refuses the usual token printers and nothing routine", () => {
+    for (const command of ["gh auth token", "aws eks get-token", "kubectl config view --raw", "kubectl get secret x -o yaml", "security find-generic-password -w -s x"]) {
+      expect(() => resolveForShell(command, quiet())).toThrow(/refusing/);
+    }
+    for (const command of ["gh pr list", "aws sts get-caller-identity", "kubectl config view", "kubectl get secrets", "git status"]) {
+      expect(() => resolveForShell(command, quiet())).not.toThrow();
+    }
+  });
+
   test("the wrapper's expected location is a sibling of this module", () => {
     expect(expectedShell("/opt/secret-guard/lib")).toBe(
       "/opt/secret-guard/bin/opencode-secret-guard",
@@ -749,6 +764,25 @@ describe("plugin hooks", () => {
     await hooks["tool.execute.before"]({ tool: "bash" }, { args });
 
     expect(args.command).toBe("cat .env");
+  });
+
+  test("reject a credential-printing command before it runs", async () => {
+    const hooks = createHooks(config);
+
+    await expect(
+      hooks["tool.execute.before"]({ tool: "bash" }, { args: { command: "gh pr list && gh auth token" } }),
+    ).rejects.toThrow(/refusing to run `gh auth token`/);
+    await expect(
+      hooks["tool.execute.before"]({ tool: "bash" }, { args: { command: "gh pr list" } }),
+    ).resolves.toBeUndefined();
+  });
+
+  test("reject it in files-only mode too, where no shell wrapper backs the plugin", async () => {
+    const hooks = createHooks({ ...config, mode: "files-only" }, path.join(repo, "package", "lib"));
+
+    await expect(
+      hooks["tool.execute.before"]({ tool: "bash" }, { args: { command: "aws eks get-token" } }),
+    ).rejects.toThrow(/refusing/);
   });
 
   test("rejects a shell that is not this package's wrapper", async () => {

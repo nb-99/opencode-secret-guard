@@ -1,4 +1,4 @@
-import type { GuardConfig } from "./policy.ts";
+import type { GuardConfig, SecretPrintingCommand } from "./policy.ts";
 
 /** Command wrappers that are transparent for the purpose of picking a group. */
 export const UNWRAP_PREFIXES = new Set(["rtk", "command", "builtin", "nohup", "time"]);
@@ -714,6 +714,11 @@ export interface CommandAnalysis {
   reason: string | null;
   /** Groups whose binaries appear in the command. */
   candidates: string[];
+  /**
+   * A credential-printing invocation the policy lists, or null. Set, the
+   * command must not run at all: its output would be the secret.
+   */
+  refusal: string | null;
 }
 
 /**
@@ -724,6 +729,7 @@ export interface CommandAnalysis {
  * retrying blindly.
  */
 export function analyzeCommand(command: string, config: GuardConfig): CommandAnalysis {
+  const refusal = findSecretPrinting(command, config.secretPrintingCommands ?? []);
   const binaryToGroup = new Map<string, string>();
   for (const [name, group] of Object.entries(config.relaxationGroups)) {
     for (const binary of group.binaries) binaryToGroup.set(binary, name);
@@ -733,6 +739,7 @@ export function analyzeCommand(command: string, config: GuardConfig): CommandAna
     group: null,
     reason: candidates.size > 0 ? reason : null,
     candidates: [...candidates].sort(),
+    refusal,
   });
   // Candidates are collected from the raw segments first, so a reason can be
   // given even when the command is rejected before the per-segment scan.
@@ -776,10 +783,128 @@ export function analyzeCommand(command: string, config: GuardConfig): CommandAna
     }
     resolved = group;
   }
-  return { group: resolved, reason: null, candidates: [...candidates].sort() };
+  return { group: resolved, reason: null, candidates: [...candidates].sort(), refusal };
 }
 
 // ---------------------------------------------------------------------------
-// Profile construction
+// Credential-printing invocations
 // ---------------------------------------------------------------------------
+
+/**
+ * Programs that run their remaining words as a command. Unwrapped when looking
+ * for a credential-printing invocation, so `sudo aws eks get-token`,
+ * `env -u X gh auth token` and `xargs -n1 gh auth token` are all seen. This
+ * list is deliberately wider than `UNWRAP_PREFIXES`: over-matching here only
+ * refuses more, while over-unwrapping there would grant more.
+ */
+export const REFUSAL_WRAPPERS = new Set([
+  "builtin", "caffeinate", "command", "doas", "env", "exec", "nice", "nohup",
+  "rtk", "stdbuf", "sudo", "time", "timeout", "xargs",
+]);
+
+/** Shells whose `-c` operand, and `eval`, whose words, are a nested command. */
+const REFUSAL_SHELLS = new Set(["sh", "bash", "zsh", "dash", "ksh", "fish"]);
+
+/**
+ * Splits far more eagerly than `analyzeSegments`: parentheses and backticks
+ * are boundaries too, so `echo $(gh auth token)` yields a `gh auth token`
+ * piece. Quoting is still respected, which keeps `sh -c '…'` operands whole
+ * for the recursion below. Unbalanced quoting yields the pieces seen so far.
+ */
+export function refusalPieces(command: string): string[] {
+  const pieces: string[] = [];
+  let current = "";
+  let quote: string | null = null;
+  const flush = () => {
+    if (current.trim()) pieces.push(current.trim());
+    current = "";
+  };
+  for (let i = 0; i < command.length; i++) {
+    const c = command[i]!;
+    if (quote) {
+      if (c === "\\" && quote === '"') {
+        current += c + (command[i + 1] ?? "");
+        i++;
+      } else {
+        if (c === quote) quote = null;
+        current += c;
+      }
+      continue;
+    }
+    if (c === "\\") {
+      current += c + (command[i + 1] ?? "");
+      i++;
+    } else if (c === "'" || c === '"') {
+      quote = c;
+      current += c;
+    } else if (/[;&|\n()`{}]/.test(c)) {
+      flush();
+    } else {
+      current += c;
+    }
+  }
+  flush();
+  return pieces;
+}
+
+function matchesPrintingCommand(words: string[], rule: SecretPrintingCommand): boolean {
+  const [binary, ...rest] = words;
+  if (!binary || binary.split("/").pop() !== rule.binary) return false;
+  return rule.args.every((pattern) => {
+    const regex = new RegExp(`^(?:${pattern})$`);
+    return rest.some((word) => regex.test(word));
+  });
+}
+
+/**
+ * The first credential-printing invocation in the command, as `binary args…`,
+ * or null. Words are unwrapped through `REFUSAL_WRAPPERS` (skipping their
+ * flags, numbers and assignments), and a shell's `-c` operand or `eval`'s
+ * words are scanned again as a command, four levels deep.
+ */
+export function findSecretPrinting(command: string, rules: SecretPrintingCommand[], depth = 0): string | null {
+  if (rules.length === 0 || depth > 4) return null;
+  for (const piece of refusalPieces(command)) {
+    let words = shellWords(piece) ?? piece.split(/\s+/);
+    for (let guard = 0; guard < 8 && words.length > 0; guard++) {
+      const head = words[0]!.split("/").pop()!;
+      if (REFUSAL_WRAPPERS.has(head)) {
+        words = words.slice(1);
+        for (;;) {
+          const word = words[0];
+          if (word === undefined) break;
+          // A wrapper option that consumes the next word: `env -u NAME`,
+          // `sudo -u user`, `timeout -s KILL`, `xargs -n 1`, `nice -n 5`.
+          if (/^-(u|C|S|s|k|n|I|L|P|E|g|h|p|r)$/.test(word) && head !== "rtk") {
+            words = words.slice(2);
+            continue;
+          }
+          if (/^(-|\d|[A-Za-z_][A-Za-z0-9_]*=)/.test(word)) {
+            words = words.slice(1);
+            continue;
+          }
+          break;
+        }
+        continue;
+      }
+      if (REFUSAL_SHELLS.has(head)) {
+        const flag = words.findIndex((word, index) => index > 0 && /^-[a-zA-Z]*c[a-zA-Z]*$/.test(word));
+        const nested = flag >= 0 ? words[flag + 1] : undefined;
+        const found = nested ? findSecretPrinting(nested, rules, depth + 1) : null;
+        if (found) return found;
+        break;
+      }
+      if (head === "eval") {
+        const found = findSecretPrinting(words.slice(1).join(" "), rules, depth + 1);
+        if (found) return found;
+        break;
+      }
+      for (const rule of rules) {
+        if (matchesPrintingCommand(words, rule)) return words.join(" ");
+      }
+      break;
+    }
+  }
+  return null;
+}
 
