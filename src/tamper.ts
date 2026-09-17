@@ -3,7 +3,7 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { isInside, realpath } from "./paths.ts";
 import type { GuardConfig } from "./policy.ts";
-import { configPath, opencodeCacheDirectory, opencodeConfigDirectory } from "./policy.ts";
+import { configPath, opencodeCacheDirectory, opencodeConfigDirectory, opencodeDataDirectory } from "./policy.ts";
 
 /**
  * Paths that must survive any command unchanged, because changing them
@@ -71,6 +71,7 @@ export function tamperTargets(options: {
   const subpaths = new Set<string>([
     ...CODE_DIRECTORIES.map((name) => path.join(configDirectory, name)),
     realpath(opencodeCacheDirectory()),
+    realpath(path.join(opencodeDataDirectory(), "bin")),
     realpath(options.packageDirectory ?? PACKAGE_DIRECTORY),
     ...writablePathDirectories(options.pathEnvironment, options.repoRoot),
   ]);

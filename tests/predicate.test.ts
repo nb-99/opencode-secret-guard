@@ -9,7 +9,7 @@ import { configPath, loadConfig } from "../src/policy.ts";
 import type { GuardConfig } from "../src/policy.ts";
 import { classifyPath, classifyPaths, filterSearchOutput } from "../src/predicate.ts";
 import { buildProfile } from "../src/profile.ts";
-import { expectedShell, resolveForShell, resolveProfile } from "../src/shell.ts";
+import { expectedShell, resolveForShell, resolveProfile, scrubbedEnvironment } from "../src/shell.ts";
 
 const policyPath = process.env.OPENCODE_SECRET_GUARD_CONFIG;
 if (!policyPath) {
@@ -499,6 +499,7 @@ describe("shell resolver protocol", () => {
     const payload: string = resolveForShell("echo hi", {
       ...config,
       secretEnvironment: ["CONTEXT7_API_KEY", "HOMEASSISTANT_TOKEN"],
+      secretEnvironmentPatterns: [],
     });
     const lines = payload.split("\n");
 
@@ -508,7 +509,11 @@ describe("shell resolver protocol", () => {
   });
 
   test("emits the profile path alone when nothing needs scrubbing", () => {
-    const payload: string = resolveForShell("echo hi", { ...config, secretEnvironment: [] });
+    const payload: string = resolveForShell("echo hi", {
+      ...config,
+      secretEnvironment: [],
+      secretEnvironmentPatterns: [],
+    });
 
     expect(payload.split("\n")).toHaveLength(1);
   });
@@ -517,6 +522,58 @@ describe("shell resolver protocol", () => {
     expect(expectedShell("/opt/secret-guard/lib")).toBe(
       "/opt/secret-guard/bin/opencode-secret-guard",
     );
+  });
+});
+
+describe("scrubbedEnvironment", () => {
+  const environment = {
+    PATH: "/usr/bin",
+    SSH_AUTH_SOCK: "/tmp/agent.sock",
+    GITHUB_TOKEN: "t",
+    AWS_SECRET_ACCESS_KEY: "k",
+    AWS_ACCESS_KEY_ID: "i",
+    ZPLUG_SUDO_PASSWORD: "p",
+    MY_API_KEY: "a",
+    TOKENIZER: "not a token",
+    EXPLICIT: "named in the policy",
+  };
+  const withDefaults = () => ({ ...config, secretEnvironment: ["EXPLICIT"] });
+
+  test("names every inherited variable matching a pattern plus the explicit list", () => {
+    expect(scrubbedEnvironment(withDefaults(), null, environment)).toEqual([
+      "AWS_ACCESS_KEY_ID",
+      "AWS_SECRET_ACCESS_KEY",
+      "EXPLICIT",
+      "GITHUB_TOKEN",
+      "MY_API_KEY",
+      "ZPLUG_SUDO_PASSWORD",
+    ]);
+  });
+
+  test("leaves paths and near-misses alone", () => {
+    const scrubbed = scrubbedEnvironment(withDefaults(), null, environment);
+    // An agent socket path is not a secret, and losing it breaks every git push.
+    expect(scrubbed).not.toContain("SSH_AUTH_SOCK");
+    expect(scrubbed).not.toContain("TOKENIZER");
+    expect(scrubbed).not.toContain("PATH");
+  });
+
+  test("a group keeps what its binaries need and nothing else", () => {
+    const aws = scrubbedEnvironment(withDefaults(), "aws", environment);
+    expect(aws).not.toContain("AWS_SECRET_ACCESS_KEY");
+    expect(aws).not.toContain("AWS_ACCESS_KEY_ID");
+    expect(aws).toContain("GITHUB_TOKEN");
+
+    const ssh = scrubbedEnvironment(withDefaults(), "ssh", environment);
+    expect(ssh).not.toContain("GITHUB_TOKEN");
+    expect(ssh).toContain("AWS_SECRET_ACCESS_KEY");
+  });
+
+  test("the explicit list is scrubbed even where a group would keep it", () => {
+    const named = { ...config, secretEnvironment: ["GITHUB_TOKEN"], secretEnvironmentPatterns: [] };
+    // allowEnvironment only re-admits pattern hits: an explicitly named
+    // variable is the user saying "never", and the group must not override it.
+    expect(scrubbedEnvironment(named, "ssh", environment)).toEqual(["GITHUB_TOKEN"]);
   });
 });
 

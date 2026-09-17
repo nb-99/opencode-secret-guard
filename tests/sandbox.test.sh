@@ -59,7 +59,7 @@ mkdir -p "$fixture"/{secrets,node_modules/pkg,dist,build,private-notes/nested,do
 # The vault lives outside the repo, as it does in production.
 vault="$scratch/vault"
 mkdir -p "$vault"/{memory,private}
-mkdir -p "$fakehome"/{.ssh,.gnupg,.kube,.aws,.config/gcloud}
+mkdir -p "$fakehome"/{.ssh,.gnupg,.kube,.aws,.config/gcloud,.config/gh,.config/github-copilot,.local/share/opencode,.terraform.d}
 fakebin="$scratch/bin"
 mkdir -p "$fakebin"
 
@@ -92,11 +92,19 @@ printf '%s\n' "$SECRET" > "$fakehome/.gnupg/private-keys-v1.d"
 printf '%s\n' "$SECRET" > "$fakehome/.kube/config"
 printf '%s\n' "$SECRET" > "$fakehome/.aws/credentials"
 printf '%s\n' "$SECRET" > "$fakehome/.config/gcloud/credentials.db"
+printf '%s\n' "$SECRET" > "$fakehome/.config/gh/hosts.yml"
+printf '%s\n' "$PUBLIC" > "$fakehome/.config/gh/config.yml"
+printf '%s\n' "$SECRET" > "$fakehome/.config/github-copilot/apps.json"
+printf '%s\n' "$SECRET" > "$fakehome/.local/share/opencode/auth.json"
+printf '%s\n' "$PUBLIC" > "$fakehome/.local/share/opencode/opencode.db"
+printf '%s\n' "$SECRET" > "$fakehome/.terraform.d/credentials.tfrc.json"
 
 cat > "$fakebin/kubectl" <<EOF
 #!/bin/sh
 printf '%s\n' '$PUBLIC' >&2
-if [ "\$#" -gt 0 ] && [ -f "\$1" ]; then
+if [ "\$1" = env ]; then
+  printenv KUBE_CANARY_TOKEN OTHER_CANARY_TOKEN
+elif [ "\$#" -gt 0 ] && [ -f "\$1" ]; then
   cat "\$1"
 else
   cat "\$HOME/.kube/config"
@@ -309,6 +317,10 @@ expect_denied "gitignored file"             'cat local.conf'
 expect_denied "home ssh key"                'cat "$HOME/.ssh/id_ed25519"'
 expect_denied "home kubeconfig"             'cat "$HOME/.kube/config"'
 expect_denied "home aws credentials"        'cat "$HOME/.aws/credentials"'
+expect_denied "gh host token"               'cat "$HOME/.config/gh/hosts.yml"'
+expect_denied "copilot app token"           'cat "$HOME/.config/github-copilot/apps.json"'
+expect_denied "opencode provider tokens"    'cat "$HOME/.local/share/opencode/auth.json"'
+expect_denied "terraform cloud token"       'cat "$HOME/.terraform.d/credentials.tfrc.json"'
 
 echo "== writes to secrets must be denied =="
 expect_denied "overwrite .env then read"    'echo "'"$PUBLIC"'" > .env 2>/dev/null; cat .env 2>/dev/null'
@@ -333,6 +345,8 @@ expect_allowed "filename containing secret" 'cat docs/secret-rotation.md'
 expect_allowed "git works"                  'git status >/dev/null && cat README.md'
 expect_quiet   "git status produces no errors" 'git status --short'
 expect_allowed "writing a normal file"      'echo "'"$PUBLIC"'" > scratch.txt && cat scratch.txt'
+expect_allowed "gh config without tokens"   'cat "$HOME/.config/gh/config.yml"'
+expect_allowed "opencode session database"  'cat "$HOME/.local/share/opencode/opencode.db"'
 expect_allowed "exempt root read"           'cat "'"$vault"'/memory/index.md"'
 expect_allowed "exempt root overrides deny" 'cat "'"$vault"'/memory/.env"'
 expect_allowed "exempt root write"          'echo "'"$PUBLIC"'" > "'"$vault"'/memory/new.md" && cat "'"$vault"'/memory/new.md"'
@@ -348,6 +362,9 @@ expect_readable "kube profile reads kubeconfig"  'cat "$HOME/.kube/config"'     
 expect_readable "ssh profile reads private key"  'cat "$HOME/.ssh/id_ed25519"'   "$scratch/ssh.sb"
 expect_readable "ssh profile reads signing key"  'cat "$HOME/.gnupg/private-keys-v1.d"' "$scratch/ssh.sb"
 expect_readable "aws profile reads credentials"  'cat "$HOME/.aws/credentials"'  "$scratch/aws.sb"
+expect_readable "aws profile reads terraform cloud token" 'cat "$HOME/.terraform.d/credentials.tfrc.json"' "$scratch/aws.sb"
+expect_readable "ssh profile reads gh host token" 'cat "$HOME/.config/gh/hosts.yml"' "$scratch/ssh.sb"
+expect_denied   "ssh profile still hides copilot" 'cat "$HOME/.config/github-copilot/apps.json"' "$scratch/ssh.sb"
 expect_denied   "kube profile still hides .env"  'cat .env'                      "$scratch/kube.sb"
 expect_denied   "kube profile still hides aws"   'cat "$HOME/.aws/credentials"'  "$scratch/kube.sb"
 expect_denied   "ssh profile still hides kube"   'cat "$HOME/.kube/config"'      "$scratch/ssh.sb"
@@ -401,7 +418,7 @@ rm -f "$fakebin/git"
 tamper_config="$scratch/tamper-policy.json"
 cp "$CONFIG" "$tamper_config"
 (cd "$fixture" && OPENCODE_SECRET_GUARD_CONFIG="$tamper_config" HOME="$fakehome" PATH="$fakebin:$PATH" \
-  "$GUARD_SHELL" -c 'printf TAMPER >> "$OPENCODE_SECRET_GUARD_CONFIG"' >/dev/null 2>&1)
+  "$GUARD_SHELL" -c 'printf TAMPER >> "'"$tamper_config"'"' >/dev/null 2>&1)
 if [[ "$(cat "$tamper_config")" != *TAMPER* ]]; then
   pass=$((pass + 1))
   printf '  ok    policy file\n'
@@ -559,6 +576,8 @@ SG_SRC="$CONFIG" SG_DEST="$scrub_config" bun -e '
   const fs = require("node:fs");
   const policy = JSON.parse(fs.readFileSync(process.env.SG_SRC, "utf8"));
   policy.secretEnvironment = ["SG_SCRUBBED_ENV"];
+  policy.secretEnvironmentPatterns = ["_CANARY_TOKEN$"];
+  policy.relaxationGroups.kube.allowEnvironment = ["^KUBE_"];
   fs.writeFileSync(process.env.SG_DEST, JSON.stringify(policy));
 ' || { echo "FATAL: could not derive the scrub policy" >&2; exit 1; }
 
@@ -572,6 +591,30 @@ if [[ "$shell_env_output" == "$PUBLIC" ]]; then
 else
   fail=$((fail + 1)); failures+=("SHELL ENV LEAKED: $shell_env_output")
   printf '  FAIL  shell scrubs inherited secret environment\n'
+fi
+
+# Pattern-derived scrubbing: a name nobody listed, matched by shape, is gone
+# under the strict profile and kept for the group whose binaries need it.
+shell_pattern_output="$(cd "$fixture" && OPENCODE_SECRET_GUARD_CONFIG="$scrub_config" \
+  KUBE_CANARY_TOKEN="$SECRET" OTHER_CANARY_TOKEN="$SECRET" SG_CANARY_ENV="$PUBLIC" \
+  HOME="$fakehome" PATH="$fakebin:$PATH" "$GUARD_SHELL" -c \
+  'printenv KUBE_CANARY_TOKEN; printenv OTHER_CANARY_TOKEN; printenv SG_CANARY_ENV' 2>&1)"
+if [[ "$shell_pattern_output" == "$PUBLIC" ]]; then
+  pass=$((pass + 1))
+  printf '  ok    shell scrubs environment by pattern under the strict profile\n'
+else
+  fail=$((fail + 1)); failures+=("SHELL PATTERN ENV LEAKED: $shell_pattern_output")
+  printf '  FAIL  shell scrubs environment by pattern under the strict profile -- %s\n' "$shell_pattern_output"
+fi
+shell_group_env_output="$(cd "$fixture" && OPENCODE_SECRET_GUARD_CONFIG="$scrub_config" \
+  KUBE_CANARY_TOKEN="KEPT-FOR-GROUP" OTHER_CANARY_TOKEN="$SECRET" \
+  HOME="$fakehome" PATH="$fakebin:$PATH" "$GUARD_SHELL" -c 'kubectl env' 2>&1)"
+if [[ "$shell_group_env_output" == *"KEPT-FOR-GROUP"* && "$shell_group_env_output" != *"$SECRET"* ]]; then
+  pass=$((pass + 1))
+  printf '  ok    a group keeps the variables its binaries need\n'
+else
+  fail=$((fail + 1)); failures+=("SHELL GROUP ENV: $shell_group_env_output")
+  printf '  FAIL  a group keeps the variables its binaries need -- %s\n' "$shell_group_env_output"
 fi
 
 "$GUARD_SHELL" -c true extra >/dev/null 2>&1
