@@ -109,6 +109,61 @@ in
     touch $out
   '';
 
+  # The Home Manager module's `extra*` options are merged by nix/merge-policy.nix.
+  # Evaluate a representative set of additions and run the result through the
+  # validator, so a merge that produces an unloadable policy fails here rather
+  # than at a user's next `home-manager switch`.
+  merge =
+    let
+      mergePolicy = import ./merge-policy.nix { inherit (pkgs) lib; };
+      merged = mergePolicy {
+        defaultPolicy = builtins.fromJSON (builtins.readFile ../policy/default.json);
+        mode = "shell+files";
+        gitPath = "${pkgs.git}/bin/git";
+        extraSecretPatterns = [ "/api-specs/private/" ];
+        extraSecretExceptions = [ "/obfuscator\\.go$" ];
+        extraArtifactAllowlist = [ ".zig-cache" ];
+        extraSecretPrintingCommands = [
+          {
+            binary = "pass";
+            args = [ "show" ];
+          }
+        ];
+        extraRelaxationGroups = {
+          oci.binaries = [ "ko" ];
+          vault = {
+            binaries = [ "vault" ];
+            allowPaths = [ ".vault-token" ];
+          };
+        };
+        settings.denyRoots = [
+          "~/.config/secrets"
+          "~/vault"
+        ];
+      };
+      mergedFile = pkgs.writeText "merged-policy.json" (builtins.toJSON merged);
+    in
+    pkgs.runCommand "secret-guard-merge-policy" { nativeBuildInputs = [ pkgs.bun ]; } ''
+      cp -r ${../src} src
+      bun -e '
+        const { loadConfig } = await import("./src/policy.ts");
+        const config = loadConfig("${mergedFile}", "/home/example");
+        const assert = (ok, message) => { if (!ok) throw new Error(message); };
+        assert(config.tools.git === "${pkgs.git}/bin/git", "gitPath not applied");
+        assert(config.secretPatterns.includes("/\\.env$"), "default patterns lost");
+        assert(config.secretPatterns.at(-1) === "/api-specs/private/", "extra pattern not appended");
+        assert(config.secretExceptions.at(-1) === "/obfuscator\\.go$", "extra exception not appended");
+        assert(config.artifactAllowlist.at(-1) === ".zig-cache", "extra artefact not appended");
+        assert(config.secretPrintingCommands.at(-1).binary === "pass", "extra printing command not appended");
+        assert(config.relaxationGroups.oci.binaries.includes("docker"), "default oci binaries lost");
+        assert(config.relaxationGroups.oci.binaries.includes("ko"), "oci addition not merged");
+        assert(config.relaxationGroups.vault.binaries[0] === "vault", "new group not created");
+        assert(config.relaxationGroups.vault.allowEnvironment.length === 0, "new group missing defaults");
+        assert(config.denyRoots.length === 2 && config.denyRoots[1] === "/home/example/vault", "settings override not applied");
+      '
+      touch $out
+    '';
+
   # The kernel suite cannot run in a Nix build, so a helper it resolves through
   # REPO_ROOT can go missing and only fail on a developer's machine — which is
   # exactly what happened when the tests moved out of tests/secret-guard/.

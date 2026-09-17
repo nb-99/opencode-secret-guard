@@ -20,16 +20,26 @@ let
 
   defaultPolicy = builtins.fromJSON (builtins.readFile ../policy/default.json);
 
+  # Additions merge into the shipped default before `settings` is applied, so a
+  # consumer carries only its deltas and still receives upstream policy fixes.
+  # `settings` remains a whole-key override for anything else.
+  mergePolicy = import ./merge-policy.nix { inherit lib; };
+
   policy = pkgs.writeText "opencode-secret-guard-policy.json" (
-    builtins.toJSON (
-      defaultPolicy
-      // {
-        inherit (cfg) mode;
-        # A store path, so the guard never resolves git through PATH.
-        tools.git = "${cfg.gitPackage}/bin/git";
-      }
-      // cfg.settings
-    )
+    builtins.toJSON (mergePolicy {
+      inherit defaultPolicy;
+      inherit (cfg)
+        mode
+        extraSecretPatterns
+        extraSecretExceptions
+        extraArtifactAllowlist
+        extraSecretPrintingCommands
+        extraRelaxationGroups
+        settings
+        ;
+      # A store path, so the guard never resolves git through PATH.
+      gitPath = "${cfg.gitPackage}/bin/git";
+    })
   );
 in
 {
@@ -77,8 +87,88 @@ in
         }
       '';
       description = ''
-        Policy overrides merged over the shipped default. Roots may start with
-        `~`, which the plugin expands at runtime.
+        Policy keys that replace the shipped default wholesale. Roots may start
+        with `~`, which the plugin expands at runtime. Prefer the `extra*`
+        options for additions, so upstream changes to the default still apply.
+      '';
+    };
+
+    extraSecretPatterns = mkOption {
+      type = types.listOf types.str;
+      default = [ ];
+      example = [ "/api-specs/private/" ];
+      description = "Regexes appended to the default `secretPatterns`.";
+    };
+
+    extraSecretExceptions = mkOption {
+      type = types.listOf types.str;
+      default = [ ];
+      example = [ "/pkg/store/secrets/obfuscator\\.go$" ];
+      description = "Regexes appended to the default `secretExceptions`.";
+    };
+
+    extraArtifactAllowlist = mkOption {
+      type = types.listOf types.str;
+      default = [ ];
+      example = [ ".zig-cache" ];
+      description = "Path components appended to the default `artifactAllowlist`.";
+    };
+
+    extraSecretPrintingCommands = mkOption {
+      type = types.listOf (
+        types.submodule {
+          options = {
+            binary = mkOption {
+              type = types.str;
+              description = "Program name, without a path.";
+            };
+            args = mkOption {
+              type = types.listOf types.str;
+              default = [ ];
+              description = "Regexes each matched in full against some word of the invocation.";
+            };
+          };
+        }
+      );
+      default = [ ];
+      example = literalExpression ''
+        [ { binary = "pass"; args = [ "show" ]; } ]
+      '';
+      description = "Invocations appended to the default `secretPrintingCommands`.";
+    };
+
+    extraRelaxationGroups = mkOption {
+      type = types.attrsOf (
+        types.submodule {
+          options = {
+            binaries = mkOption {
+              type = types.listOf types.str;
+              default = [ ];
+              description = "Binaries added to the group.";
+            };
+            allowPaths = mkOption {
+              type = types.listOf types.str;
+              default = [ ];
+              description = "`$HOME`-relative paths the group may additionally read.";
+            };
+            allowEnvironment = mkOption {
+              type = types.listOf types.str;
+              default = [ ];
+              description = "Variable-name regexes the group's binaries keep despite the scrub.";
+            };
+          };
+        }
+      );
+      default = { };
+      example = literalExpression ''
+        {
+          oci.binaries = [ "ko" ];
+          vault = { binaries = [ "vault" ]; allowPaths = [ ".vault-token" ]; };
+        }
+      '';
+      description = ''
+        Per-group additions merged into the default `relaxationGroups`. A name
+        that is not a default group defines a new one.
       '';
     };
 
