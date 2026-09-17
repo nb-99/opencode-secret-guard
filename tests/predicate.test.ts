@@ -6,24 +6,10 @@ import * as path from "node:path";
 import { findRepoRoot, gitignoreRules } from "../src/gitignore.ts";
 import { createHooks } from "../src/hooks.ts";
 import { configPath, loadConfig } from "../src/policy.ts";
+import type { GuardConfig } from "../src/policy.ts";
 import { classifyPath, classifyPaths, filterSearchOutput } from "../src/predicate.ts";
 import { buildProfile } from "../src/profile.ts";
 import { expectedShell, resolveForShell, resolveProfile } from "../src/shell.ts";
-
-type GuardConfig = {
-  configVersion: number;
-  mode: "shell+files" | "files-only";
-  cleanupRoot: string | null;
-  secretPatterns: string[];
-  secretExceptions: string[];
-  artifactAllowlist: string[];
-  relaxationGroups: Record<string, { binaries: string[]; allowPaths: string[] }>;
-  denyRoots: string[];
-  exemptRoots: string[];
-  secretEnvironment: string[];
-  cacheTtlMs: number;
-};
-
 
 const policyPath = process.env.OPENCODE_SECRET_GUARD_CONFIG;
 if (!policyPath) {
@@ -31,7 +17,7 @@ if (!policyPath) {
 }
 // Loaded through the validator rather than JSON.parse, so the real policy is
 // checked against the schema on every run.
-const baseConfig = loadConfig(policyPath) as GuardConfig;
+const baseConfig = loadConfig(policyPath);
 
 let repo: string;
 let config: GuardConfig;
@@ -118,8 +104,15 @@ describe("configuration loading", () => {
   });
 
   test("the generated policy validates", () => {
-    expect(baseConfig.configVersion).toBe(2);
+    expect(baseConfig.configVersion).toBe(3);
     expect(baseConfig.secretPatterns.length).toBeGreaterThan(0);
+  });
+
+  test("the policy names the git the guard spawns, and it exists", () => {
+    // The whole point of tools.git is not resolving through PATH; a policy
+    // whose git is missing would make every profile generation fail closed.
+    expect(path.isAbsolute(baseConfig.tools.git)).toBe(true);
+    expect(fs.existsSync(baseConfig.tools.git)).toBe(true);
   });
 
   test("a missing policy names the path it looked at", () => {
@@ -132,13 +125,15 @@ describe("configuration loading", () => {
   });
 
   test.each([
-    ["a newer configVersion", { configVersion: 3 }, /unsupported configVersion 3/],
+    ["a newer configVersion", { configVersion: 4 }, /unsupported configVersion 4/],
     ["a missing configVersion", { configVersion: undefined }, /unsupported configVersion/],
     ["a non-string list entry", { artifactAllowlist: ["dist", 7] }, /must be an array of strings/],
     ["a negative cacheTtlMs", { cacheTtlMs: -1 }, /"cacheTtlMs"/],
     ["a non-numeric cacheTtlMs", { cacheTtlMs: "2000" }, /"cacheTtlMs"/],
     ["a relative deny root", { denyRoots: ["relative/secrets"] }, /absolute path/],
     ["a non-object relaxationGroups", { relaxationGroups: [] }, /must be an object/],
+    ["a relative tools.git", { tools: { git: "git" } }, /"tools.git" must be an absolute path/],
+    ["a non-object tools", { tools: "git" }, /"tools" must be an object/],
     [
       "an environment name carrying a newline",
       { secretEnvironment: ["TOKEN\nEXTRA"] },
@@ -146,8 +141,17 @@ describe("configuration loading", () => {
     ],
     ["an environment name with a shell metacharacter", { secretEnvironment: ["A-B"] }, /invalid variable name/],
     ["an unknown mode", { mode: "files" }, /"mode" must be one of/],
+    ["an uncompilable environment pattern", { secretEnvironmentPatterns: ["("] }, /invalid regular expression/],
   ])("%s is rejected", (name, patch, expected) => {
     expect(() => loadConfig(policy(`${name}.json`, { ...valid(), ...patch }))).toThrow(expected);
+  });
+
+  test("a version-2 policy loads with the fixed git and no environment patterns", () => {
+    const { tools, secretEnvironmentPatterns, ...rest } = valid();
+    const loaded = loadConfig(policy("v2.json", { ...rest, configVersion: 2 }));
+    expect(loaded.tools.git).toBe("/usr/bin/git");
+    expect(loaded.secretEnvironmentPatterns).toEqual([]);
+    expect(loaded.configVersion).toBe(3);
   });
 
   test("an uncompilable secret pattern is rejected", () => {
@@ -387,7 +391,7 @@ describe("path resolution", () => {
 
 describe("gitignoreRules", () => {
   test("collapses ignored directories and skips the artefact allowlist", () => {
-    const rules = gitignoreRules(repo, config.artifactAllowlist);
+    const rules = gitignoreRules(config.tools.git, repo, config.artifactAllowlist);
     // Compare repo-relative paths: the absolute prefix may itself contain a
     // name such as "build" (nix builds under /nix/var/nix/builds).
     const relative = [...rules.subpaths, ...rules.literals].map((p) => path.relative(repo, p));
@@ -402,7 +406,7 @@ describe("gitignoreRules", () => {
   });
 
   test("collects the directories inside a collapsed ignored tree", () => {
-    const rules = gitignoreRules(repo, config.artifactAllowlist);
+    const rules = gitignoreRules(config.tools.git, repo, config.artifactAllowlist);
     const relative = rules.directories.map((p: string) => path.relative(repo, p));
     expect(relative).toContain("private-notes/nested");
     // Already re-allowed wholesale by the artefact rule, so walking into it
@@ -411,7 +415,7 @@ describe("gitignoreRules", () => {
   });
 
   test("stops collecting directories at the limit", () => {
-    const rules = gitignoreRules(repo, config.artifactAllowlist, 1);
+    const rules = gitignoreRules(config.tools.git, repo, config.artifactAllowlist, 1);
     expect(rules.directories).toHaveLength(1);
     expect(rules.subpaths.length).toBeGreaterThan(0);
   });
@@ -517,6 +521,10 @@ describe("shell resolver protocol", () => {
 });
 
 describe("buildProfile", () => {
+  const tamper = {
+    literals: ["/Users/test/.config/opencode/opencode.json"],
+    subpaths: ["/Users/test/.config/opencode/plugins", "/opt/homebrew/bin"],
+  };
   const profile = (group: string | null) =>
     buildProfile({
       config,
@@ -528,6 +536,7 @@ describe("buildProfile", () => {
         literals: [path.join(repo, "local.conf")],
         directories: [path.join(repo, "private-notes/nested")],
       },
+      tamper,
     });
 
   test("starts permissive and denies selectively", () => {
@@ -607,6 +616,39 @@ describe("buildProfile", () => {
   test("prevents commands from replacing cached profiles", () => {
     expect(profile(null)).toContain("generated guard profiles are never writable");
     expect(profile(null)).toContain("(deny file-write* (subpath");
+  });
+
+  test("makes directory nodes carrying a protected name unrenameable", () => {
+    // `/\.kube/` never matches `~/.kube` itself, so the node needs its own rule,
+    // emitted before the relaxation so the kube group may still rename it.
+    const text = profile(null);
+    const nodes = text.indexOf(";; 4b.");
+    expect(nodes).toBeGreaterThan(text.indexOf(";; 4. secret"));
+    expect(nodes).toBeLessThan(text.indexOf(";; 6. exceptions"));
+    const line = text.split("\n")[text.split("\n").findIndex((l) => l.startsWith(";; 4b.")) + 1]!;
+    expect(line.startsWith("(deny file-write* ")).toBe(true);
+    expect(line).toContain('#"/\\.kube$"');
+    expect(line).toContain('#"/secrets$"');
+    expect(line).not.toContain("file-read-data");
+  });
+
+  test("protects the ancestors a credential path leads through", () => {
+    // `mv ~/.config ~/c2` would leave ~/.config/gcloud under an unmatched name.
+    const text = profile(null);
+    expect(text).toContain('(literal "/Users/test/.config")');
+    expect(text).toContain('(literal "/Users/test/.config/gcloud")');
+    expect(text).not.toContain('(literal "/Users/test")');
+  });
+
+  test("denies writes to what OpenCode loads at startup, after every exemption", () => {
+    const text = profile(null);
+    const tamperStep = text.indexOf(";; 10.");
+    expect(tamperStep).toBeGreaterThan(text.lastIndexOf("fully exempt"));
+    expect(tamperStep).toBeGreaterThan(text.indexOf(";; 9."));
+    const block = text.slice(tamperStep);
+    expect(block).toContain('(deny file-write* (literal "/Users/test/.config/opencode/opencode.json")');
+    expect(block).toContain('(subpath "/opt/homebrew/bin")');
+    expect(block).not.toContain("file-read-data");
   });
 });
 

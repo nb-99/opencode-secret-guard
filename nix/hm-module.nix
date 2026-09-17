@@ -25,6 +25,8 @@ let
       defaultPolicy
       // {
         inherit (cfg) mode;
+        # A store path, so the guard never resolves git through PATH.
+        tools.git = "${cfg.gitPackage}/bin/git";
       }
       // cfg.settings
     )
@@ -39,6 +41,16 @@ in
       default = package;
       defaultText = literalExpression "inputs.opencode-secret-guard.packages.\${system}.opencode-secret-guard";
       description = "The package providing the plugin and its shell wrapper.";
+    };
+
+    gitPackage = mkOption {
+      type = types.package;
+      default = pkgs.git;
+      defaultText = literalExpression "pkgs.git";
+      description = ''
+        The git the guard itself spawns to enumerate ignored files. Written to
+        the policy as a store path so it is never resolved through PATH.
+      '';
     };
 
     mode = mkOption {

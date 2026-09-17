@@ -1,7 +1,7 @@
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { GuardConfig } from "./policy.ts";
-import { FILE_PATH_ARGS, FILE_TOOLS, classifyPath, filterSearchOutput } from "./predicate.ts";
+import { FILE_PATH_ARGS, FILE_TOOLS, WRITE_TOOLS, classifyPath, filterSearchOutput } from "./predicate.ts";
 import { validatePlatform, validateShell } from "./shell.ts";
 import { createCleanupTool } from "./cleanup.ts";
 
@@ -46,12 +46,13 @@ export function createHooks(guardConfig: GuardConfig, moduleDirectory = MODULE_D
         searchArgs.set(input.callID, record);
       }
 
+      const operation = WRITE_TOOLS.has(tool) ? "write" : "read";
       for (const key of FILE_PATH_ARGS) {
         const value = record[key];
         if (typeof value !== "string" || !value) continue;
-        if (classifyPath(value, guardConfig) === "deny") {
+        if (classifyPath(value, guardConfig, operation) === "deny") {
           throw new Error(
-            `secret-guard: access to ${value} is blocked because it matches a secret or ignored path.`,
+            `secret-guard: ${operation} access to ${value} is blocked because it matches a secret, ignored, or guard-protected path.`,
           );
         }
       }

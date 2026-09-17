@@ -1,29 +1,43 @@
 import * as path from "node:path";
-import { isGitIgnored, primeIgnoreCache } from "./gitignore.ts";
+import { findRepoRoot, isGitIgnored, primeIgnoreCache } from "./gitignore.ts";
 import { isExistingDirectory, isInside, matchesAny, realpath } from "./paths.ts";
 import type { GuardConfig } from "./policy.ts";
 import { cacheDirectory } from "./profile.ts";
+import { isTamperProtected, tamperTargets } from "./tamper.ts";
 
 export const FILE_PATH_ARGS = ["filePath", "path", "file"] as const;
 
 export const FILE_TOOLS = new Set(["read", "write", "edit", "patch", "list", "glob", "grep"]);
 
+/** Tools whose path argument names something they will change. */
+export const WRITE_TOOLS = new Set(["write", "edit", "patch"]);
+
+export type FileOperation = "read" | "write";
+
 /**
  * Mirrors the profile's rule ordering so the two layers agree:
- * exempt roots > deny roots > exceptions > secret patterns > artefact
- * allowlist > gitignore.
+ * guard-protected paths (writes) > exempt roots > deny roots > exceptions >
+ * secret patterns > artefact allowlist > gitignore.
  */
-export function classifyPath(target: string, config: GuardConfig): "allow" | "deny" {
+export function classifyPath(
+  target: string,
+  config: GuardConfig,
+  operation: FileOperation = "read",
+): "allow" | "deny" {
   const canonical = realpath(path.resolve(target));
 
   if (isInside(canonical, realpath(cacheDirectory()))) return "deny";
+  if (operation === "write") {
+    const targets = tamperTargets({ repoRoot: findRepoRoot(canonical), pathEnvironment: process.env.PATH });
+    if (isTamperProtected(canonical, targets)) return "deny";
+  }
   if (config.exemptRoots.some((root) => isInside(canonical, realpath(root)))) return "allow";
   if (config.denyRoots.some((root) => isInside(canonical, realpath(root)))) return "deny";
   if (matchesAny(canonical, config.secretExceptions)) return "allow";
   if (matchesAny(canonical, config.secretPatterns)) return "deny";
   // An ignored *directory* stays listable, matching the profile: enumeration
   // reveals names, and names are not the secret. Its files stay denied.
-  if (isGitIgnored(canonical, config.artifactAllowlist)) {
+  if (isGitIgnored(config.tools.git, canonical, config.artifactAllowlist)) {
     return isExistingDirectory(canonical) ? "allow" : "deny";
   }
   return "allow";
@@ -42,7 +56,7 @@ export function classifyPaths(
   const canonical = targets.map((target) => realpath(path.resolve(target)));
 
   try {
-    primeIgnoreCache(canonical, config.artifactAllowlist);
+    primeIgnoreCache(config.tools.git, canonical, config.artifactAllowlist);
   } catch {
     // Fall through: classifyPath asks git per path.
   }

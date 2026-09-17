@@ -4,6 +4,7 @@ let
   packageJson = builtins.fromJSON (builtins.readFile ../package.json);
   packageLock = builtins.fromJSON (builtins.readFile ../package-lock.json);
   zod = pkgs.callPackage ./zod.nix { };
+  testPolicy = import ./test-policy.nix { inherit pkgs; };
 
   typesNodeVersion = packageJson.devDependencies."@types/node";
   typesNodeLock = packageLock.packages."node_modules/@types/node";
@@ -63,15 +64,19 @@ in
         ];
       }
       ''
-        cp -r ${../src} src
-        cp -r ${../tests} tests
+        # One level down, as installed (<package>/lib): the package directory
+        # is tamper-protected, and at the build root it would swallow the
+        # fixtures the tests create under $TMPDIR.
+        mkdir -p pkg
+        cp -r ${../src} pkg/src
+        cp -r ${../tests} pkg/tests
         mkdir -p node_modules
         ln -s ${zod} node_modules/zod
         export HOME="$TMPDIR"
-        export OPENCODE_SECRET_GUARD_CONFIG=${../policy/default.json}
+        export OPENCODE_SECRET_GUARD_CONFIG=${testPolicy}
         git config --global user.email test@example.com
         git config --global user.name test
-        bun test tests/group.test.ts tests/predicate.test.ts tests/cleanup.test.ts
+        bun test pkg/tests/group.test.ts pkg/tests/predicate.test.ts pkg/tests/tamper.test.ts pkg/tests/cleanup.test.ts
         touch $out
       '';
 
@@ -89,6 +94,7 @@ in
           const config = loadConfig("${../policy/default.json}", "/home/example");
           if (config.mode !== "shell+files") throw new Error("default policy must be shell+files");
           if (config.secretPatterns.length === 0) throw new Error("default policy has no patterns");
+          if (config.tools.git !== "/usr/bin/git") throw new Error("default policy must name the system git");
           for (const root of [...config.denyRoots, ...config.exemptRoots]) {
             if (!root.startsWith("/home/example")) {
               throw new Error("default policy must not name a real home: " + root);
@@ -129,7 +135,9 @@ in
     test -f ${package}/lib/cli.ts
     test -f ${package}/lib/cleanup.ts
     test -f ${package}/lib/node_modules/zod/package.json
-    export OPENCODE_SECRET_GUARD_CONFIG=${../policy/default.json}
+    # The wrapper's interpreter must be a store path, not resolved via PATH.
+    head -1 ${package}/bin/.opencode-secret-guard-wrapped | grep -q '^#!/nix/store/'
+    export OPENCODE_SECRET_GUARD_CONFIG=${testPolicy}
     bun -e '
       const { expectedShell } = await import("${package}/lib/shell.ts");
       const expected = expectedShell("${package}/lib");

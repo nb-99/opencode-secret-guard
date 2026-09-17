@@ -8,6 +8,7 @@ import { isInside } from "./paths.ts";
 import type { GuardConfig } from "./policy.ts";
 import { buildProfile, sbplString } from "./profile.ts";
 import { SANDBOX_EXEC, validatePlatform } from "./shell.ts";
+import { tamperTargets } from "./tamper.ts";
 
 const argsSchema = z.object({
   paths: z.array(z.string().min(1).max(4096)).min(1).max(64),
@@ -137,8 +138,9 @@ export function cleanupProfile(config: GuardConfig, plan: CleanupPlan): string {
     home: os.homedir(),
     group: null,
     gitignore: repoRoot
-      ? gitignoreRules(repoRoot, config.artifactAllowlist)
+      ? gitignoreRules(config.tools.git, repoRoot, config.artifactAllowlist)
       : { repoRoot: null, subpaths: [], literals: [], directories: [] },
+    tamper: tamperTargets({ repoRoot, pathEnvironment: process.env.PATH }),
   });
   const targets = plan.entries.map((target) => `(literal ${sbplString(target)})`).join(" ");
   const confined = profile +

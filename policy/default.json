@@ -1,7 +1,10 @@
 {
-  "configVersion": 2,
+  "configVersion": 3,
   "mode": "shell+files",
   "cleanupRoot": null,
+  "tools": {
+    "git": "/usr/bin/git"
+  },
   "secretPatterns": [
     "/\\.env$",
     "/\\.env\\.[^/]*$",
@@ -168,5 +171,6 @@
   ],
   "exemptRoots": [],
   "secretEnvironment": [],
+  "secretEnvironmentPatterns": [],
   "cacheTtlMs": 2000
 }

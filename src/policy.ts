@@ -7,20 +7,37 @@ import * as path from "node:path";
  * reader refuses anything else, so a newer policy paired with an older plugin
  * fails by name instead of silently ignoring fields it does not know.
  */
-export const SUPPORTED_CONFIG_VERSION = 2;
+export const SUPPORTED_CONFIG_VERSION = 3;
+
+/** Older formats that still load, with defaults for the fields they predate. */
+export const ACCEPTED_CONFIG_VERSIONS: readonly number[] = [1, 2, 3];
 
 /** Overrides the policy location; otherwise the XDG default path is used. */
 export const CONFIG_ENVIRONMENT = "OPENCODE_SECRET_GUARD_CONFIG";
 
+/**
+ * Fixed path for the git the guard itself spawns, unless the policy names one.
+ * Spawning `git` by name would resolve through PATH, and PATH commonly holds
+ * user-writable directories a sandboxed command can plant a binary in.
+ */
+export const DEFAULT_GIT = "/usr/bin/git";
+
 export interface RelaxationGroup {
   binaries: string[];
   allowPaths: string[];
+  /** Variable names (regexes) this group's binaries may keep despite the scrub. */
+  allowEnvironment: string[];
+}
+
+export interface GuardTools {
+  git: string;
 }
 
 export interface GuardConfig {
   configVersion: number;
   mode: GuardMode;
   cleanupRoot: string | null;
+  tools: GuardTools;
   secretPatterns: string[];
   secretExceptions: string[];
   artifactAllowlist: string[];
@@ -28,6 +45,7 @@ export interface GuardConfig {
   denyRoots: string[];
   exemptRoots: string[];
   secretEnvironment: string[];
+  secretEnvironmentPatterns: string[];
   cacheTtlMs: number;
 }
 
@@ -56,8 +74,19 @@ export const GUARD_MODES: readonly GuardMode[] = ["shell+files", "files-only"];
 export function configPath(): string {
   const override = process.env[CONFIG_ENVIRONMENT];
   if (override) return override;
+  return path.join(opencodeConfigDirectory(), "secret-guard.json");
+}
+
+/** OpenCode's global configuration directory, resolved as OpenCode does. */
+export function opencodeConfigDirectory(): string {
   const base = process.env.XDG_CONFIG_HOME || path.join(os.homedir(), ".config");
-  return path.join(base, "opencode", "secret-guard.json");
+  return path.join(base, "opencode");
+}
+
+/** OpenCode's cache, where npm plugins are installed at startup. */
+export function opencodeCacheDirectory(): string {
+  const base = process.env.XDG_CACHE_HOME || path.join(os.homedir(), ".cache");
+  return path.join(base, "opencode");
 }
 
 export function configError(source: string, message: string): Error {
@@ -137,9 +166,25 @@ export function requireRelaxationGroups(
     groups[name] = {
       binaries: requireStringArray(record.binaries, `${key}.binaries`, source),
       allowPaths,
+      allowEnvironment: record.allowEnvironment === undefined
+        ? []
+        : requireRegexArray(record.allowEnvironment, `${key}.allowEnvironment`, source),
     };
   }
   return groups;
+}
+
+export function requireTools(value: unknown, source: string): GuardTools {
+  if (value === undefined) return { git: DEFAULT_GIT };
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw configError(source, '"tools" must be an object');
+  }
+  const record = value as Record<string, unknown>;
+  const git = record.git === undefined ? DEFAULT_GIT : record.git;
+  if (typeof git !== "string" || !path.isAbsolute(git)) {
+    throw configError(source, '"tools.git" must be an absolute path');
+  }
+  return { git };
 }
 
 /**
@@ -163,7 +208,10 @@ export function validateConfig(raw: unknown, source: string, home: string): Guar
   }
   const record = raw as Record<string, unknown>;
 
-  if (record.configVersion !== 1 && record.configVersion !== SUPPORTED_CONFIG_VERSION) {
+  if (
+    typeof record.configVersion !== "number" ||
+    !ACCEPTED_CONFIG_VERSIONS.includes(record.configVersion)
+  ) {
     throw configError(
       source,
       `unsupported configVersion ${JSON.stringify(record.configVersion)}, this build requires ${SUPPORTED_CONFIG_VERSION}`,
@@ -196,8 +244,8 @@ export function validateConfig(raw: unknown, source: string, home: string): Guar
     cleanupRoot = expandHome(record.cleanupRoot, home);
   }
   if (cleanupRoot !== null) {
-    if (record.configVersion !== SUPPORTED_CONFIG_VERSION) {
-      throw configError(source, '"cleanupRoot" requires configVersion 2');
+    if (record.configVersion < 2) {
+      throw configError(source, '"cleanupRoot" requires configVersion 2 or later');
     }
     if (!path.isAbsolute(cleanupRoot) || path.resolve(cleanupRoot) === path.parse(cleanupRoot).root) {
       throw configError(source, '"cleanupRoot" must be an absolute directory below the filesystem root');
@@ -211,6 +259,7 @@ export function validateConfig(raw: unknown, source: string, home: string): Guar
     configVersion: SUPPORTED_CONFIG_VERSION,
     mode: mode as GuardMode,
     cleanupRoot,
+    tools: requireTools(record.tools, source),
     secretPatterns: requireRegexArray(record.secretPatterns, "secretPatterns", source),
     secretExceptions: requireRegexArray(record.secretExceptions, "secretExceptions", source),
     artifactAllowlist: requireStringArray(record.artifactAllowlist, "artifactAllowlist", source),
@@ -222,6 +271,9 @@ export function validateConfig(raw: unknown, source: string, home: string): Guar
       "secretEnvironment",
       source,
     ),
+    secretEnvironmentPatterns: record.secretEnvironmentPatterns === undefined
+      ? []
+      : requireRegexArray(record.secretEnvironmentPatterns, "secretEnvironmentPatterns", source),
     cacheTtlMs: record.cacheTtlMs,
   };
 }
