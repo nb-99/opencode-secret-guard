@@ -76,16 +76,39 @@ verifies at startup that OpenCode's configured shell _is_ this package's own
 path — which keeps the check valid through a Home Manager profile symlink while
 still rejecting a wrapper from a different installation.
 
-One resolver invocation returns the profile path on its first line and the
-names in `secretEnvironment` on the following ones, which
-`/usr/bin/env -u …` then removes. Shell init loads these values from
-`~/.config/secrets` for MCP servers; without scrubbing, any guarded command
-could still reveal an inherited value through `printenv`, despite being unable
-to open the source file. Because the protocol is line-oriented, the policy
-validator restricts these names to `[A-Za-z_][A-Za-z0-9_]*`. MCP servers retain
-their configured credentials; only agent shell children lose these inherited
-variables. The command stored and shown by OpenCode is not replaced with this
-implementation detail.
+Two things the guard runs itself are pinned rather than found: the wrapper's
+interpreter is `#!/bin/bash`, rewritten to the store bash by the Nix build,
+and the git that enumerates ignored files is `tools.git` from the policy.
+Both used to resolve through `PATH`, and `PATH` commonly starts with
+user-writable directories (`/opt/homebrew/bin`, `~/.local/bin`): a sandboxed
+command that planted a `bash` or `git` there would have been run unsandboxed by
+the very next invocation. A missing `tools.git` fails by name — the gitignore
+layer treats "git said nothing" as "nothing is ignored", so a silent spawn
+failure would quietly shrink the boundary.
+
+One resolver invocation returns the profile path on its first line, a hint on
+the second, and the names to scrub on the following ones, which
+`/usr/bin/env -u …` then removes. The scrub list is the policy's
+`secretEnvironment` plus every inherited variable whose name matches
+`secretEnvironmentPatterns` (`*_TOKEN`, `*_SECRET`, `*_PASSWORD`, …), minus
+what the resolved group's `allowEnvironment` re-admits — `aws` keeps `AWS_*`,
+`ssh` keeps `GITHUB_TOKEN`. Explicitly named variables are never re-admitted.
+Without scrubbing, any guarded command could reveal an inherited value through
+`printenv`, despite being unable to open the source file. Because the protocol
+is line-oriented, the policy validator restricts these names to
+`[A-Za-z_][A-Za-z0-9_]*`. MCP servers retain their configured credentials; only
+agent shell children lose these inherited variables. The command stored and
+shown by OpenCode is not replaced with this implementation detail.
+
+The hint exists because a strict fallback is invisible until it fails, and then
+it fails inside the credential binary — `gpg: keyblock resource
+~/.gnupg/pubring.kbx: Permission denied` names neither the guard nor the
+segment that cost the group. When the command exits non-zero and a credential
+binary was involved, the wrapper prints one line: which segment, why (a
+path-opening filter, a foreign binary, mixed groups, an environment
+assignment, substitution), and that splitting the command is the fix. A strict
+command that never named a credential binary, or a relaxed one that succeeds,
+prints nothing.
 
 Enforcement happens in the kernel, so it covers variable expansion, globs,
 redirections, `find -exec`, interpreters, archivers, and recursive greps
@@ -108,11 +131,13 @@ rule:
 2. `allow file-read-data` for allowlisted path components
 3. `allow file-read-data` for the directories inside ignored trees
 4. `deny file-read-data file-write*` for every secret pattern
-5. `allow` for the relaxation group, if one applies
-6. `allow` for the exception patterns (`.env.example`, …)
-7. `deny` for `denyRoots` — never relaxed, never excepted
-8. `allow` for `exemptRoots` — carved back out of step 7
-9. `deny file-write*` for the generated-profile cache
+5. `deny file-write*` for protected directory nodes and their ancestors
+6. `allow` for the relaxation group, if one applies
+7. `allow` for the exception patterns (`.env.example`, …)
+8. `deny` for `denyRoots` — never relaxed, never excepted
+9. `allow` for `exemptRoots` — carved back out of step 8
+10. `deny file-write*` for the generated-profile cache
+11. `deny file-write*` for everything OpenCode loads at its next start
 
 Three non-obvious constraints, all verified empirically:
 
@@ -168,21 +193,108 @@ regenerating, and denying ignored _files_ individually instead of the tree
 prefix would make enumeration deterministic at the price of leaving a
 just-created ignored file readable until the next rebuild.
 
+## Renames and hard links
+
+Path rules match the path at the time of the operation. A rename is checked as
+`file-write*` on the source path, so a file under a protected name cannot be
+moved out: `mv ~/.kube/config /tmp/c` fails. The _directory_ carrying the name
+is another matter — `/\.kube/` has a trailing slash and never matches
+`~/.kube` itself, so `mv ~/.kube ~/k2` used to succeed and leave `~/k2/config`
+under a name no rule matched. `mv ~/.config ~/c2` did the same to
+`~/.config/gcloud`, one level up.
+
+Step 5 closes this. Every secret pattern ending in `/` yields a
+directory-node deny (`/\.kube$`), and every `denyRoots` entry and every
+relaxation `allowPaths` entry yields a literal deny on the node and on each
+ancestor below `$HOME` (`~/.config` for `~/.config/gcloud`). The user cannot
+rename `$HOME` anyway. It is emitted before the relaxation, so a group may
+still rename its own directory — `kubectl` that rotates `~/.kube` keeps
+working — and it denies writes only, so `ls ~/.config` and creating a sibling
+under a protected ancestor are unaffected.
+
+Hard links need no rule of their own: the kernel checks `file-link` against the
+source, and the pattern deny already covers it. The suite asserts this rather
+than assuming it.
+
+## Tamper protection
+
+Everything OpenCode loads and runs at its next start is a way to disable the
+guard for every later command: `opencode.json` names the shell and the plugins;
+`~/.config/opencode/plugins/` and `<repo>/.opencode/plugins/` are executed
+unsandboxed; a `package.json` beside them makes OpenCode run `bun install`,
+and `~/.cache/opencode/node_modules/` is where that lands. The policy file and
+this package are the guard itself. User-writable `PATH` directories are the
+same hole one hop removed: the unsandboxed resolver, OpenCode and its
+formatters spawn programs by name, and a `git` planted in `/opt/homebrew/bin`
+runs with no profile at all.
+
+Step 11 denies `file-write*` on all of these, last, after the exemptions — no
+`exemptRoots` entry may reopen them. Literal files (`opencode.json`,
+`package.json`, the policy, the config directory node so it cannot be renamed
+and recreated) and whole trees (plugin and tool directories, the cache,
+`~/.local/share/opencode/bin`, this package, every writable `PATH` entry outside
+the repository). `PATH` entries inside the repository (`node_modules/.bin`,
+direnv shims) stay writable; a project cannot be protected from itself. Reads
+are never affected, and prompts, skills and commands stay editable — they are
+text for the model, not code OpenCode executes.
+
+The set depends on `PATH`, which differs between invocations (direnv,
+per-project shells), so it is part of the profile cache key. The file-tool
+predicate mirrors it for `write`, `edit` and `patch` only; `read` is
+untouched. The kernel suite writes `TAMPER` at each target through the
+generated profile and asserts the file did not change.
+
+The cost is that `brew install`, `npm i -g` and anything else that writes into
+a `PATH` directory fails from the agent shell. On a Nix-managed host that is
+correct; elsewhere it is the price of the boundary.
+
+## Refused invocations
+
+A relaxed binary can be asked to print what it is trusted to use. `gh auth
+token`, `aws eks get-token`, `kubectl config view --raw`, `kubectl get secret
+… -o yaml`, `security find-generic-password -w`: no profile makes these safe,
+because the secret is the command's stdout. `secretPrintingCommands` lists them
+as a binary plus per-word patterns, each matched in full against some word of
+the invocation, and the default ships 34 rules across the cloud CLIs, kubectl,
+argocd, the forge CLIs, git credential helpers, npm, the macOS keychain,
+1Password, Vault, Terraform outputs, sops, age and gpg.
+
+The scan is deliberately more eager than the group scan: it splits on
+parentheses and backticks too, unwraps `sudo`, `env`, `xargs`, `timeout` and
+friends (skipping their options), and recurses into `sh -c '…'` and `eval`.
+Over-matching here only refuses more, whereas over-unwrapping in the group scan
+would grant more. Prose stays untouched — `git commit -m "gh auth token is
+refused"` is one word `gh` followed by words that are not `auth` and `token`
+in that quoted string, and `echo 'aws eks get-token'` is one quoted word.
+
+Both the configured shell and the plugin's `tool.execute.before` hook refuse,
+with one message naming the invocation. The hook covers `files-only` mode,
+where no wrapper backs the plugin, and gives a clear error before anything
+runs.
+
+## Setuid binaries
+
+`sandbox-exec` does not run setuid programs: `ps`, `top`, `sudo`, `su`,
+`crontab`, `at` and `traceroute` fail with `operation not permitted`. This is
+the kernel's rule, not the profile's, and there is no allow for it. `pgrep`,
+`pkill`, `lsof` and `netstat` are not setuid and work. The agent-facing
+guidance names the substitutes.
+
 ## Per-binary relaxation
 
 `~/.ssh`, `~/.aws`, `~/.kube` and friends are exactly the files the agent must
 be able to read _indirectly_ — denying them outright breaks git-over-SSH,
 `kubectl`, `aws`, and `terraform`. Each group re-allows only its own paths:
 
-| Group   | Binaries                                                  | Re-allows                                              |
-| ------- | --------------------------------------------------------- | ------------------------------------------------------ |
-| `ssh`   | `git`, `ssh`, `scp`, `rsync`, `gh`, `glab`, `fj`, `jj`, … | `~/.ssh`, `~/.gnupg`, `~/.git-credentials`, `~/.netrc` |
-| `kube`  | `kubectl`, `helm`, `k9s`, `stern`, `flux`, `argocd`, …    | `~/.kube`                                              |
-| `aws`   | `aws`, `terraform`, `tofu`, `terragrunt`, `packer`, `sam` | `~/.aws`                                               |
-| `oci`   | `docker`, `podman`, `nerdctl`, `skopeo`, `crane`          | `~/.docker`                                            |
-| `npm`   | `npm`, `pnpm`, `yarn`, `bun`, `npx`                       | `~/.npmrc`                                             |
-| `gcp`   | `gcloud`, `gsutil`                                        | `~/.config/gcloud`                                     |
-| `azure` | `az`                                                      | `~/.azure`                                             |
+| Group   | Binaries                                                  | Re-allows                                                             | Keeps in env                    |
+| ------- | --------------------------------------------------------- | --------------------------------------------------------------------- | ------------------------------- |
+| `ssh`   | `git`, `ssh`, `scp`, `rsync`, `gh`, `glab`, `fj`, `jj`, … | `~/.ssh`, `~/.gnupg`, `~/.git-credentials`, `~/.netrc`, `~/.config/gh`, `~/.config/glab-cli`, `~/.config/fj` | `GH_TOKEN`, `GITHUB_TOKEN`, `GITLAB_TOKEN`, … |
+| `kube`  | `kubectl`, `helm`, `k9s`, `stern`, `flux`, `argocd`, …    | `~/.kube`                                                             | —                               |
+| `aws`   | `aws`, `terraform`, `tofu`, `terragrunt`, `packer`, `sam` | `~/.aws`, `~/.terraform.d/credentials.tfrc.json`                      | `AWS_*`                         |
+| `oci`   | `docker`, `podman`, `nerdctl`, `skopeo`, `crane`          | `~/.docker`                                                           | —                               |
+| `npm`   | `npm`, `pnpm`, `yarn`, `bun`, `npx`                       | `~/.npmrc`                                                            | `NPM_TOKEN`, `NODE_AUTH_TOKEN`  |
+| `gcp`   | `gcloud`, `gsutil`                                        | `~/.config/gcloud`                                                    | `GOOGLE_*`, `CLOUDSDK_*`        |
+| `azure` | `az`                                                      | `~/.azure`                                                            | `AZURE_*`, `ARM_*`              |
 
 This is a credential-scoping boundary, not a capability sandbox for the group
 binary itself. Once selected, the binary and its subprocesses can read that
@@ -244,13 +356,23 @@ nor the cause. `git log; echo done` and `git status || true` failed the same
 way. A segment containing `<` or `>` is never skipped, since a redirection can
 create or truncate a file even from a builtin.
 
-`cat`, `head`, `tail`, `wc`, `sort`, `uniq`, `tr`, `nl`, `rev`, and `column` are
-skipped **conditionally**. Their stdin is the previous segment's stdout, which
-the caller could already read, so they add no reach of their own — but they can
+`cat`, `head`, `tail`, `wc`, `sort`, `uniq`, `tr`, `nl`, `rev`, `column`,
+`cut`, `paste`, `fold`, `base64`, `xxd` and the checksum tools are skipped
+**conditionally**. Their stdin is the previous segment's stdout, which the
+caller could already read, so they add no reach of their own — but they can
 open a file when given one. A segment is therefore only skipped when every
-argument is a bare number (`tail -n 30`) or a flag with no `/`, `~`, or `=` in
-it. `cat ~/.ssh/id_ed25519`, `cat pubring.kbx`, `sort -o/tmp/out`, and
-`cat < ~/.ssh/id_ed25519` all fail that test and keep the strict profile.
+argument is a number or number list (`tail -n 30`, `cut -f 2,4-6`), a flag with
+no `/`, `~`, or `=` in it, or a one-character delimiter (`cut -d=`, `sort -t:`).
+`cat ~/.ssh/id_ed25519`, `cat pubring.kbx`, `sort -o/tmp/out`,
+`base64 -i key.pem` and `cat < ~/.ssh/id_ed25519` all fail that test and keep
+the strict profile. The redirection check is quote-aware, so `rg 'a>b'` is
+not a redirection.
+
+`awk` is skipped as a direct pipe consumer when it has exactly one program
+operand, no `-f`, and a program that neither redirects a `print`, pipes, nor
+calls `getline`, `system`, `close` or `fflush`. `NR>1` is a comparison, not a
+redirection; `{print > "x"}` is. `-F` and `-v` are accepted since their values
+cannot name a file awk would open.
 
 `rg`, `grep`, and `jq` are skipped **conditionally** too, but only as direct
 pipe consumers: `kubectl get pods | rg gateway` keeps the kube group, while
@@ -270,8 +392,8 @@ relaxed search process can then descend into the credential directory. Use two
 shell calls instead: write to `/tmp/opencode/`, then search the
 file separately under the strict profile.
 
-`tee`, `sed`, and `awk` are excluded because they write files or shell out;
-`less` because `LESSOPEN` lets it run a preprocessor.
+`tee` and `sed` are excluded because they write files (`sed -i`, `sed w`) or run
+commands (`sed e`); `less` because `LESSOPEN` lets it run a preprocessor.
 
 Falling back to strict is always safe but not always obvious. A **heredoc** used
 to do it: the segment scanner splits on newlines, so the body read as a list of
@@ -300,6 +422,11 @@ profile's ordering, resolves each target's _own_ repository root, and defaults
 to **allow** whenever it cannot classify a result — the opposite of the
 `opencode-ignore` plugin it replaces, which defaulted to dropping and silently
 lost every hit outside the current project.
+
+The predicate takes the operation: `write`, `edit` and `patch` additionally
+consult the tamper-protected set, so the model cannot edit `opencode.json` or
+drop a file into `.opencode/plugins/` through a file tool any more than through
+a command. `read` is unaffected by that set.
 
 Ignored _directories_ classify as allow so `list` can enumerate them, matching
 the profile; the files inside them stay denied.
@@ -358,14 +485,19 @@ may already have removed some allowed descendants.
 
 ## Residual gaps
 
-- MCP servers and the LSP run outside the sandbox. See
-  [MCP sandboxing](mcp-sandboxing.md) for the options.
+- MCP servers and the LSP run outside the sandbox. They receive their
+  credentials from their own wrappers, not from the agent shell's environment.
 - Network access is unrestricted, but a process that cannot read a secret cannot
   exfiltrate it.
 - Credentials supplied through a relaxed binary's own extension mechanisms
   remain a deliberate Option B trade-off: for example, a `git` alias can run a
-  shell while the SSH profile is active. Eliminate per-binary relaxations for a
-  strict Option C boundary.
+  shell while the SSH profile is active. The refusal list covers the
+  invocations that print a credential by design, not every path through a
+  trusted binary. Eliminate per-binary relaxations for a strict Option C
+  boundary.
+- Credentials in the macOS keychain are reachable through Security.framework by
+  any process the keychain trusts. The `security` CLI's dump commands are
+  refused, but a program linking the framework directly is not.
 - `sandbox-exec` is formally deprecated by Apple. It still ships in macOS 26.5
   and is still used by Chrome and Claude Code.
 

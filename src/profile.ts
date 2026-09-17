@@ -104,7 +104,7 @@ export function buildProfile(options: {
       ...(nodes.regexes.length > 0 ? [`(regex ${nodes.regexes.map(sbplRegex).join(" ")})`] : []),
       ...nodes.literals.map((p) => `(literal ${sbplString(p)})`),
     ];
-    lines.push("", ";; 4b. protected directory nodes and their ancestors cannot be renamed");
+    lines.push("", ";; 5. protected directory nodes and their ancestors cannot be renamed");
     lines.push(`(deny file-write* ${targets.join(" ")})`);
   }
 
@@ -113,29 +113,29 @@ export function buildProfile(options: {
     const targets = relaxation.allowPaths.map((p) =>
       `(subpath ${sbplString(realpath(path.join(home, p)))})`,
     );
-    lines.push("", `;; 5. relaxation for the "${group}" group`);
+    lines.push("", `;; 6. relaxation for the "${group}" group`);
     lines.push(`(allow file-read-data file-write* ${targets.join(" ")})`);
   }
 
   if (config.secretExceptions.length > 0) {
     const regexes = config.secretExceptions.map(sbplRegex).join(" ");
-    lines.push("", ";; 6. exceptions — last matching rule wins");
+    lines.push("", ";; 7. exceptions — last matching rule wins");
     lines.push(`(allow file-read-data file-write* (regex ${regexes}))`);
   }
 
   if (config.denyRoots.length > 0) {
     const targets = config.denyRoots.map((p) => `(subpath ${sbplString(realpath(p))})`);
-    lines.push("", ";; 7. never relaxed, never excepted");
+    lines.push("", ";; 8. never relaxed, never excepted");
     lines.push(`(deny file-read-data file-write* ${targets.join(" ")})`);
   }
 
   if (config.exemptRoots.length > 0) {
     const targets = config.exemptRoots.map((p) => `(subpath ${sbplString(realpath(p))})`);
-    lines.push("", ";; 8. fully exempt, overrides everything above");
+    lines.push("", ";; 9. fully exempt, overrides everything above");
     lines.push(`(allow file-read-data file-write* ${targets.join(" ")})`);
   }
 
-  lines.push("", ";; 9. generated guard profiles are never writable by commands");
+  lines.push("", ";; 10. generated guard profiles are never writable by commands");
   lines.push(
     `(deny file-write* (subpath ${sbplString(realpath(cacheDirectory()))}))`,
   );
@@ -147,7 +147,7 @@ export function buildProfile(options: {
     ...tamper.subpaths.map((p) => `(subpath ${sbplString(p)})`),
   ];
   if (tamperTargetsSbpl.length > 0) {
-    lines.push("", ";; 10. what OpenCode loads at its next start stays as the user left it");
+    lines.push("", ";; 11. what OpenCode loads at its next start stays as the user left it");
     lines.push(`(deny file-write* ${tamperTargetsSbpl.join(" ")})`);
   }
 

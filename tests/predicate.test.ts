@@ -705,10 +705,10 @@ describe("buildProfile", () => {
     // `/\.kube/` never matches `~/.kube` itself, so the node needs its own rule,
     // emitted before the relaxation so the kube group may still rename it.
     const text = profile(null);
-    const nodes = text.indexOf(";; 4b.");
+    const nodes = text.indexOf(";; 5.");
     expect(nodes).toBeGreaterThan(text.indexOf(";; 4. secret"));
-    expect(nodes).toBeLessThan(text.indexOf(";; 6. exceptions"));
-    const line = text.split("\n")[text.split("\n").findIndex((l) => l.startsWith(";; 4b.")) + 1]!;
+    expect(nodes).toBeLessThan(text.indexOf(";; 7. exceptions"));
+    const line = text.split("\n")[text.split("\n").findIndex((l) => l.startsWith(";; 5.")) + 1]!;
     expect(line.startsWith("(deny file-write* ")).toBe(true);
     expect(line).toContain('#"/\\.kube$"');
     expect(line).toContain('#"/secrets$"');
@@ -725,9 +725,9 @@ describe("buildProfile", () => {
 
   test("denies writes to what OpenCode loads at startup, after every exemption", () => {
     const text = profile(null);
-    const tamperStep = text.indexOf(";; 10.");
+    const tamperStep = text.indexOf(";; 11.");
     expect(tamperStep).toBeGreaterThan(text.lastIndexOf("fully exempt"));
-    expect(tamperStep).toBeGreaterThan(text.indexOf(";; 9."));
+    expect(tamperStep).toBeGreaterThan(text.indexOf(";; 10."));
     const block = text.slice(tamperStep);
     expect(block).toContain('(deny file-write* (literal "/Users/test/.config/opencode/opencode.json")');
     expect(block).toContain('(subpath "/opt/homebrew/bin")');
