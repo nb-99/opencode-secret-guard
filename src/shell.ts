@@ -57,6 +57,9 @@ export function resolveProfile(command: string, guardConfig: GuardConfig): strin
   return resolveShellPlan(command, guardConfig).profile;
 }
 
+/** The guard's own variables: their names contain "SECRET" and hold no secret. */
+export const OWN_ENVIRONMENT = /^(SECRET_GUARD_|OPENCODE_SECRET_GUARD_)/;
+
 /**
  * Names to remove from a command's environment: the policy's explicit list
  * plus every inherited variable whose name matches a secret pattern, minus
@@ -74,6 +77,7 @@ export function scrubbedEnvironment(
   const names = new Set(config.secretEnvironment);
   if (config.secretEnvironmentPatterns.length > 0) {
     for (const name of Object.keys(environment)) {
+      if (OWN_ENVIRONMENT.test(name)) continue;
       if (matchesAny(name, config.secretEnvironmentPatterns) && !matchesAny(name, keep)) names.add(name);
     }
   }
