@@ -584,6 +584,11 @@ describe("scrubbedEnvironment", () => {
     expect(scrubbed).not.toContain("PATH");
   });
 
+  test("never scrubs the guard's own variables, whose names merely contain SECRET", () => {
+    const own = { SECRET_GUARD_BUN: "/bin/bun", OPENCODE_SECRET_GUARD_CONFIG: "/p.json", X_SECRET: "s" };
+    expect(scrubbedEnvironment(withDefaults(), null, own)).toEqual(["EXPLICIT", "X_SECRET"]);
+  });
+
   test("a group keeps what its binaries need and nothing else", () => {
     const aws = scrubbedEnvironment(withDefaults(), "aws", environment);
     expect(aws).not.toContain("AWS_SECRET_ACCESS_KEY");
