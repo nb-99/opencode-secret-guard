@@ -21,6 +21,13 @@ This enforces the boundary where expansion cannot reach it:
 Both layers are derived from one policy file, and a test compares their verdicts
 against each other on every run.
 
+The rule is: a credential may be **used**, never **read**. `git push` reaches
+`~/.ssh` because git needs it; `cat ~/.ssh/id_ed25519` does not, and neither
+does `gh auth token`, whose whole output is the secret. Anything OpenCode itself
+loads at its next start — its config, plugins, this policy, the directories on
+`PATH` — cannot be written by a command, so one command cannot disable the
+guard for the ones that follow.
+
 See [docs/design.md](docs/design.md) for the full design and
 [docs/lessons-learned.md](docs/lessons-learned.md) for the empirically verified
 `sandbox-exec` behaviour it depends on.
@@ -51,6 +58,10 @@ worse than one that refuses to start.
   programs.opencode-secret-guard = {
     enable = true;
     mode = "shell+files";
+    # Additions to the shipped default; upstream fixes still apply.
+    extraRelaxationGroups.oci.binaries = [ "ko" ];
+    extraSecretExceptions = [ "/pkg/store/secrets/obfuscator\\.go$" ];
+    # Whole-key overrides.
     settings = {
       denyRoots = [ "~/.config/secrets" ];
       exemptRoots = [ "~/notes/agent-memory" ];
@@ -69,6 +80,12 @@ The module writes the policy and installs the package, but deliberately does not
 write into `programs.opencode` itself: consumers assemble their own OpenCode
 settings, and reaching into another module's option tree invites merge conflicts
 over values this module cannot see.
+
+`extraSecretPatterns`, `extraSecretExceptions`, `extraArtifactAllowlist`,
+`extraSecretPrintingCommands` and `extraRelaxationGroups` append to the shipped
+default, so a host carries only its deltas. `settings` replaces a key wholesale.
+`gitPackage` (default `pkgs.git`) is the git the guard itself spawns, written as
+a store path.
 
 `shellPath` and `pluginPath` are **null when they do not apply** — `shellPath`
 whenever the guard is disabled or in `files-only` mode, since the wrapper
@@ -93,7 +110,9 @@ Then point OpenCode at the package:
 }
 ```
 
-The wrapper needs `bun` on `PATH`, or `SECRET_GUARD_BUN` pointing at it.
+The wrapper needs `bun` on `PATH`, or `SECRET_GUARD_BUN` pointing at it. Without
+Nix the policy's `tools.git` defaults to `/usr/bin/git`; set it to the git you
+want the guard to spawn.
 
 ## Configuration
 
@@ -103,19 +122,22 @@ The plugin reads `~/.config/opencode/secret-guard.json`, or the path in
 Start from [`policy/default.json`](policy/default.json). Roots may be written
 with a leading `~`, expanded at runtime, so a policy is portable between hosts.
 
-| Key                 | Meaning                                                |
-| ------------------- | ------------------------------------------------------ |
-| `configVersion`     | File format; rejected if unsupported                   |
-| `mode`              | `shell+files` or `files-only`                          |
-| `cleanupRoot`       | Opt-in root for `cleanup_temp`; `null` disables it and files-only mode cannot enable it |
-| `secretPatterns`    | Regexes denied in both layers                          |
-| `secretExceptions`  | Re-allowed after the deny block                        |
-| `artifactAllowlist` | Path components re-allowed against the gitignore layer |
-| `relaxationGroups`  | Per-binary credential access, e.g. `git` → `~/.ssh`    |
-| `denyRoots`         | Never relaxed, never excepted                          |
-| `exemptRoots`       | Overrides everything above                             |
-| `secretEnvironment` | Variables scrubbed before a command runs               |
-| `cacheTtlMs`        | How often a profile is regenerated                     |
+| Key                         | Meaning                                                                                 |
+| --------------------------- | --------------------------------------------------------------------------------------- |
+| `configVersion`             | File format; rejected if unsupported                                                    |
+| `mode`                      | `shell+files` or `files-only`                                                           |
+| `cleanupRoot`               | Opt-in root for `cleanup_temp`; `null` disables it and files-only mode cannot enable it |
+| `tools.git`                 | Absolute path of the git the guard spawns; never resolved through `PATH`                |
+| `secretPatterns`            | Regexes denied in both layers                                                           |
+| `secretExceptions`          | Re-allowed after the deny block                                                         |
+| `artifactAllowlist`         | Path components re-allowed against the gitignore layer                                  |
+| `relaxationGroups`          | Per-binary credential access, e.g. `git` → `~/.ssh`, plus `allowEnvironment`            |
+| `secretPrintingCommands`    | Invocations refused outright because their output is the credential                    |
+| `denyRoots`                 | Never relaxed, never excepted                                                           |
+| `exemptRoots`               | Overrides everything above                                                              |
+| `secretEnvironment`         | Variable names scrubbed before a command runs, always                                   |
+| `secretEnvironmentPatterns` | Regexes; every inherited variable whose name matches is scrubbed                        |
+| `cacheTtlMs`                | How often a profile is regenerated                                                      |
 
 Validation fails closed: an unsupported version, a wrong type, a non-absolute
 root, an `allowPaths` entry that is not `$HOME`-relative, or a pattern that does
@@ -123,10 +145,52 @@ not compile all abort startup. Patterns are compiled at load time because the
 matcher treats an uncompilable pattern as "no match" — an unvalidated typo in a
 deny pattern would otherwise silently stop guarding.
 
-The current policy format is version 2. Version-1 policies still load with
-cleanup disabled. To enable cleanup in a manually managed policy, set
-`configVersion` to `2` and add `cleanupRoot`. Home Manager writes the current
-version automatically.
+The current policy format is version 3. Version-1 and version-2 policies still
+load: `tools.git` defaults to `/usr/bin/git`, and `secretEnvironmentPatterns`,
+`secretPrintingCommands` and `allowEnvironment` default to empty. Home Manager
+writes the current version automatically.
+
+## What a command can and cannot do
+
+**Credentials are usable, not readable.** A command whose every segment is a
+credential binary of one group (`git`, `kubectl`, `aws`, …), an inert builtin
+(`cd`, `echo`, …) or a stdin-only filter (`head`, `cut -d=`, `rg` as a direct
+pipe consumer, `awk '{print $1}'`, …) runs with that group's credential
+directory readable. Any other shape — a path operand, a redirection, a second
+group, an environment assignment, command substitution — runs under the strict
+profile, where the credentials are unreadable. If such a command fails, the
+wrapper prints one line saying which segment cost the group, so the fix is to
+split the command, not to retry it.
+
+**Some invocations are refused outright.** `gh auth token`,
+`aws eks get-token`, `kubectl config view --raw`, `kubectl get secret … -o yaml`,
+`security find-generic-password -w` and the rest of `secretPrintingCommands`
+never run, wrapped in `sudo`/`env`/`sh -c`/`$(…)` or not: their output *is* the
+secret. Use the credential through the tool that needs it.
+
+**The environment is scrubbed.** Names in `secretEnvironment`, and every
+inherited variable matching `secretEnvironmentPatterns` (`*_TOKEN`,
+`*_SECRET`, `*_PASSWORD`, `*_API_KEY`, …), are removed before the command
+starts. A group's `allowEnvironment` re-admits pattern hits its binaries need
+(`aws` keeps `AWS_*`); explicitly named variables are never re-admitted.
+
+**The guard's inputs are immutable.** No command can write OpenCode's global or
+project config, its plugin and tool directories, the `package.json` that makes
+it run `bun install`, the npm plugin cache, this package, the policy, or any
+user-writable directory on `PATH` outside the repository (`/opt/homebrew/bin`,
+`/usr/local/bin`, …). Reads are unaffected; prompts, skills and commands stay
+editable. Practically: `brew install` and `npm i -g` from the agent shell fail —
+install tools from your own terminal.
+
+**Renaming does not move a secret out from under its rule.** The directory
+nodes that carry a protected name (`~/.kube`, `secrets/`) and the ancestors a
+credential path leads through (`~/.config` for `~/.config/gcloud`) cannot be
+renamed; hard links to protected files are refused by the kernel.
+
+**setuid binaries do not run under `sandbox-exec`.** `ps`, `top`, `sudo`, `su`,
+`crontab`, `at` and `traceroute` fail with `operation not permitted`. Use
+`pgrep -fl PATTERN` and `lsof -i :PORT` instead of `ps`, and do privileged work
+from your own terminal.
 
 ## Guarded temporary cleanup
 
@@ -186,7 +250,11 @@ explanation rather than failing later as an unexplained `EPERM`.
 - Network access is unrestricted; the mitigation is that a process which cannot
   read a secret cannot exfiltrate it.
 - A relaxed binary's own extension mechanisms are in scope for that binary. This
-  is a credential-scoping boundary, not a capability sandbox.
+  is a credential-scoping boundary, not a capability sandbox. The refusal list
+  covers the invocations that print a credential by design; a `git` alias that
+  runs a shell is still git.
+- Credentials held in the macOS keychain are reachable through Security.framework
+  by any process the keychain trusts; the guard covers files, not the keychain.
 - `sandbox-exec` is formally deprecated by Apple. It still ships in macOS 26 and
   is still used by Chrome and Claude Code.
 - A profile is a snapshot, so a directory created after generation is not
