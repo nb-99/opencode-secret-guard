@@ -602,32 +602,81 @@ export function isInertFilter(segment: string, binary: string, args: string): bo
  * is denied by the kernel — while `kubectl get pods | cat` does not.
  */
 export function resolveGroup(command: string, config: GuardConfig): string | null {
-  const visible = stripHeredocs(command);
-  if (visible === null || hasOpaqueConstruct(visible)) return null;
+  return analyzeCommand(command, config).group;
+}
 
-  const segments = analyzeSegments(visible);
-  if (!segments || segments.length === 0) return null;
+export interface CommandAnalysis {
+  group: string | null;
+  /**
+   * Why a command that names a credential binary still runs strict. Null when
+   * a group applies, and also when no segment names one — `cat README.md`
+   * running strict is the ordinary case and needs no explanation.
+   */
+  reason: string | null;
+  /** Groups whose binaries appear in the command. */
+  candidates: string[];
+}
 
+/**
+ * Falling back to strict is always safe and rarely obvious: the failure shows
+ * up deep inside git or kubectl as a permission error that names neither the
+ * guard nor the segment that cost the group. The reason is what the wrapper
+ * prints when such a command fails, so the agent can split it instead of
+ * retrying blindly.
+ */
+export function analyzeCommand(command: string, config: GuardConfig): CommandAnalysis {
   const binaryToGroup = new Map<string, string>();
   for (const [name, group] of Object.entries(config.relaxationGroups)) {
     for (const binary of group.binaries) binaryToGroup.set(binary, name);
   }
+  const candidates = new Set<string>();
+  const strict = (reason: string): CommandAnalysis => ({
+    group: null,
+    reason: candidates.size > 0 ? reason : null,
+    candidates: [...candidates].sort(),
+  });
+  // Candidates are collected from the raw segments first, so a reason can be
+  // given even when the command is rejected before the per-segment scan.
+  for (const segment of analyzeSegments(command) ?? []) {
+    const group = binaryToGroup.get(parseCommand(segment.command)?.binary ?? "");
+    if (group) candidates.add(group);
+  }
+
+  const visible = stripHeredocs(command);
+  if (visible === null) {
+    return strict("its heredoc is unterminated, expands `$` or a backtick behind an unquoted delimiter, or is not the only one on its line");
+  }
+  if (hasOpaqueConstruct(visible)) {
+    return strict("it contains command or process substitution, a subshell, or a zsh evaluation form, which the segment scan cannot see through");
+  }
+
+  const segments = analyzeSegments(visible);
+  if (!segments || segments.length === 0) return strict("its quoting is unbalanced");
 
   let resolved: string | null = null;
   for (const segment of segments) {
     const parsed = parseCommand(segment.command);
-    if (!parsed) return null;
+    if (!parsed) return strict(`\`${segment.command}\` starts with a subshell or brace group`);
     const { binary, args, hasEnvironmentAssignments } = parsed;
-    if (hasEnvironmentAssignments) return null;
+    if (hasEnvironmentAssignments) {
+      return strict(`\`${segment.command}\` sets environment variables, which can inject options or programs into ${binary}`);
+    }
     if (INERT_BUILTINS.has(binary) && !/[<>]/.test(segment.command)) continue;
     if (isInertFilter(segment.command, binary, args)) continue;
     if (isPatternFilter(segment.command, binary, args, segment.receivesPipe, hasEnvironmentAssignments)) continue;
     const group = binaryToGroup.get(binary);
-    if (!group) return null;
-    if (resolved && resolved !== group) return null;
+    if (!group) {
+      const kind = PIPE_FILTERS.has(binary) || PATTERN_FILTERS.has(binary)
+        ? `\`${binary}\` may open a file here (a path operand, redirection, recursive mode, or it is not a direct pipe consumer)`
+        : `\`${binary}\` belongs to no credential group`;
+      return strict(`in \`${segment.command}\`, ${kind}`);
+    }
+    if (resolved && resolved !== group) {
+      return strict(`it mixes the \`${resolved}\` and \`${group}\` groups; a command gets at most one`);
+    }
     resolved = group;
   }
-  return resolved;
+  return { group: resolved, reason: null, candidates: [...candidates].sort() };
 }
 
 // ---------------------------------------------------------------------------

@@ -567,6 +567,37 @@ fi
 expect_shell_strict "a redirected cd falls back to strict" \
   "cd '$fixture' > /dev/null && kubectl"
 
+# A strict fallback fails inside the credential binary with an error that
+# names neither the guard nor the segment that cost the group. The wrapper
+# must say why, and only when the command failed and a group was in play.
+hint_output="$(cd "$fixture" && HOME="$fakehome" PATH="$fakebin:$PATH" \
+  "$GUARD_SHELL" -c 'kubectl; cat "$HOME/.kube/config"' 2>&1)"
+if [[ "$hint_output" == *"ran under the strict profile because"* && "$hint_output" == *'`kube`'* ]]; then
+  pass=$((pass + 1))
+  printf '  ok    shell explains a failed strict fallback\n'
+else
+  fail=$((fail + 1)); failures+=("NO HINT: $hint_output")
+  printf '  FAIL  shell explains a failed strict fallback -- %s\n' "$hint_output"
+fi
+no_hint_output="$(cd "$fixture" && HOME="$fakehome" PATH="$fakebin:$PATH" \
+  "$GUARD_SHELL" -c 'kubectl README.md; true' 2>&1)"
+if [[ "$no_hint_output" != *"strict profile"* ]]; then
+  pass=$((pass + 1))
+  printf '  ok    shell stays quiet when a relaxed command succeeds\n'
+else
+  fail=$((fail + 1)); failures+=("SPURIOUS HINT: $no_hint_output")
+  printf '  FAIL  shell stays quiet when a relaxed command succeeds -- %s\n' "$no_hint_output"
+fi
+plain_failure_output="$(cd "$fixture" && HOME="$fakehome" PATH="$fakebin:$PATH" \
+  "$GUARD_SHELL" -c 'cat .env' 2>&1)"
+if [[ "$plain_failure_output" != *"strict profile"* ]]; then
+  pass=$((pass + 1))
+  printf '  ok    shell stays quiet when no credential binary was involved\n'
+else
+  fail=$((fail + 1)); failures+=("SPURIOUS HINT: $plain_failure_output")
+  printf '  FAIL  shell stays quiet when no credential binary was involved -- %s\n' "$plain_failure_output"
+fi
+
 # The scrub list comes from the policy, and the shipped default deliberately
 # names no variables — only a user knows theirs. Asserting the mechanism against
 # whichever policy the run was handed would therefore pass or fail depending on

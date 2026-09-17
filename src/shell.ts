@@ -1,7 +1,8 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { resolveGroup } from "./command-policy.ts";
+import type { CommandAnalysis } from "./command-policy.ts";
+import { analyzeCommand } from "./command-policy.ts";
 import { matchesAny, realpath } from "./paths.ts";
 import type { GuardConfig } from "./policy.ts";
 import { profilePath } from "./profile.ts";
@@ -82,7 +83,7 @@ export function scrubbedEnvironment(
 export function resolveShellPlan(
   command: string,
   guardConfig: GuardConfig,
-): { profile: string; group: string | null; scrub: string[] } {
+): { profile: string; group: string | null; hint: string; scrub: string[] } {
   // The wrapper only exists to enforce the shell layer. Being invoked while the
   // policy disables that layer means the two disagree about what is guarded, so
   // it refuses rather than running the command under no profile at all.
@@ -97,23 +98,44 @@ export function resolveShellPlan(
     );
   }
 
-  const group = resolveGroup(command, guardConfig);
+  const analysis = analyzeCommand(command, guardConfig);
   const profile = profilePath({
     config: guardConfig,
     home: os.homedir(),
     cwd: process.cwd(),
-    group,
+    group: analysis.group,
   });
-  return { profile, group, scrub: scrubbedEnvironment(guardConfig, group) };
+  return {
+    profile,
+    group: analysis.group,
+    hint: strictHint(analysis),
+    scrub: scrubbedEnvironment(guardConfig, analysis.group),
+  };
 }
 
 /**
- * The shell wrapper's side of the contract: the profile path, then one
- * environment variable to scrub per line. Both come from one invocation
- * because the wrapper pays the interpreter's startup cost on every command.
+ * One line for the wrapper to print when a command that named a credential
+ * binary fails under the strict profile. Empty when there is nothing to say.
+ * Newlines are folded because the protocol below is line-oriented.
+ */
+export function strictHint(analysis: CommandAnalysis): string {
+  if (analysis.group || !analysis.reason) return "";
+  const groups = analysis.candidates.map((name) => `\`${name}\``).join(" and ");
+  return (
+    `secret-guard: this command ran under the strict profile because ${analysis.reason}. ` +
+    `The ${groups} credentials were unreadable. Split it into one call per step, ` +
+    `keeping only credential binaries and stdin-only filters together.`
+  ).replace(/\s*\n\s*/g, " ");
+}
+
+/**
+ * The shell wrapper's side of the contract: the profile path, then the hint
+ * (possibly empty), then one environment variable to scrub per line. All come
+ * from one invocation because the wrapper pays the interpreter's startup cost
+ * on every command.
  */
 export function resolveForShell(command: string, guardConfig: GuardConfig): string {
   const plan = resolveShellPlan(command, guardConfig);
-  return [plan.profile, ...plan.scrub].join("\n");
+  return [plan.profile, plan.hint, ...plan.scrub].join("\n");
 }
 

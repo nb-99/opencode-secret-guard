@@ -495,27 +495,38 @@ describe("findRepoRoot", () => {
 });
 
 describe("shell resolver protocol", () => {
-  test("returns the profile path first, then one name to scrub per line", () => {
+  const quiet = () => ({ ...config, secretEnvironment: [], secretEnvironmentPatterns: [] });
+
+  test("returns the profile path, then the hint, then one name to scrub per line", () => {
     const payload: string = resolveForShell("echo hi", {
-      ...config,
+      ...quiet(),
       secretEnvironment: ["CONTEXT7_API_KEY", "HOMEASSISTANT_TOKEN"],
-      secretEnvironmentPatterns: [],
     });
     const lines = payload.split("\n");
 
     expect(lines[0]).toMatch(/\.sb$/);
     expect(fs.existsSync(lines[0])).toBe(true);
-    expect(lines.slice(1)).toEqual(["CONTEXT7_API_KEY", "HOMEASSISTANT_TOKEN"]);
+    expect(lines[1]).toBe("");
+    expect(lines.slice(2)).toEqual(["CONTEXT7_API_KEY", "HOMEASSISTANT_TOKEN"]);
   });
 
-  test("emits the profile path alone when nothing needs scrubbing", () => {
-    const payload: string = resolveForShell("echo hi", {
-      ...config,
-      secretEnvironment: [],
-      secretEnvironmentPatterns: [],
-    });
+  test("emits the profile path and an empty hint when nothing needs scrubbing", () => {
+    expect(resolveForShell("echo hi", quiet()).split("\n")).toEqual([
+      expect.stringMatching(/\.sb$/),
+      "",
+    ]);
+  });
 
-    expect(payload.split("\n")).toHaveLength(1);
+  test("explains a strict fallback on one line, naming the group that was lost", () => {
+    const lines = resolveForShell("kubectl get pods && cat ~/.kube/config", quiet()).split("\n");
+    expect(lines).toHaveLength(2);
+    expect(lines[1]).toMatch(/^secret-guard: this command ran under the strict profile because/);
+    expect(lines[1]).toContain("`kube`");
+    expect(lines[1]).toContain("`cat ~/.kube/config`");
+  });
+
+  test("stays silent about strict commands that never named a credential binary", () => {
+    expect(resolveForShell("cat README.md", quiet()).split("\n")[1]).toBe("");
   });
 
   test("the wrapper's expected location is a sibling of this module", () => {

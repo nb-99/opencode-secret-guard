@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { hasOpaqueConstruct, leadingBinary, resolveGroup, splitSegments, stripHeredocs } from "../src/command-policy.ts";
+import { analyzeCommand, hasOpaqueConstruct, leadingBinary, resolveGroup, splitSegments, stripHeredocs } from "../src/command-policy.ts";
 
 type RelaxationGroup = { binaries: string[]; allowPaths: string[] };
 
@@ -345,5 +345,41 @@ describe("resolveGroup — falls back to strict", () => {
     ["the command is empty", ""],
   ])("%s", (_label, command) => {
     expect(group(command)).toBeNull();
+  });
+});
+
+describe("analyzeCommand — why a command ran strict", () => {
+  const analyze = (command: string) => analyzeCommand(command, config);
+
+  test("says nothing when a group applies", () => {
+    expect(analyze("git push")).toEqual({ group: "ssh", reason: null, candidates: ["ssh"] });
+  });
+
+  test("says nothing when no credential binary is involved", () => {
+    // `cat README.md` running strict is the ordinary case, not a surprise.
+    expect(analyze("cat README.md && ls")).toEqual({ group: null, reason: null, candidates: [] });
+  });
+
+  test.each([
+    ["kubectl version && cat ~/.kube/config", /`cat` may open a file here/, ["kube"]],
+    ["kubectl get pods && rg gateway", /`rg` may open a file here/, ["kube"]],
+    ["git pull && npm ci", /`npm` belongs to no credential group/, ["ssh"]],
+    ["git fetch && kubectl get pods", /mixes the `ssh` and `kube` groups/, ["kube", "ssh"]],
+    ["GIT_SSH_COMMAND=x git push", /sets environment variables/, ["ssh"]],
+    ['git commit -m "$(cat x)"', /command or process substitution/, ["ssh"]],
+    ["(git push)", /subshell or brace group|substitution, a subshell/, []],
+    ["git commit -F - <<EOF\n$x\nEOF", /heredoc/, ["ssh"]],
+    // Unbalanced quoting defeats segmentation, so no candidate can be seen.
+    ["git commit -m 'oops", /quoting/, []],
+  ])("%s", (command, expected, candidates) => {
+    const analysis = analyze(command);
+    expect(analysis.group).toBeNull();
+    expect(analysis.candidates).toEqual(candidates);
+    if (candidates.length > 0) expect(analysis.reason).toMatch(expected);
+    else expect(analysis.reason).toBeNull();
+  });
+
+  test("names the offending segment", () => {
+    expect(analyze("kubectl get pods; cat ~/.kube/config").reason).toContain("`cat ~/.kube/config`");
   });
 });
