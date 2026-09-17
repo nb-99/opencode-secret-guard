@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { resolveGroup } from "./command-policy.ts";
-import { realpath } from "./paths.ts";
+import { matchesAny, realpath } from "./paths.ts";
 import type { GuardConfig } from "./policy.ts";
 import { profilePath } from "./profile.ts";
 
@@ -53,6 +53,36 @@ export function validatePlatform(config: GuardConfig): void {
 }
 
 export function resolveProfile(command: string, guardConfig: GuardConfig): string {
+  return resolveShellPlan(command, guardConfig).profile;
+}
+
+/**
+ * Names to remove from a command's environment: the policy's explicit list
+ * plus every inherited variable whose name matches a secret pattern, minus
+ * what the resolved group's binaries need (`aws` keeps `AWS_SECRET_ACCESS_KEY`).
+ * Only pattern hits are re-admitted: an explicitly named variable is the user
+ * saying "never", which no group overrides. Computed from the resolver's own
+ * environment, which is the one the command inherits.
+ */
+export function scrubbedEnvironment(
+  config: GuardConfig,
+  group: string | null,
+  environment: NodeJS.ProcessEnv = process.env,
+): string[] {
+  const keep = group ? config.relaxationGroups[group]?.allowEnvironment ?? [] : [];
+  const names = new Set(config.secretEnvironment);
+  if (config.secretEnvironmentPatterns.length > 0) {
+    for (const name of Object.keys(environment)) {
+      if (matchesAny(name, config.secretEnvironmentPatterns) && !matchesAny(name, keep)) names.add(name);
+    }
+  }
+  return [...names].sort();
+}
+
+export function resolveShellPlan(
+  command: string,
+  guardConfig: GuardConfig,
+): { profile: string; group: string | null; scrub: string[] } {
   // The wrapper only exists to enforce the shell layer. Being invoked while the
   // policy disables that layer means the two disagree about what is guarded, so
   // it refuses rather than running the command under no profile at all.
@@ -68,12 +98,13 @@ export function resolveProfile(command: string, guardConfig: GuardConfig): strin
   }
 
   const group = resolveGroup(command, guardConfig);
-  return profilePath({
+  const profile = profilePath({
     config: guardConfig,
     home: os.homedir(),
     cwd: process.cwd(),
     group,
   });
+  return { profile, group, scrub: scrubbedEnvironment(guardConfig, group) };
 }
 
 /**
@@ -82,6 +113,7 @@ export function resolveProfile(command: string, guardConfig: GuardConfig): strin
  * because the wrapper pays the interpreter's startup cost on every command.
  */
 export function resolveForShell(command: string, guardConfig: GuardConfig): string {
-  return [resolveProfile(command, guardConfig), ...guardConfig.secretEnvironment].join("\n");
+  const plan = resolveShellPlan(command, guardConfig);
+  return [plan.profile, ...plan.scrub].join("\n");
 }
 

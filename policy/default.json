@@ -43,7 +43,16 @@
     "/\\.azure/",
     "/\\.kube/",
     "/\\.config/gcloud/",
-    "/\\.docker/config\\.json$"
+    "/\\.docker/config\\.json$",
+    "/\\.terraform\\.d/credentials\\.tfrc\\.json$",
+    "/\\.vault-token$",
+    "/\\.config/sops/age/",
+    "/\\.config/gh/hosts\\.yml$",
+    "/\\.config/glab-cli/",
+    "/\\.config/fj/",
+    "/\\.config/hub$",
+    "/\\.config/github-copilot/",
+    "/\\.local/share/opencode/(auth|account)\\.json$"
   ],
   "secretExceptions": [
     "/\\.env\\.(example|sample|template|dist)$",
@@ -76,7 +85,11 @@
   "relaxationGroups": {
     "aws": {
       "allowPaths": [
-        ".aws"
+        ".aws",
+        ".terraform.d/credentials.tfrc.json"
+      ],
+      "allowEnvironment": [
+        "^AWS_"
       ],
       "binaries": [
         "aws",
@@ -91,6 +104,10 @@
       "allowPaths": [
         ".azure"
       ],
+      "allowEnvironment": [
+        "^AZURE_",
+        "^ARM_"
+      ],
       "binaries": [
         "az"
       ]
@@ -98,6 +115,10 @@
     "gcp": {
       "allowPaths": [
         ".config/gcloud"
+      ],
+      "allowEnvironment": [
+        "^GOOGLE_",
+        "^CLOUDSDK_"
       ],
       "binaries": [
         "gcloud",
@@ -108,6 +129,7 @@
       "allowPaths": [
         ".kube"
       ],
+      "allowEnvironment": [],
       "binaries": [
         "kubectl",
         "helm",
@@ -124,6 +146,10 @@
       "allowPaths": [
         ".npmrc"
       ],
+      "allowEnvironment": [
+        "^NPM_TOKEN$",
+        "^NODE_AUTH_TOKEN$"
+      ],
       "binaries": [
         "npm",
         "pnpm",
@@ -136,6 +162,7 @@
       "allowPaths": [
         ".docker"
       ],
+      "allowEnvironment": [],
       "binaries": [
         "docker",
         "podman",
@@ -149,7 +176,14 @@
         ".ssh",
         ".gnupg",
         ".git-credentials",
-        ".netrc"
+        ".netrc",
+        ".config/gh",
+        ".config/glab-cli",
+        ".config/fj",
+        ".config/hub"
+      ],
+      "allowEnvironment": [
+        "^(GH|GITHUB|GITLAB|GLAB|FORGEJO)_TOKEN$"
       ],
       "binaries": [
         "git",
@@ -171,6 +205,8 @@
   ],
   "exemptRoots": [],
   "secretEnvironment": [],
-  "secretEnvironmentPatterns": [],
+  "secretEnvironmentPatterns": [
+    "(^|_)(TOKEN|SECRET|PASSWORD|PASSWD|API_KEY|APIKEY|ACCESS_KEY|PRIVATE_KEY|CREDENTIALS?)(_|$)"
+  ],
   "cacheTtlMs": 2000
 }

@@ -89,6 +89,12 @@ export function opencodeCacheDirectory(): string {
   return path.join(base, "opencode");
 }
 
+/** OpenCode's data directory; `bin/` below it holds tools it installs. */
+export function opencodeDataDirectory(): string {
+  const base = process.env.XDG_DATA_HOME || path.join(os.homedir(), ".local", "share");
+  return path.join(base, "opencode");
+}
+
 export function configError(source: string, message: string): Error {
   return new Error(`secret-guard: ${source}: ${message}`);
 }

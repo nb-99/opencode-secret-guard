@@ -7,7 +7,7 @@ import { findRepoRoot, gitignoreRules } from "./gitignore.ts";
 import { isInside } from "./paths.ts";
 import type { GuardConfig } from "./policy.ts";
 import { buildProfile, sbplString } from "./profile.ts";
-import { SANDBOX_EXEC, validatePlatform } from "./shell.ts";
+import { SANDBOX_EXEC, scrubbedEnvironment, validatePlatform } from "./shell.ts";
 import { tamperTargets } from "./tamper.ts";
 
 const argsSchema = z.object({
@@ -155,7 +155,7 @@ export function cleanupProfile(config: GuardConfig, plan: CleanupPlan): string {
 function runCleanup(profile: string, targets: string[], config: GuardConfig, signal: AbortSignal): Promise<void> {
   signal.throwIfAborted();
   const env = { ...process.env };
-  for (const name of config.secretEnvironment) delete env[name];
+  for (const name of scrubbedEnvironment(config, null, env)) delete env[name];
 
   return new Promise((resolve, reject) => {
     const child = spawn(SANDBOX_EXEC, ["-p", profile, "/bin/rm", "-rf", "--", ...targets], {
