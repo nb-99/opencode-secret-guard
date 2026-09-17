@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { analyzeCommand, hasOpaqueConstruct, leadingBinary, resolveGroup, splitSegments, stripHeredocs } from "../src/command-policy.ts";
+import { analyzeCommand, findSecretPrinting, hasOpaqueConstruct, leadingBinary, resolveGroup, splitSegments, stripHeredocs } from "../src/command-policy.ts";
 
 type RelaxationGroup = { binaries: string[]; allowPaths: string[] };
 
@@ -388,12 +388,12 @@ describe("analyzeCommand — why a command ran strict", () => {
   const analyze = (command: string) => analyzeCommand(command, config);
 
   test("says nothing when a group applies", () => {
-    expect(analyze("git push")).toEqual({ group: "ssh", reason: null, candidates: ["ssh"] });
+    expect(analyze("git push")).toEqual({ group: "ssh", reason: null, candidates: ["ssh"], refusal: null });
   });
 
   test("says nothing when no credential binary is involved", () => {
     // `cat README.md` running strict is the ordinary case, not a surprise.
-    expect(analyze("cat README.md && ls")).toEqual({ group: null, reason: null, candidates: [] });
+    expect(analyze("cat README.md && ls")).toEqual({ group: null, reason: null, candidates: [], refusal: null });
   });
 
   test.each([
@@ -417,5 +417,75 @@ describe("analyzeCommand — why a command ran strict", () => {
 
   test("names the offending segment", () => {
     expect(analyze("kubectl get pods; cat ~/.kube/config").reason).toContain("`cat ~/.kube/config`");
+  });
+});
+
+describe("findSecretPrinting — invocations whose output is the secret", () => {
+  const rules = [
+    { binary: "aws", args: ["eks", "get-token"] },
+    { binary: "gh", args: ["auth", "token"] },
+    { binary: "kubectl", args: ["get", "secrets?(/.*)?", "(-o.*|--output(=.*)?)"] },
+    { binary: "security", args: ["find-(generic|internet)-password"] },
+    { binary: "sops", args: ["(-d|--decrypt|decrypt)"] },
+  ];
+  const find = (command: string) => findSecretPrinting(command, rules);
+
+  test.each([
+    ["aws eks get-token --cluster-name prod", "aws eks get-token --cluster-name prod"],
+    ["aws --profile x eks get-token", "aws --profile x eks get-token"],
+    ["/opt/homebrew/bin/aws eks get-token", "/opt/homebrew/bin/aws eks get-token"],
+    ["gh auth token", "gh auth token"],
+    ["echo start; gh auth token | pbcopy", "gh auth token"],
+    ["TOKEN=$(gh auth token)", "gh auth token"],
+    ["echo `gh auth token`", "gh auth token"],
+    ["sudo aws eks get-token", "aws eks get-token"],
+    ["env -u FOO AWS_PROFILE=x aws eks get-token", "aws eks get-token"],
+    ["rtk gh auth token", "gh auth token"],
+    ["timeout 5 gh auth token", "gh auth token"],
+    ["xargs -n1 gh auth token", "gh auth token"],
+    ["sh -c 'gh auth token'", "gh auth token"],
+    ['bash -lc "aws eks get-token"', "aws eks get-token"],
+    ["eval gh auth token", "gh auth token"],
+    ["eval 'gh auth token'", "gh auth token"],
+    ["sh -c 'sh -c \"gh auth token\"'", "gh auth token"],
+    ["kubectl get secret db -o yaml", "kubectl get secret db -o yaml"],
+    ["kubectl get secrets -ojson", "kubectl get secrets -ojson"],
+    ["kubectl get secret/db --output=jsonpath='{.data}'", "kubectl get secret/db --output=jsonpath={.data}"],
+    ["kubectl -n x get secret db -o yaml", "kubectl -n x get secret db -o yaml"],
+    ["security find-generic-password -s x -w", "security find-generic-password -s x -w"],
+    ["sops -d secrets.yaml", "sops -d secrets.yaml"],
+    ["sops decrypt secrets.yaml", "sops decrypt secrets.yaml"],
+  ])("refuses %s", (command, expected) => {
+    expect(find(command)).toBe(expected);
+  });
+
+  test.each([
+    "aws eks describe-cluster --name prod",
+    "aws eks update-kubeconfig --name prod",
+    "gh auth status",
+    "gh pr list",
+    "kubectl get secrets",
+    "kubectl get secret db",
+    "kubectl describe secret db",
+    "kubectl get pods -o yaml",
+    "git commit -m 'gh auth token is refused'",
+    "echo 'aws eks get-token'",
+    "rg 'get-token' docs/",
+    "security list-keychains",
+    "sops updatekeys secrets.yaml",
+    "",
+  ])("allows %s", (command) => {
+    expect(find(command)).toBeNull();
+  });
+
+  test("an empty args list refuses every invocation of the binary", () => {
+    expect(findSecretPrinting("pass show x", [{ binary: "pass", args: [] }])).toBe("pass show x");
+    expect(findSecretPrinting("pass", [{ binary: "pass", args: [] }])).toBe("pass");
+  });
+
+  test("the analysis carries the refusal alongside the group verdict", () => {
+    const analysis = analyzeCommand("gh auth token", { ...config, secretPrintingCommands: rules });
+    expect(analysis.refusal).toBe("gh auth token");
+    expect(analysis.group).toBe("ssh");
   });
 });

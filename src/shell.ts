@@ -99,6 +99,7 @@ export function resolveShellPlan(
   }
 
   const analysis = analyzeCommand(command, guardConfig);
+  if (analysis.refusal) throw new Error(refusalMessage(analysis.refusal));
   const profile = profilePath({
     config: guardConfig,
     home: os.homedir(),
@@ -111,6 +112,17 @@ export function resolveShellPlan(
     hint: strictHint(analysis),
     scrub: scrubbedEnvironment(guardConfig, analysis.group),
   };
+}
+
+/**
+ * Refusing is the right answer for a command whose output *is* the secret:
+ * there is no partial run that would have been useful.
+ */
+export function refusalMessage(invocation: string): string {
+  return (
+    `refusing to run \`${invocation}\`: its output is a credential, which must not enter the agent's context. ` +
+    "Use the credential through the tool that needs it instead of printing it."
+  );
 }
 
 /**
