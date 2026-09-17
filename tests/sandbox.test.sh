@@ -35,6 +35,10 @@ scratch="$(mktemp -d)"
 trap 'rm -rf "$scratch"' EXIT
 scratch="$(cd "$scratch" && pwd -P)"
 export XDG_CACHE_HOME="$scratch/cache"
+# The tamper-protection rules name OpenCode's own configuration directory, so
+# point it at a fixture rather than at the developer's real one.
+export XDG_CONFIG_HOME="$scratch/config"
+mkdir -p "$XDG_CONFIG_HOME/opencode"
 
 # Nested sandboxes are refused by the kernel, and an outer guard profile denies
 # the fixtures below. Probe before writing anything, so the failure names its
@@ -55,7 +59,7 @@ mkdir -p "$fixture"/{secrets,node_modules/pkg,dist,build,private-notes/nested,do
 # The vault lives outside the repo, as it does in production.
 vault="$scratch/vault"
 mkdir -p "$vault"/{memory,private}
-mkdir -p "$fakehome"/{.ssh,.gnupg,.kube,.aws}
+mkdir -p "$fakehome"/{.ssh,.gnupg,.kube,.aws,.config/gcloud}
 fakebin="$scratch/bin"
 mkdir -p "$fakebin"
 
@@ -87,6 +91,7 @@ printf '%s\n' "$SECRET" > "$fakehome/.ssh/id_ed25519"
 printf '%s\n' "$SECRET" > "$fakehome/.gnupg/private-keys-v1.d"
 printf '%s\n' "$SECRET" > "$fakehome/.kube/config"
 printf '%s\n' "$SECRET" > "$fakehome/.aws/credentials"
+printf '%s\n' "$SECRET" > "$fakehome/.config/gcloud/credentials.db"
 
 cat > "$fakebin/kubectl" <<EOF
 #!/bin/sh
@@ -226,6 +231,50 @@ expect_shell_allowed() {
   fi
 }
 
+# A command that tries to plant TAMPER at $2 must leave the file without it.
+# Whether the write fails loudly is irrelevant; only the resulting content is.
+# $1 description, $2 target path, $3 command, $4 profile (default: strict)
+expect_unwritable() {
+  local description="$1" target="$2" command="$3" profile="${4:-$strict}" after
+  (cd "$fixture" && HOME="$fakehome" sandbox-exec -f "$profile" /bin/zsh -c "$command" >/dev/null 2>&1)
+  after="$(cat "$target" 2>/dev/null || true)"
+  if [[ "$after" != *TAMPER* ]]; then
+    pass=$((pass + 1))
+    printf '  ok    %s\n' "$description"
+  else
+    fail=$((fail + 1)); failures+=("TAMPERED: $description -- $target")
+    printf '  FAIL  %s -- %s now contains TAMPER\n' "$description" "$target"
+  fi
+}
+
+# Same through the configured shell, whose resolver sees the caller's PATH.
+expect_shell_unwritable() {
+  local description="$1" target="$2" command="$3" after
+  (cd "$fixture" && HOME="$fakehome" PATH="$fakebin:$PATH" "$GUARD_SHELL" -c "$command" >/dev/null 2>&1)
+  after="$(cat "$target" 2>/dev/null || true)"
+  if [[ "$after" != *TAMPER* ]]; then
+    pass=$((pass + 1))
+    printf '  ok    %s\n' "$description"
+  else
+    fail=$((fail + 1)); failures+=("TAMPERED: $description -- $target")
+    printf '  FAIL  %s -- %s now contains TAMPER\n' "$description" "$target"
+  fi
+}
+
+# $1 description, $2 target path, $3 command: the write must land.
+expect_writable() {
+  local description="$1" target="$2" command="$3" profile="${4:-$strict}" after
+  (cd "$fixture" && HOME="$fakehome" sandbox-exec -f "$profile" /bin/zsh -c "$command" >/dev/null 2>&1)
+  after="$(cat "$target" 2>/dev/null || true)"
+  if [[ "$after" == *"$PUBLIC"* ]]; then
+    pass=$((pass + 1))
+    printf '  ok    %s\n' "$description"
+  else
+    fail=$((fail + 1)); failures+=("WRITE BLOCKED: $description -- $target")
+    printf '  FAIL  %s -- %s\n' "$description" "$target"
+  fi
+}
+
 echo "== direct reads must be denied =="
 expect_denied "cat .env"                    'cat .env'
 expect_denied "variable expansion"          'F=.env; cat $F'
@@ -302,6 +351,64 @@ expect_readable "aws profile reads credentials"  'cat "$HOME/.aws/credentials"' 
 expect_denied   "kube profile still hides .env"  'cat .env'                      "$scratch/kube.sb"
 expect_denied   "kube profile still hides aws"   'cat "$HOME/.aws/credentials"'  "$scratch/kube.sb"
 expect_denied   "ssh profile still hides kube"   'cat "$HOME/.kube/config"'      "$scratch/ssh.sb"
+
+echo "== renaming cannot move a secret out from under its rule =="
+# Path rules match the path at the time of the operation. Renaming the
+# directory that carries the protected component leaves the file under a name
+# no rule matches, so the directory node and its ancestors below $HOME must be
+# unrenameable. Files are already covered: rename checks file-write* on the
+# source path, which the pattern deny includes.
+expect_denied "renaming a credential directory"   'mv "$HOME/.kube" "$HOME/k2" 2>/dev/null; cat "$HOME/k2/config" 2>/dev/null'
+mv "$fakehome/k2" "$fakehome/.kube" 2>/dev/null || true
+expect_denied "renaming a relaxation parent"      'mv "$HOME/.config" "$HOME/c2" 2>/dev/null; cat "$HOME/c2/gcloud/credentials.db" 2>/dev/null'
+mv "$fakehome/c2" "$fakehome/.config" 2>/dev/null || true
+expect_denied "renaming a deny root"              'mv "'"$vault"'" "'"$scratch"'/v2" 2>/dev/null; cat "'"$scratch"'/v2/private/journal.md" 2>/dev/null'
+mv "$scratch/v2" "$vault" 2>/dev/null || true
+expect_denied "renaming a secrets directory"      'mv secrets plain 2>/dev/null; cat plain/token 2>/dev/null'
+mv "$fixture/plain" "$fixture/secrets" 2>/dev/null || true
+expect_denied "hard-linking a secret"             'ln .env "'"$scratch"'/hl" 2>/dev/null; cat "'"$scratch"'/hl" 2>/dev/null'
+expect_denied "hard-linking an ignored file"      'ln local.conf "'"$scratch"'/hl2" 2>/dev/null; cat "'"$scratch"'/hl2" 2>/dev/null'
+expect_writable "creating a sibling under a protected ancestor" "$fakehome/.config/fresh/note" \
+  'mkdir -p "$HOME/.config/fresh" && printf "%s" "'"$PUBLIC"'" > "$HOME/.config/fresh/note"'
+expect_readable "kube profile may still rename its own directory" \
+  'mv "$HOME/.kube" "$HOME/.kube-tmp" && mv "$HOME/.kube-tmp" "$HOME/.kube" && cat "$HOME/.kube/config"' "$scratch/kube.sb"
+
+echo "== the guard's own configuration must be immutable from a command =="
+# Anything OpenCode loads and executes at the next start — its config, plugin
+# directories, package.json (bun install runs on startup), the npm plugin
+# cache, and this policy — would let one command disable the guard for every
+# later one. User-writable PATH directories are the same hole one hop removed:
+# the resolver and OpenCode spawn `git` and `bash` by name.
+opencode_config="$XDG_CONFIG_HOME/opencode"
+expect_unwritable "global opencode.json"   "$opencode_config/opencode.json"  'printf TAMPER > "'"$opencode_config"'/opencode.json"'
+expect_unwritable "global opencode.jsonc"  "$opencode_config/opencode.jsonc" 'printf TAMPER > "'"$opencode_config"'/opencode.jsonc"'
+expect_unwritable "global plugin"          "$opencode_config/plugins/evil.ts" 'mkdir -p "'"$opencode_config"'/plugins" && printf TAMPER > "'"$opencode_config"'/plugins/evil.ts"'
+expect_unwritable "global package.json"    "$opencode_config/package.json"   'printf TAMPER > "'"$opencode_config"'/package.json"'
+expect_unwritable "project opencode.json"  "$fixture/opencode.json"          'printf TAMPER > opencode.json'
+expect_unwritable "project plugin"         "$fixture/.opencode/plugins/evil.ts" 'mkdir -p .opencode/plugins && printf TAMPER > .opencode/plugins/evil.ts'
+expect_unwritable "project package.json"   "$fixture/.opencode/package.json" 'printf TAMPER > .opencode/package.json'
+expect_unwritable "npm plugin cache"       "$XDG_CACHE_HOME/opencode/node_modules/evil/index.js" \
+  'mkdir -p "$XDG_CACHE_HOME/opencode/node_modules/evil" && printf TAMPER > "$XDG_CACHE_HOME/opencode/node_modules/evil/index.js"'
+expect_unwritable "renamed config dir cannot be recreated" "$opencode_config/opencode.json" \
+  'mv "'"$opencode_config"'" "'"$XDG_CONFIG_HOME"'/oc2" 2>/dev/null; mkdir -p "'"$opencode_config"'" && printf TAMPER > "'"$opencode_config"'/opencode.json"'
+mv "$XDG_CONFIG_HOME/oc2" "$opencode_config" 2>/dev/null || true
+expect_writable "project prompts stay editable" "$fixture/.opencode/command/x.md" \
+  'mkdir -p .opencode/command && printf "%s" "'"$PUBLIC"'" > .opencode/command/x.md'
+expect_writable "global skills stay editable" "$opencode_config/skills/x/SKILL.md" \
+  'mkdir -p "'"$opencode_config"'/skills/x" && printf "%s" "'"$PUBLIC"'" > "'"$opencode_config"'/skills/x/SKILL.md"'
+expect_shell_unwritable "writable PATH directory" "$fakebin/git" 'printf TAMPER > "'"$fakebin"'/git"'
+rm -f "$fakebin/git"
+tamper_config="$scratch/tamper-policy.json"
+cp "$CONFIG" "$tamper_config"
+(cd "$fixture" && OPENCODE_SECRET_GUARD_CONFIG="$tamper_config" HOME="$fakehome" PATH="$fakebin:$PATH" \
+  "$GUARD_SHELL" -c 'printf TAMPER >> "$OPENCODE_SECRET_GUARD_CONFIG"' >/dev/null 2>&1)
+if [[ "$(cat "$tamper_config")" != *TAMPER* ]]; then
+  pass=$((pass + 1))
+  printf '  ok    policy file\n'
+else
+  fail=$((fail + 1)); failures+=("TAMPERED: policy file")
+  printf '  FAIL  policy file -- %s now contains TAMPER\n' "$tamper_config"
+fi
 
 echo "== the file-tool predicate and the kernel must agree =="
 # classifyPath mirrors buildProfile by hand. Every other test in this suite

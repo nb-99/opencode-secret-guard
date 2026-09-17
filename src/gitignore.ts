@@ -10,6 +10,25 @@ import { realpath } from "./paths.ts";
  */
 export const IGNORED_DIRECTORY_LIMIT = 4096;
 
+/**
+ * Runs the git named by the policy. Resolving `git` through PATH would let a
+ * sandboxed command plant a binary in a user-writable PATH directory that the
+ * unsandboxed resolver then executes. A missing binary fails by name: the
+ * gitignore layer treats "git said nothing" as "nothing is ignored", so a
+ * silent spawn failure would quietly shrink the boundary.
+ */
+export function runGit(
+  git: string,
+  args: string[],
+  options: { input?: string } = {},
+): { status: number | null; stdout: string } {
+  const result = spawnSync(git, args, { encoding: "utf8", timeout: 5000, ...options });
+  if (result.error && "code" in result.error && result.error.code === "ENOENT") {
+    throw new Error(`secret-guard: "tools.git" names ${git}, which does not exist.`);
+  }
+  return { status: result.status, stdout: result.stdout ?? "" };
+}
+
 export interface GitignoreRules {
   repoRoot: string | null;
   subpaths: string[];
@@ -55,6 +74,7 @@ export function collectDirectories(root: string, allowed: Set<string>, limit: nu
  * collapses fully ignored directories to a single entry.
  */
 export function gitignoreRules(
+  git: string,
   repoRoot: string,
   artifactAllowlist: string[],
   directoryLimit: number = IGNORED_DIRECTORY_LIMIT,
@@ -62,10 +82,7 @@ export function gitignoreRules(
   const rules: GitignoreRules = { repoRoot, subpaths: [], literals: [], directories: [] };
   const allowed = new Set(artifactAllowlist);
 
-  const trackedResult = spawnSync("git", ["-C", repoRoot, "ls-files", "-s", "-z"], {
-    encoding: "utf8",
-    timeout: 5000,
-  });
+  const trackedResult = runGit(git, ["-C", repoRoot, "ls-files", "-s", "-z"]);
   if (trackedResult.status !== 0) return rules;
   const tracked = new Set(
     trackedResult.stdout
@@ -78,11 +95,9 @@ export function gitignoreRules(
       }),
   );
 
-  const result = spawnSync(
-    "git",
-    ["-C", repoRoot, "ls-files", "-z", "-o", "-i", "--exclude-standard", "--directory"],
-    { encoding: "utf8", timeout: 5000 },
-  );
+  const result = runGit(git, [
+    "-C", repoRoot, "ls-files", "-z", "-o", "-i", "--exclude-standard", "--directory",
+  ]);
   if (result.status !== 0 || !result.stdout) return rules;
 
   for (const entry of result.stdout.split("\0")) {
@@ -173,7 +188,7 @@ export function ignoreVerdictWithoutGit(
  * more than a second to a single tool call. `-z` makes both the input and the
  * output NUL-separated; exit status 1 means "nothing was ignored", not failure.
  */
-export function primeIgnoreCache(targets: string[], artifactAllowlist: string[]): void {
+export function primeIgnoreCache(git: string, targets: string[], artifactAllowlist: string[]): void {
   const byRoot = new Map<string, string[]>();
   for (const target of targets) {
     const verdict = ignoreVerdictWithoutGit(target, artifactAllowlist);
@@ -184,27 +199,23 @@ export function primeIgnoreCache(targets: string[], artifactAllowlist: string[])
   }
 
   for (const [root, paths] of byRoot) {
-    const result = spawnSync("git", ["-C", root, "check-ignore", "-z", "--stdin", "--"], {
-      encoding: "utf8",
+    const result = runGit(git, ["-C", root, "check-ignore", "-z", "--stdin", "--"], {
       input: paths.join("\0"),
-      timeout: 5000,
     });
     // status 128 is a real error; leave those paths unclassified so the
     // per-path fallback can decide rather than silently reporting "allowed".
     if (result.status !== 0 && result.status !== 1) continue;
 
-    const ignored = new Set((result.stdout ?? "").split("\0").filter(Boolean));
+    const ignored = new Set(result.stdout.split("\0").filter(Boolean));
     for (const target of paths) ignoreCache.set(target, ignored.has(target));
   }
 }
 
-export function isGitIgnored(target: string, artifactAllowlist: string[]): boolean {
+export function isGitIgnored(git: string, target: string, artifactAllowlist: string[]): boolean {
   const verdict = ignoreVerdictWithoutGit(target, artifactAllowlist);
   if (typeof verdict === "boolean") return verdict;
 
-  const result = spawnSync("git", ["-C", verdict.root, "check-ignore", "-q", "--", target], {
-    timeout: 5000,
-  });
+  const result = runGit(git, ["-C", verdict.root, "check-ignore", "-q", "--", target]);
   const ignored = result.status === 0;
   ignoreCache.set(target, ignored);
   return ignored;

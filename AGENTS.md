@@ -22,7 +22,7 @@ For direct Bun test runs, install the locked npm dependencies first:
 
 ```sh
 npm ci
-nix-shell -p bun --run "bun test tests/group.test.ts tests/predicate.test.ts tests/cleanup.test.ts"
+nix-shell -p bun --run "bun test tests/group.test.ts tests/predicate.test.ts tests/tamper.test.ts tests/cleanup.test.ts"
 ```
 
 The integration suite cannot run inside an existing sandbox because

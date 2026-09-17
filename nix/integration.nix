@@ -7,6 +7,7 @@ let
     cp -r ${../tests} "$out/tests"
     ln -s ${package}/lib/node_modules/zod "$out/node_modules/zod"
   '';
+  testPolicy = import ./test-policy.nix { inherit pkgs; };
 in
 # Kernel-level tests. sandbox-exec refuses to apply a profile inside an existing
 # sandbox, so this cannot be a check and must not run from a guarded shell.
@@ -33,10 +34,10 @@ pkgs.writeShellApplication {
 
     REPO_ROOT="''${REPO_ROOT:-${testSource}}"
     export REPO_ROOT
-    export OPENCODE_SECRET_GUARD_CONFIG="''${OPENCODE_SECRET_GUARD_CONFIG:-${../policy/default.json}}"
+    export OPENCODE_SECRET_GUARD_CONFIG="''${OPENCODE_SECRET_GUARD_CONFIG:-${testPolicy}}"
     export SECRET_GUARD_SHELL=${package}/bin/opencode-secret-guard
 
-    bun test "$REPO_ROOT/tests/group.test.ts" "$REPO_ROOT/tests/predicate.test.ts" "$REPO_ROOT/tests/cleanup.test.ts" "$REPO_ROOT/tests/cleanup.integration.ts"
+    bun test "$REPO_ROOT/tests/group.test.ts" "$REPO_ROOT/tests/predicate.test.ts" "$REPO_ROOT/tests/tamper.test.ts" "$REPO_ROOT/tests/cleanup.test.ts" "$REPO_ROOT/tests/cleanup.integration.ts"
     bash "$REPO_ROOT/tests/sandbox.test.sh"
   '';
 }

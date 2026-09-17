@@ -2,6 +2,7 @@
   lib,
   runCommand,
   makeWrapper,
+  bash,
   bun,
   callPackage,
 }:
@@ -15,7 +16,10 @@ in
 # works from a checkout.
 runCommand "opencode-secret-guard"
   {
-    nativeBuildInputs = [ makeWrapper ];
+    nativeBuildInputs = [
+      makeWrapper
+      bash
+    ];
 
     meta = {
       description = "Keeps secrets out of an OpenCode agent's context";
@@ -31,6 +35,8 @@ runCommand "opencode-secret-guard"
     cp ${../policy/default.json} "$out/share/opencode-secret-guard/default-policy.json"
 
     install -m755 ${../bin/opencode-secret-guard} "$out/bin/opencode-secret-guard"
+    # A store-path interpreter: the wrapper must not resolve bash through PATH.
+    patchShebangs "$out/bin/opencode-secret-guard"
     # --set-default so a caller can still point at another interpreter.
     wrapProgram "$out/bin/opencode-secret-guard" \
       --set-default SECRET_GUARD_BUN ${bun}/bin/bun

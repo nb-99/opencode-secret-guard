@@ -6,8 +6,10 @@ import type { GitignoreRules } from "./gitignore.ts";
 import { findRepoRoot, gitignoreRules } from "./gitignore.ts";
 import { realpath } from "./paths.ts";
 import type { GuardConfig } from "./policy.ts";
+import type { TamperTargets } from "./tamper.ts";
+import { protectedNodes, tamperTargets } from "./tamper.ts";
 
-export const PROFILE_VERSION = 7;
+export const PROFILE_VERSION = 8;
 
 /** Quotes a literal path for SBPL. Backslashes are escaped. */
 export function sbplString(value: string): string {
@@ -33,8 +35,9 @@ export function buildProfile(options: {
   home: string;
   group: string | null;
   gitignore: GitignoreRules;
+  tamper: TamperTargets;
 }): string {
-  const { config, home, group, gitignore } = options;
+  const { config, home, group, gitignore, tamper } = options;
   const lines: string[] = [
     "(version 1)",
     "(allow default)",
@@ -91,6 +94,20 @@ export function buildProfile(options: {
     lines.push(`(deny file-read-data file-write* (regex ${regexes}))`);
   }
 
+  // A rename is checked against the source path, so a file under a protected
+  // name cannot be moved out. The directory carrying that name can, unless its
+  // node — and the ancestors the name leads through — is unwritable too. Emitted
+  // before the relaxation so a group may still rename its own directory.
+  const nodes = protectedNodes(config, home);
+  if (nodes.regexes.length > 0 || nodes.literals.length > 0) {
+    const targets = [
+      ...(nodes.regexes.length > 0 ? [`(regex ${nodes.regexes.map(sbplRegex).join(" ")})`] : []),
+      ...nodes.literals.map((p) => `(literal ${sbplString(p)})`),
+    ];
+    lines.push("", ";; 4b. protected directory nodes and their ancestors cannot be renamed");
+    lines.push(`(deny file-write* ${targets.join(" ")})`);
+  }
+
   const relaxation = group ? config.relaxationGroups[group] : undefined;
   if (relaxation) {
     const targets = relaxation.allowPaths.map((p) =>
@@ -123,6 +140,17 @@ export function buildProfile(options: {
     `(deny file-write* (subpath ${sbplString(realpath(cacheDirectory()))}))`,
   );
 
+  // Last, after the exemptions: nothing in the policy may open these up. One
+  // write here would disable the guard for every later command.
+  const tamperTargetsSbpl = [
+    ...tamper.literals.map((p) => `(literal ${sbplString(p)})`),
+    ...tamper.subpaths.map((p) => `(subpath ${sbplString(p)})`),
+  ];
+  if (tamperTargetsSbpl.length > 0) {
+    lines.push("", ";; 10. what OpenCode loads at its next start stays as the user left it");
+    lines.push(`(deny file-write* ${tamperTargetsSbpl.join(" ")})`);
+  }
+
   return lines.join("\n") + "\n";
 }
 
@@ -145,9 +173,12 @@ export function profilePath(options: {
   const { config, home, cwd, group } = options;
   const directory = options.directory ?? cacheDirectory();
   const repoRoot = findRepoRoot(cwd);
+  // PATH differs between invocations (direnv, per-project shells), and the
+  // writable entries become deny rules, so they are part of the identity.
+  const tamper = tamperTargets({ repoRoot, pathEnvironment: process.env.PATH });
 
   const key = createHash("sha256")
-    .update(JSON.stringify({ version: PROFILE_VERSION, repoRoot, group, home, config }))
+    .update(JSON.stringify({ version: PROFILE_VERSION, repoRoot, group, home, config, tamper }))
     .digest("hex")
     .slice(0, 32);
   const target = path.join(directory, `${key}.sb`);
@@ -160,9 +191,9 @@ export function profilePath(options: {
   }
 
   const gitignore = repoRoot
-    ? gitignoreRules(repoRoot, config.artifactAllowlist)
+    ? gitignoreRules(config.tools.git, repoRoot, config.artifactAllowlist)
     : { repoRoot: null, subpaths: [], literals: [], directories: [] };
-  const profile = buildProfile({ config, home, group, gitignore });
+  const profile = buildProfile({ config, home, group, gitignore, tamper });
 
   fs.mkdirSync(directory, { recursive: true });
   const temporary = `${target}.${process.pid}.tmp`;

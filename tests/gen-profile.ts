@@ -8,20 +8,9 @@
  */
 import { gitignoreRules } from "../src/gitignore.ts";
 import { loadConfig } from "../src/policy.ts";
+import type { GuardConfig } from "../src/policy.ts";
 import { buildProfile } from "../src/profile.ts";
-
-type GuardConfig = {
-  configVersion: number;
-  mode: "shell+files" | "files-only";
-  secretPatterns: string[];
-  secretExceptions: string[];
-  artifactAllowlist: string[];
-  relaxationGroups: Record<string, { binaries: string[]; allowPaths: string[] }>;
-  denyRoots: string[];
-  exemptRoots: string[];
-  secretEnvironment: string[];
-  cacheTtlMs: number;
-};
+import { tamperTargets } from "../src/tamper.ts";
 
 const [policyPath, repoRoot, home, groupArgument] = process.argv.slice(2);
 if (!policyPath || !repoRoot || !home || !groupArgument) {
@@ -31,7 +20,7 @@ if (!policyPath || !repoRoot || !home || !groupArgument) {
 const split = (value: string | undefined) =>
   value ? value.split(":").filter((entry) => entry.length > 0) : undefined;
 
-const base = loadConfig(policyPath, home) as GuardConfig;
+const base = loadConfig(policyPath, home);
 const config: GuardConfig = {
   ...base,
   exemptRoots: split(process.env.SG_EXEMPT_ROOTS) ?? base.exemptRoots,
@@ -43,6 +32,7 @@ process.stdout.write(
     config,
     home,
     group: groupArgument === "-" ? null : groupArgument,
-    gitignore: gitignoreRules(repoRoot, config.artifactAllowlist),
+    gitignore: gitignoreRules(config.tools.git, repoRoot, config.artifactAllowlist),
+    tamper: tamperTargets({ repoRoot, pathEnvironment: process.env.PATH, policyPath }),
   }),
 );
