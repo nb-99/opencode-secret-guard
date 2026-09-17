@@ -32,29 +32,81 @@ export const INERT_BUILTINS = new Set([
  * when given one. A segment invoking one is therefore only skipped when none of
  * its arguments could name a path; see `isInertFilter`.
  *
- * Deliberately absent: `tee`, `sed` and `awk` write files or shell out; `less`
- * runs a preprocessor through LESSOPEN. `rg`, `grep` and `jq` are absent too,
- * but for a different reason — their first operand is a pattern, not a
- * filename — and they get their own rule in `isPatternFilter` below.
+ * Deliberately absent: `tee` and `sed` write files (`sed w`, `sed -i`) or run
+ * commands (`sed e`); `less` runs a preprocessor through LESSOPEN. `awk` gets
+ * its own rule in `isInertAwk`, since its program text decides. `rg`, `grep`
+ * and `jq` are absent too, but for a different reason — their first operand
+ * is a pattern, not a filename — and they get their own rule in
+ * `isPatternFilter` below.
  */
 export const PIPE_FILTERS = new Set([
+  "base64",
   "cat",
   "column",
+  "cut",
+  "fold",
   "head",
+  "md5",
+  "md5sum",
   "nl",
+  "paste",
   "rev",
+  "sha1sum",
+  "sha256sum",
+  "shasum",
   "sort",
   "tail",
   "tr",
   "uniq",
   "wc",
+  "xxd",
 ]);
+
+/**
+ * Single-character delimiter options whose value may be any character —
+ * `cut -d= -f2`, `sort -t:`, `paste -d,` — even one that would otherwise mark
+ * a path. A one-character value cannot name a file.
+ */
+export const DELIMITER_FLAGS: Record<string, string> = {
+  cut: "d",
+  paste: "d",
+  sort: "t",
+};
 
 /**
  * Pattern-first filters. They are skippable only as pipe consumers, with no
  * file operands or modes that search the working tree.
  */
 export const PATTERN_FILTERS = new Set(["rg", "grep", "jq"]);
+
+/**
+ * awk fragments that open a file or run a program from inside the script.
+ * `getline` (from a file or a command), `system()`, `close()`, `fflush()`,
+ * a `print`/`printf` redirected with `>`, `>>` or piped with `|`, and gawk's
+ * `@include`/`@load` all reach beyond stdin. A bare comparison such as `NR>1`
+ * or `$3 > 100` does not, which is why `>` is only rejected inside a print.
+ */
+export const AWK_ESCAPES = /getline|system\s*\(|close\s*\(|fflush\s*\(|printf?\b[^;}]*[>|]|@(include|load)/;
+
+/**
+ * True when the segment redirects outside quotes. `awk 'NR>1'` and
+ * `rg 'a>b'` carry a `>` that zsh treats as text; `cat > file` does not.
+ */
+export function hasRedirection(segment: string): boolean {
+  let quote: string | null = null;
+  for (let i = 0; i < segment.length; i++) {
+    const c = segment[i]!;
+    if (quote) {
+      if (c === "\\" && quote === '"') i++;
+      else if (c === quote) quote = null;
+      continue;
+    }
+    if (c === "\\") i++;
+    else if (c === "'" || c === '"') quote = c;
+    else if (c === "<" || c === ">") return true;
+  }
+  return false;
+}
 
 /**
  * Options of the pattern-first filters that read a file or run a command.
@@ -203,7 +255,7 @@ export function isPatternFilter(
   hasEnvironmentAssignments: boolean,
 ): boolean {
   if (!PATTERN_FILTERS.has(binary) || !receivesPipe || hasEnvironmentAssignments) return false;
-  if (/[<>]/.test(segment)) return false;
+  if (hasRedirection(segment)) return false;
 
   const pathFlags = PATTERN_FILTER_PATH_FLAGS[binary];
   const tokens = shellWords(args);
@@ -577,19 +629,66 @@ export function leadingBinary(segment: string): string | null {
 
 /**
  * True when a segment runs a known filter in a shape that cannot open a file:
- * every argument is either a bare number (`tail -n 30`) or a flag with no path
- * character in it, and the segment carries no redirection. `sort -o/tmp/out`
- * and `cat < ~/.ssh/id_ed25519` both fail this test and keep the strict
- * profile.
+ * every argument is either a bare number (`tail -n 30`), a number range or
+ * list (`cut -f 2,4-6`), a flag with no path character in it, or a
+ * one-character delimiter (`cut -d=`), and the segment carries no redirection.
+ * `sort -o/tmp/out`, `base64 -i key.pem` and `cat < ~/.ssh/id_ed25519` all
+ * fail this test and keep the strict profile.
  */
 export function isInertFilter(segment: string, binary: string, args: string): boolean {
   if (!PIPE_FILTERS.has(binary)) return false;
-  if (/[<>]/.test(segment)) return false;
+  if (hasRedirection(segment)) return false;
 
-  return args
-    .split(/\s+/)
-    .filter((token) => token.length > 0)
-    .every((token) => /^\d+$/.test(token) || (token.startsWith("-") && !/[/~=]/.test(token)));
+  const delimiter = DELIMITER_FLAGS[binary];
+  const tokens = args.split(/\s+/).filter((token) => token.length > 0);
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens[i]!;
+    if (/^[\d,-]+$/.test(token)) continue;
+    if (delimiter && token === `-${delimiter}`) {
+      const value = tokens[++i];
+      if (value === undefined || [...value].length !== 1) return false;
+      continue;
+    }
+    if (delimiter && token.startsWith(`-${delimiter}`) && [...token.slice(2)].length === 1) continue;
+    if (token.startsWith("-") && !/[/~=]/.test(token)) continue;
+    return false;
+  }
+  return true;
+}
+
+/**
+ * True when a piped awk segment can only transform standard input: no `-f`
+ * program file, exactly one program operand and no file operands, and a
+ * program that neither opens a file nor runs a command. `-F` and `-v` are
+ * accepted; their values cannot name a file awk would open.
+ */
+export function isInertAwk(
+  segment: string,
+  binary: string,
+  args: string,
+  receivesPipe: boolean,
+): boolean {
+  if (binary !== "awk" || !receivesPipe) return false;
+  if (hasRedirection(segment)) return false;
+
+  const tokens = shellWords(args);
+  if (!tokens) return false;
+
+  const positionals: string[] = [];
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens[i]!;
+    if (token === "--") return false;
+    if (token.startsWith("-") && token.length > 1) {
+      if (/^-[Fv]$/.test(token)) {
+        if (++i >= tokens.length) return false;
+        continue;
+      }
+      if (/^-[Fv]./.test(token)) continue;
+      return false;
+    }
+    positionals.push(token);
+  }
+  return positionals.length === 1 && !AWK_ESCAPES.test(positionals[0]!);
 }
 
 /**
@@ -661,13 +760,14 @@ export function analyzeCommand(command: string, config: GuardConfig): CommandAna
     if (hasEnvironmentAssignments) {
       return strict(`\`${segment.command}\` sets environment variables, which can inject options or programs into ${binary}`);
     }
-    if (INERT_BUILTINS.has(binary) && !/[<>]/.test(segment.command)) continue;
+    if (INERT_BUILTINS.has(binary) && !hasRedirection(segment.command)) continue;
     if (isInertFilter(segment.command, binary, args)) continue;
+    if (isInertAwk(segment.command, binary, args, segment.receivesPipe)) continue;
     if (isPatternFilter(segment.command, binary, args, segment.receivesPipe, hasEnvironmentAssignments)) continue;
     const group = binaryToGroup.get(binary);
     if (!group) {
-      const kind = PIPE_FILTERS.has(binary) || PATTERN_FILTERS.has(binary)
-        ? `\`${binary}\` may open a file here (a path operand, redirection, recursive mode, or it is not a direct pipe consumer)`
+      const kind = PIPE_FILTERS.has(binary) || PATTERN_FILTERS.has(binary) || binary === "awk"
+        ? `\`${binary}\` may open a file or run a program here (a path operand, redirection, recursive mode, or it is not a direct pipe consumer)`
         : `\`${binary}\` belongs to no credential group`;
       return strict(`in \`${segment.command}\`, ${kind}`);
     }
