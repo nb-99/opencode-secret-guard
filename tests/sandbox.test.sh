@@ -445,6 +445,13 @@ expect_writable "project prompts stay editable" "$fixture/.opencode/command/x.md
   'mkdir -p .opencode/command && printf "%s" "'"$PUBLIC"'" > .opencode/command/x.md'
 expect_writable "global skills stay editable" "$opencode_config/skills/x/SKILL.md" \
   'mkdir -p "'"$opencode_config"'/skills/x" && printf "%s" "'"$PUBLIC"'" > "'"$opencode_config"'/skills/x/SKILL.md"'
+# Every command runs under `zsh -c`, which sources ~/.zshenv first. A function
+# left there named after a credential binary would be handed that binary's
+# relaxation by the next command — the wrapper's fixed interpreter line one
+# level down.
+expect_unwritable "zsh startup file" "$fakehome/.zshenv" 'printf TAMPER > "$HOME/.zshenv"'
+expect_writable "interactive zsh files stay editable" "$fakehome/.zshrc" \
+  'printf "%s" "'"$PUBLIC"'" > "$HOME/.zshrc"'
 expect_shell_unwritable "writable PATH directory" "$fakebin/git" 'printf TAMPER > "'"$fakebin"'/git"'
 rm -f "$fakebin/git"
 tamper_config="$scratch/tamper-policy.json"
