@@ -15,7 +15,8 @@ import { configPath, opencodeCacheDirectory, opencodeConfigDirectory, opencodeDa
  * cache that install populates. So is this policy, and so is this package.
  * User-writable PATH directories are the same hole one hop removed — the
  * unsandboxed resolver, OpenCode and its formatters spawn programs by name,
- * and a `git` planted in `/opt/homebrew/bin` runs with no profile at all.
+ * and a `git` planted in `/opt/homebrew/bin` runs with no profile at all. So
+ * is `.zshenv`, which the interpreter every command runs under sources first.
  *
  * Reads are never affected. `literals` are single files (or a directory node
  * that must not be renamed); `subpaths` are whole trees.
@@ -79,9 +80,35 @@ function ancestors(target: string): string[] {
   return found;
 }
 
+/**
+ * Files zsh reads before running a command, which the wrapper hands every
+ * command to. `zsh -c` sources `/etc/zshenv` and then `$ZDOTDIR/.zshenv` (or
+ * `~/.zshenv`) on *every* invocation, interactive or not — `.zshrc` and
+ * `.zprofile` are not read for `-c` and stay editable.
+ *
+ * That makes `.zshenv` the same vector the wrapper's fixed interpreter line
+ * closes, one level down: a command that leaves a function named after a
+ * credential binary there — `kubectl() { cat ~/.kube/config }` — gets the
+ * `kube` relaxation handed to its own code by the *next* command, and the
+ * credential is readable after all.
+ *
+ * Protecting the file rather than starting zsh with `-f` keeps `/etc/zshenv`,
+ * which is where a nix-darwin host sets PATH for non-interactive shells; `-f`
+ * would skip it and leave commands unable to find their binaries. `/etc` is
+ * root-owned, so it needs no rule of its own.
+ */
+export function zshStartupFiles(home: string): string[] {
+  const directories = new Set([home]);
+  // A ZDOTDIR the guard's own process inherited: the command cannot change it
+  // for the next invocation, but the user may have set it for the session.
+  if (process.env.ZDOTDIR && path.isAbsolute(process.env.ZDOTDIR)) directories.add(process.env.ZDOTDIR);
+  return [...directories].map((directory) => path.join(directory, ".zshenv"));
+}
+
 export function tamperTargets(options: {
   repoRoot: string | null;
   pathEnvironment: string | undefined;
+  home: string;
   policyPath?: string;
   packageDirectory?: string;
 }): TamperTargets {
@@ -91,6 +118,7 @@ export function tamperTargets(options: {
     realpath(policy),
     configDirectory,
     ...CONFIG_FILES.map((name) => path.join(configDirectory, name)),
+    ...zshStartupFiles(options.home),
   ]);
   const subpaths = new Set<string>([
     ...CODE_DIRECTORIES.map((name) => path.join(configDirectory, name)),
