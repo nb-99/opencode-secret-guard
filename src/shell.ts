@@ -211,6 +211,12 @@ export const GLOBAL_INSTALLERS: { binary: string; pattern: RegExp }[] = [
  * The first word of the command that names a path no command may write, or
  * null. Words are taken as written: a path spelled by a variable is invisible
  * here, and a command that uses one has already been forced strict.
+ *
+ * Both spellings are tested, because a target is protected at the link as well
+ * as at its destination and a `PATH` entry is protected as `PATH` spells it.
+ * Resolving alone would miss `/opt/homebrew/bin/git`, whose realpath leaves the
+ * protected directory for the Cellar; the lexical form alone would miss a word
+ * reaching a target through a symlinked parent.
  */
 export function tamperedPath(
   command: string,
@@ -223,8 +229,9 @@ export function tamperedPath(
       if (!word || word.startsWith("-")) continue;
       if (!word.includes("/") && !word.startsWith("~")) continue;
       const expanded = word.startsWith("~/") ? path.join(home, word.slice(2)) : word;
-      const resolved = realpath(path.resolve(cwd, expanded));
-      if (isTamperProtected(resolved, tamper)) return word;
+      const lexical = path.resolve(cwd, expanded);
+      if (isTamperProtected(lexical, tamper)) return word;
+      if (isTamperProtected(realpath(lexical), tamper)) return word;
     }
   }
   return null;
