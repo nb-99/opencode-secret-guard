@@ -764,6 +764,18 @@ else
   fail=$((fail + 1)); failures+=("SHELL ECHO KEPT ENV: $shell_echo_env_output")
   printf '  FAIL  a kept variable is unreachable from an echo in the same command -- %s\n' "$shell_echo_env_output"
 fi
+# A variable the group does *not* keep is scrubbed either way, so echoing it
+# costs nothing and the group survives — the common `echo $PWD && git status`.
+shell_echo_other_output="$(cd "$fixture" && OPENCODE_SECRET_GUARD_CONFIG="$scrub_config" \
+  OTHER_CANARY_TOKEN="ENV-ONLY-CANARY" HOME="$fakehome" PATH="$fakebin:$PATH" \
+  "$GUARD_SHELL" -c 'kubectl; echo "$OTHER_CANARY_TOKEN"' 2>&1)"
+if [[ "$shell_echo_other_output" == *"$SECRET"* && "$shell_echo_other_output" != *"ENV-ONLY-CANARY"* ]]; then
+  pass=$((pass + 1))
+  printf '  ok    echoing a variable the group does not keep leaves the relaxation intact\n'
+else
+  fail=$((fail + 1)); failures+=("SHELL ECHO OTHER ENV: $shell_echo_other_output")
+  printf '  FAIL  echoing a variable the group does not keep leaves the relaxation intact -- %s\n' "$shell_echo_other_output"
+fi
 
 "$GUARD_SHELL" -c true extra >/dev/null 2>&1
 invalid_status=$?
