@@ -199,10 +199,12 @@ editable. Practically: `brew install` and `npm i -g` from the agent shell fail â
 install tools from your own terminal.
 
 **A failed command says which rule it hit.** When a command exits non-zero, the
-wrapper adds one line if the guard is a plausible cause: the segment that cost
-the relaxation, the protected path a write was denied on, the installer that
-targets a `PATH` directory, or the scrubbed variable the command asked for.
-Otherwise it stays silent.
+wrapper adds one line if the guard is a plausible cause: a setuid binary that
+cannot run at all, the segment that cost the relaxation, the protected path a
+write was denied on, the installer that targets a `PATH` directory, or the
+scrubbed variable the command asked for. It knows the exit status and not what
+failed, so every line but the setuid one is worded as a condition. A binary
+that does not exist (status 127) is never the guard's doing and gets no line.
 
 **Renaming does not move a secret out from under its rule.** The directory
 nodes that carry a protected name (`~/.kube`, `secrets/`) and the ancestors a

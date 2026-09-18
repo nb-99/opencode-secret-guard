@@ -115,6 +115,15 @@ fi
 EOF
 chmod +x "$fakebin/kubectl"
 
+# An installer that fails without touching the network or the host. A real
+# `cargo` may be absent, and a missing binary exits 127 — which the wrapper
+# deliberately treats as "not the guard" and leaves unexplained.
+cat > "$fakebin/cargo" <<'EOF'
+#!/bin/sh
+exit 1
+EOF
+chmod +x "$fakebin/cargo"
+
 cat > "$fixture/.gitignore" <<'EOF'
 .env
 local.conf
@@ -689,6 +698,22 @@ expect_shell_hint "shell explains a denied write to a guarded path" \
 rm -f "$fakebin/git"
 expect_shell_hint "shell explains an install into a PATH directory" \
   "installs into a directory on PATH" 'cargo install --secret-guard-not-a-flag'
+# sandbox-exec refuses to execute a setuid binary at all. zsh reports that as
+# 127, the same status as a missing binary, so this asserts the marker works:
+# the certain hint survives a status the conditional ones are suppressed on.
+expect_shell_hint "shell explains a setuid binary" "is setuid" 'ps aux'
+expect_shell_hint "shell prefers setuid over the strict reason" "is setuid" 'git --version && sudo -n true'
+# A missing binary exits 127 too, and is never this guard's doing; hinting
+# there would blame the sandbox for a typo or an uninstalled tool.
+no_hint_missing="$(cd "$fixture" && HOME="$fakehome" PATH="$fakebin:$PATH" \
+  "$GUARD_SHELL" -c 'git --version && no-such-binary-xyz' 2>&1)"
+if [[ "$no_hint_missing" != *"secret-guard:"* ]]; then
+  pass=$((pass + 1))
+  printf '  ok    shell stays quiet when the binary does not exist\n'
+else
+  fail=$((fail + 1)); failures+=("SPURIOUS HINT ON 127: $no_hint_missing")
+  printf '  FAIL  shell stays quiet when the binary does not exist -- %s\n' "$no_hint_missing"
+fi
 
 # The scrub list comes from the policy, and the shipped default deliberately
 # names no variables — only a user knows theirs. Asserting the mechanism against
