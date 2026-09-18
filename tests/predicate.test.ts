@@ -170,14 +170,26 @@ describe("configuration loading", () => {
     );
   });
 
-  test("roots expand ~ against the given home", () => {    const source = policy("home.json", {
+  test("roots expand ~ against the given home", () => {
+    const source = policy("home.json", {
       ...valid(),
       denyRoots: ["~/.config/secrets"],
-      exemptRoots: ["~"],
+      exemptRoots: ["~/.config/secrets/public"],
     });
     const loaded = loadConfig(source, "/fixture/home");
     expect(loaded.denyRoots).toEqual(["/fixture/home/.config/secrets"]);
-    expect(loaded.exemptRoots).toEqual(["/fixture/home"]);
+    expect(loaded.exemptRoots).toEqual(["/fixture/home/.config/secrets/public"]);
+  });
+
+  test("an exempt root above a deny root or a group's allowPaths is rejected", () => {
+    // The exempt allow is the last rule and covers renames, so it would reopen
+    // moving the credential directory out from under its pattern.
+    expect(() =>
+      loadConfig(policy("exempt-deny.json", { ...valid(), denyRoots: ["~/vault/private"], exemptRoots: ["~"] }), "/fixture/home"),
+    ).toThrow(/contains the guarded path \/fixture\/home\/vault\/private/);
+    expect(() =>
+      loadConfig(policy("exempt-group.json", { ...valid(), exemptRoots: ["~/.config"] }), "/fixture/home"),
+    ).toThrow(/contains the guarded path/);
   });
 
   test("the default path follows XDG_CONFIG_HOME, and the override wins", () => {

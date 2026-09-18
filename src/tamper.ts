@@ -19,6 +19,10 @@ import { configPath, opencodeCacheDirectory, opencodeConfigDirectory, opencodeDa
  *
  * Reads are never affected. `literals` are single files (or a directory node
  * that must not be renamed); `subpaths` are whole trees.
+ *
+ * Prompts — `agent/`, `command/`, `skills/`, `AGENTS.md` — stay writable on
+ * purpose. They steer the agent but run nothing: the kernel boundary holds
+ * whatever they say, and editing them is ordinary work in this repository.
  */
 export interface TamperTargets {
   literals: string[];
