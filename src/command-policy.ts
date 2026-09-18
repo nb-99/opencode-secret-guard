@@ -1,3 +1,4 @@
+import { matchesAny } from "./paths.ts";
 import type { GuardConfig, SecretPrintingCommand } from "./policy.ts";
 
 /** Command wrappers that are transparent for the purpose of picking a group. */
@@ -89,12 +90,21 @@ export const PATTERN_FILTERS = new Set(["rg", "grep", "jq"]);
 export const AWK_ESCAPES = /getline|system\s*\(|close\s*\(|fflush\s*\(|printf?\b[^;}]*[>|]|@(include|load)|ENVIRON/;
 
 /**
- * True when a segment expands a variable outside single quotes. An inert
- * builtin that does so is no longer inert: `aws --version && echo
- * $AWS_SECRET_ACCESS_KEY` would print the variable the `aws` group keeps.
- * Strict scrubs it, so such a segment costs the group instead.
+ * The names a segment expands, outside single quotes: `$NAME` and `${NAME}`.
+ *
+ * `aws --version && echo $AWS_SECRET_ACCESS_KEY` must not run relaxed — the
+ * `aws` group keeps that variable, so the echo would print it. Every *other*
+ * variable is either scrubbed before the command starts or was never a secret,
+ * and `echo $HOME && git status` is an ordinary shape that has no reason to
+ * lose its group. So the names are collected here and judged in
+ * `analyzeCommand` against the group that actually resolves.
+ *
+ * Only plain forms appear: anything else — `$(…)`, `$'…'`, `${:-…}` — is an
+ * opaque construct, which has already forced the strict profile. Positionals
+ * and `$?` carry no name and cannot hold an inherited value.
  */
-export function expandsVariable(segment: string): boolean {
+export function expandedNames(segment: string): string[] {
+  const names: string[] = [];
   let quote: string | null = null;
   for (let i = 0; i < segment.length; i++) {
     const c = segment[i]!;
@@ -106,15 +116,18 @@ export function expandsVariable(segment: string): boolean {
       i++;
       continue;
     }
-    if (quote === '"') {
-      if (c === '"') quote = null;
-      else if (c === "$" || c === "`") return true;
+    if (c === "'" || c === '"') {
+      quote = quote === c ? null : quote ?? c;
       continue;
     }
-    if (c === "'" || c === '"') quote = c;
-    else if (c === "$" || c === "`") return true;
+    if (c !== "$") continue;
+    const length = plainVariableLength(segment, i);
+    if (length === 0) continue;
+    const name = /^\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?$/.exec(segment.slice(i, i + length));
+    if (name) names.push(name[1]!);
+    i += length - 1;
   }
-  return false;
+  return names;
 }
 
 /**
@@ -841,6 +854,9 @@ export function analyzeCommand(command: string, config: GuardConfig): CommandAna
   if (!segments || segments.length === 0) return strict("its quoting is unbalanced");
 
   let resolved: string | null = null;
+  // Variables an inert segment would print, with the segment that prints them.
+  // Judged once the group is known: only a variable that group keeps is a leak.
+  const expanded = new Map<string, string>();
   for (const segment of segments) {
     const parsed = parseCommand(segment.command);
     if (!parsed) return strict(`\`${segment.command}\` starts with a subshell or brace group`);
@@ -849,8 +865,8 @@ export function analyzeCommand(command: string, config: GuardConfig): CommandAna
       return strict(`\`${segment.command}\` sets environment variables, which can inject options or programs into ${binary}`);
     }
     if (INERT_BUILTINS.has(binary)) {
-      if (expandsVariable(segment.command)) {
-        return strict(`\`${segment.command}\` expands a variable, which could print one the group keeps in the environment`);
+      for (const name of expandedNames(segment.command)) {
+        if (!expanded.has(name)) expanded.set(name, segment.command);
       }
       if (!hasRedirection(segment.command)) continue;
     }
@@ -868,6 +884,16 @@ export function analyzeCommand(command: string, config: GuardConfig): CommandAna
       return strict(`it mixes the \`${resolved}\` and \`${group}\` groups; a command gets at most one`);
     }
     resolved = group;
+  }
+
+  const kept = resolved ? config.relaxationGroups[resolved]?.allowEnvironment ?? [] : [];
+  for (const [name, segment] of expanded) {
+    if (matchesAny(name, kept)) {
+      return strict(
+        `\`${segment}\` expands ${name}, which the \`${resolved}\` group keeps in the environment — ` +
+          "relaxing the command would print it",
+      );
+    }
   }
   return { group: resolved, reason: null, candidates: [...candidates].sort(), refusal };
 }
