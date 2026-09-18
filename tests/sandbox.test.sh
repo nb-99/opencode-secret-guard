@@ -460,6 +460,28 @@ cp "$CONFIG" "$tamper_config"
   "$GUARD_SHELL" -c 'printf TAMPER >> "'"$tamper_config"'"' >/dev/null 2>&1)
 assert_untampered "policy file" "$tamper_config"
 
+# How Home Manager installs the policy: a link in the config directory pointing
+# into the store. A rule that named only what the link resolves to would leave
+# the link itself free — and the link is the file the next command is judged by,
+# including its `tools.git`, which the unsandboxed resolver spawns. Replacing a
+# link is unlink + create, neither of which touches the destination.
+linked_policy="$XDG_CONFIG_HOME/opencode/linked-policy.json"
+policy_destination="$scratch/policy-store/secret-guard.json"
+mkdir -p "$(dirname "$policy_destination")"
+cp "$CONFIG" "$policy_destination"
+ln -s "$policy_destination" "$linked_policy"
+for attempt in \
+  'printf TAMPER >> "'"$linked_policy"'"' \
+  'rm -f "'"$linked_policy"'" && printf TAMPER > "'"$linked_policy"'"' \
+  'mv "'"$linked_policy"'" "'"$scratch"'/stolen-policy.json" && printf TAMPER > "'"$linked_policy"'"'
+do
+  (cd "$fixture" && OPENCODE_SECRET_GUARD_CONFIG="$linked_policy" HOME="$fakehome" PATH="$fakebin:$PATH" \
+    "$GUARD_SHELL" -c "$attempt" >/dev/null 2>&1)
+done
+assert_untampered "symlinked policy" "$linked_policy"
+assert_untampered "the policy the link points at" "$policy_destination"
+expect_true "the policy link itself survives" test -L "$linked_policy"
+
 echo "== the file-tool predicate and the kernel must agree =="
 # classifyPath mirrors buildProfile by hand. Every other test in this suite
 # exercises one layer or the other, so the two could drift apart without a

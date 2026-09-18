@@ -56,13 +56,16 @@ describe("writablePathDirectories", () => {
     expect(found.some((entry) => !path.isAbsolute(entry))).toBe(false);
   });
 
-  test("resolves symlinked entries to the directory they point at", () => {
+  test("keeps a symlinked entry, whose link can be re-pointed even when its target cannot be written", () => {
     const real = path.join(fixture, "real-bin");
     fs.mkdirSync(real);
     const link = path.join(fixture, "link-bin");
     fs.symlinkSync(real, link);
 
-    expect(writablePathDirectories(link, null)).toEqual([real]);
+    expect(writablePathDirectories(link, null)).toEqual([link]);
+    expect(tamperTargets({ repoRoot: null, pathEnvironment: link, home: fixture, policyPath }).subpaths).toEqual(
+      expect.arrayContaining([link, real]),
+    );
   });
 });
 
@@ -97,6 +100,22 @@ describe("tamperTargets", () => {
     const targets = tamperTargets({ repoRoot: repo, pathEnvironment: "", home: fixture, policyPath });
     expect(isTamperProtected(path.join(repo, ".opencode", "plugins", "evil.ts"), targets)).toBe(true);
     expect(isTamperProtected(path.join(repo, ".opencode", "plugins"), targets)).toBe(true);
+  });
+
+  test("protects a symlinked target at the link as well as at its destination", () => {
+    // How Home Manager installs the policy: a link in the config directory
+    // pointing into the store. Protecting only the destination leaves the link
+    // free to be unlinked and rewritten, and the link is what the next command
+    // is judged by.
+    const destination = path.join(fixture, "store", "secret-guard.json");
+    fs.mkdirSync(path.dirname(destination), { recursive: true });
+    fs.writeFileSync(destination, "{}\n");
+    const link = path.join(fixture, "config", "opencode", "linked-policy.json");
+    fs.symlinkSync(destination, link);
+
+    const targets = tamperTargets({ repoRoot: repo, pathEnvironment: "", home: fixture, policyPath: link });
+    expect(isTamperProtected(link, targets)).toBe(true);
+    expect(isTamperProtected(destination, targets)).toBe(true);
   });
 
   test("protects the file the command interpreter sources before every command", () => {
