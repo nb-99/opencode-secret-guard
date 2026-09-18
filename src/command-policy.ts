@@ -915,7 +915,34 @@ export const REFUSAL_WRAPPERS = new Set([
 ]);
 
 /** Shells whose `-c` operand, and `eval`, whose words, are a nested command. */
-const REFUSAL_SHELLS = new Set(["sh", "bash", "zsh", "dash", "ksh", "fish"]);
+export const REFUSAL_SHELLS = new Set(["sh", "bash", "zsh", "dash", "ksh", "fish"]);
+
+/**
+ * The text of a command that the refusal scan should read as invocations.
+ *
+ * A heredoc body is data on the next command's standard input, not a command.
+ * The scan splits on newlines and backticks, so a body line describing a
+ * refused invocation — `kubectl get secrets -o name` in a commit message
+ * written with `git commit -F - <<'EOF'` — parsed as that invocation and was
+ * refused. Documenting this guard was impossible from inside it.
+ *
+ * The body is only dropped when nothing in the command could execute it: a
+ * shell reading its script from stdin (`bash <<'EOF'`, `… | sh`), a segment
+ * whose binary cannot be seen, or a heredoc `stripHeredocs` cannot understand
+ * all keep the raw text. Over-scanning only refuses more, which is the safe
+ * direction for a courtesy check on top of the kernel boundary.
+ */
+export function refusalScanText(command: string): string {
+  const stripped = stripHeredocs(command);
+  if (stripped === null || stripped === command) return command;
+  const segments = analyzeSegments(stripped);
+  if (!segments) return command;
+  for (const segment of segments) {
+    const binary = parseCommand(segment.command)?.binary;
+    if (!binary || REFUSAL_SHELLS.has(binary) || binary === "eval") return command;
+  }
+  return stripped;
+}
 
 /**
  * Splits far more eagerly than `analyzeSegments`: parentheses and backticks
@@ -976,7 +1003,9 @@ function matchesPrintingCommand(words: string[], rule: SecretPrintingCommand): b
  */
 export function findSecretPrinting(command: string, rules: SecretPrintingCommand[], depth = 0): string | null {
   if (rules.length === 0 || depth > 4) return null;
-  for (const piece of refusalPieces(command)) {
+  // Only the outermost call sees a heredoc; a nested operand is already a
+  // command, and stripping there would drop text a shell is about to run.
+  for (const piece of refusalPieces(depth === 0 ? refusalScanText(command) : command)) {
     let words = shellWords(piece) ?? piece.split(/\s+/);
     for (let guard = 0; guard < 8 && words.length > 0; guard++) {
       const head = words[0]!.split("/").pop()!;

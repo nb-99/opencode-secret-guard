@@ -174,8 +174,10 @@ split the command, not to retry it.
 of `secretPrintingCommands` never run, wrapped in `sudo`/`env`/`sh -c`/`$(…)` or
 not: their output *is* the secret. Use the credential through the tool that
 needs it. Output formats that carry no values — `kubectl get secrets -o name`,
-`-o wide` — are not refused. A host that needs one of the shipped rules gone
-drops it with `removeSecretPrintingCommands` rather than replacing the key.
+`-o wide` — are not refused, and neither is prose: a heredoc body is stdin text,
+so a commit message or a document may describe a refused invocation. A host
+that needs one of the shipped rules gone drops it with
+`removeSecretPrintingCommands` rather than replacing the key.
 
 **The environment is scrubbed.** Names in `secretEnvironment`, and every
 inherited variable matching `secretEnvironmentPatterns` (`*_TOKEN`,

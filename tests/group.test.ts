@@ -524,6 +524,27 @@ describe("findSecretPrinting — invocations whose output is the secret", () => 
     expect(findSecretPrinting("pass", [{ binary: "pass", args: [] }])).toBe("pass");
   });
 
+  describe("a heredoc body is stdin text, not an invocation", () => {
+    test("prose describing a refused invocation passes", () => {
+      // Writing this guard's own commit messages and documentation was
+      // impossible while a body line parsed as the command it describes.
+      expect(find("git commit -F - <<'EOF'\nfix: narrow the rule\n\n`gh auth token` is refused.\nEOF")).toBeNull();
+      expect(find("cat <<'EOF' > docs/note.md\nRun `aws eks get-token` yourself.\nEOF")).toBeNull();
+    });
+
+    test("a body a shell would execute is still scanned", () => {
+      expect(find("bash <<'EOF'\ngh auth token\nEOF")).toBe("gh auth token");
+      expect(find("cat <<'EOF' | sh\ngh auth token\nEOF")).toBe("gh auth token");
+    });
+
+    test("a body the stripper cannot understand is still scanned", () => {
+      // Unterminated: everything after the operator could be anything.
+      expect(find("git commit -F - <<'EOF'\ngh auth token")).toBe("gh auth token");
+      // Expands, so zsh decides at run time what the body says.
+      expect(find("git commit -F - <<EOF\ngh auth token $X\nEOF")).toBe("gh auth token $X");
+    });
+  });
+
   test("the analysis carries the refusal alongside the group verdict", () => {
     const analysis = analyzeCommand("gh auth token", { ...config, secretPrintingCommands: rules });
     expect(analysis.refusal).toBe("gh auth token");

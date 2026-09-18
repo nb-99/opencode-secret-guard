@@ -337,6 +337,15 @@ with one message naming the invocation. The hook covers `files-only` mode,
 where no wrapper backs the plugin, and gives a clear error before anything
 runs.
 
+A heredoc body is the exception that had to be made explicit. It is stdin text
+for the next command, but the scan splits on newlines and backticks, so a line
+of a commit message written with `git commit -F - <<'EOF'` parsed as the
+invocation it described — documenting this guard from inside it was impossible.
+The body is therefore dropped before the scan, unless something in the command
+could execute it: a shell reading its script from stdin (`bash <<'EOF'`,
+`… | sh`), a segment whose binary cannot be seen, or a heredoc `stripHeredocs`
+cannot understand. The body of `bash <<'EOF'` is still scanned.
+
 ## Setuid binaries
 
 `sandbox-exec` does not run setuid programs: `ps`, `top`, `sudo`, `su`,
