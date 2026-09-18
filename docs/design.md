@@ -208,7 +208,7 @@ behaviour.
 `git ls-files -o -i --exclude-standard --directory`, which gives exact git
 semantics with directories collapsed — no glob-to-regex translation to get
 wrong. Paths with components on `artifactAllowlist` (`.gitignore`,
-`node_modules`, `dist`, `build`, …) beneath the active repository are re-allowed
+`node_modules`, `dist`, `build`, `coverage.out`, `junit.xml`, …) beneath the active repository are re-allowed
 after the Git-ignore deny. This also works when Git collapses an ignored parent
 such as `.opencode/` into one entry. Other files under that parent remain
 denied, and secret patterns are then re-applied, so `node_modules/pkg/.env`

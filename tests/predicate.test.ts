@@ -53,6 +53,8 @@ beforeAll(() => {
   put(".opencode/private.md", "private\n");
   put("dist/app.js", "console.log(1)\n");
   put("build/out.txt", "artifact\n");
+  put("coverage.out", "coverage\n");
+  put("junit.xml", "<testsuites/>\n");
   put("private-notes/note.md", "personal\n");
   put("private-notes/nested/deep.md", "personal\n");
   put("private-notes/nested/node_modules/pkg/index.js", "module.exports = 1\n");
@@ -61,7 +63,7 @@ beforeAll(() => {
   put("local.conf", "local\n");
   put("docs/secret-rotation.md", "# rotation\n");
   put("lib/secrets.nix", "{}\n");
-  put(".gitignore", "local.conf\nbuild/\nprivate-notes/\nmixed-ignored/\nnode_modules/\ndist/\n.env\n.env.local\n");
+  put(".gitignore", "local.conf\nbuild/\nprivate-notes/\nmixed-ignored/\nnode_modules/\ndist/\ncoverage.out\njunit.xml\n.env\n.env.local\n");
 
   fs.symlinkSync(path.join(repo, ".env"), path.join(repo, "link-to-env"));
   fs.symlinkSync(path.join(repo, "local.conf"), path.join(repo, "tracked-link-to-local"));
@@ -348,6 +350,11 @@ describe("gitignore layer", () => {
     expect(verdict("build/out.txt")).toBe("allow");
   });
 
+  test("allows ignored test report files used as read-write outputs", () => {
+    expect(verdict("coverage.out")).toBe("allow");
+    expect(verdict("junit.xml")).toBe("allow");
+  });
+
   test("allows metadata and artefacts nested below an ignored parent", () => {
     expect(verdict(".opencode/.gitignore")).toBe("allow");
     expect(verdict(".opencode/node_modules/pkg/index.js")).toBe("allow");
@@ -416,6 +423,8 @@ describe("gitignoreRules", () => {
     expect(relative).not.toContain("node_modules");
     expect(relative).not.toContain("dist");
     expect(relative).not.toContain("build");
+    expect(relative).not.toContain("coverage.out");
+    expect(relative).not.toContain("junit.xml");
   });
 
   test("collects the directories inside a collapsed ignored tree", () => {

@@ -73,6 +73,8 @@
     ".nuxt",
     ".turbo",
     "coverage",
+    "coverage.out",
+    "junit.xml",
     ".venv",
     "venv",
     "vendor",

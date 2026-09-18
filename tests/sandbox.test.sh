@@ -76,6 +76,8 @@ printf '%s\n' "$SECRET"       > "$fixture/node_modules/pkg/.env"
 printf '%s\n' "$PUBLIC"       > "$fixture/node_modules/pkg/index.js"
 printf '%s\n' "$PUBLIC"       > "$fixture/dist/app.js"
 printf '%s\n' "$PUBLIC"       > "$fixture/build/out.txt"
+printf '%s\n' "$PUBLIC"       > "$fixture/coverage.out"
+printf '%s\n' "$PUBLIC"       > "$fixture/junit.xml"
 printf '*\n'                   > "$fixture/.opencode/.gitignore"
 printf '%s\n' "$PUBLIC"       > "$fixture/.opencode/node_modules/pkg/index.js"
 printf '%s\n' "$SECRET"       > "$fixture/.opencode/node_modules/pkg/.env"
@@ -131,6 +133,8 @@ private-notes/
 node_modules/
 dist/
 build/
+coverage.out
+junit.xml
 EOF
 
 git init -q "$fixture"
@@ -380,12 +384,18 @@ expect_quiet   "lsof works"                 'lsof -w -p $$ >/dev/null'
 expect_allowed "node_modules source"        'cat node_modules/pkg/index.js'
 expect_allowed "dist artefact"              'cat dist/app.js'
 expect_allowed "build artefact"             'cat build/out.txt'
+expect_allowed "coverage report"            'cat coverage.out'
+expect_allowed "JUnit report"               'cat junit.xml'
 expect_allowed "nested .gitignore"           'cat .opencode/.gitignore; cat README.md'
 expect_allowed "nested node_modules source"  'cat .opencode/node_modules/pkg/index.js'
 expect_allowed "filename containing secret" 'cat docs/secret-rotation.md'
 expect_allowed "git works"                  'git status >/dev/null && cat README.md'
 expect_quiet   "git status produces no errors" 'git status --short'
 expect_allowed "writing a normal file"      'echo "'"$PUBLIC"'" > scratch.txt && cat scratch.txt'
+expect_writable "existing coverage report opens read-write" "$fixture/coverage.out" \
+  'exec {fd}<>coverage.out && printf "%s\n" "PUBLIC-OK-MARKER" >&$fd'
+expect_writable "existing JUnit report opens read-write" "$fixture/junit.xml" \
+  'exec {fd}<>junit.xml && printf "%s\n" "PUBLIC-OK-MARKER" >&$fd'
 expect_allowed "gh config without tokens"   'cat "$HOME/.config/gh/config.yml"'
 expect_allowed "opencode session database"  'cat "$HOME/.local/share/opencode/opencode.db"'
 expect_allowed "exempt root read"           'cat "'"$vault"'/memory/index.md"'
