@@ -137,7 +137,8 @@ export function resolveShellPlan(
 export function refusalMessage(invocation: string): string {
   return (
     `refusing to run \`${invocation}\`: its output is a credential, which must not enter the agent's context. ` +
-    "Use the credential through the tool that needs it instead of printing it."
+    "Use the credential through the tool that needs it instead of printing it. " +
+    "If this invocation prints no credential, ask the user to drop the matching `secretPrintingCommands` rule."
   );
 }
 

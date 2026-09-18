@@ -447,7 +447,7 @@ describe("findSecretPrinting — invocations whose output is the secret", () => 
   const rules = [
     { binary: "aws", args: ["eks", "get-token"] },
     { binary: "gh", args: ["auth", "token"] },
-    { binary: "kubectl", args: ["get", "secrets?(/.*)?", "(-o.*|--output(=.*)?)"] },
+    { binary: "kubectl", args: ["get", "secrets?(/.*)?", "(-o|--output)?=?(yaml|json|jsonpath(-as-json)?=.*|go-template(-file)?=.*|custom-columns(-file)?=.*|template=?.*)"] },
     { binary: "security", args: ["find-(generic|internet)-password"] },
     { binary: "sops", args: ["(-d|--decrypt|decrypt)"] },
   ];
@@ -476,6 +476,8 @@ describe("findSecretPrinting — invocations whose output is the secret", () => 
     ["kubectl get secret db -o yaml", "kubectl get secret db -o yaml"],
     ["kubectl get secrets -ojson", "kubectl get secrets -ojson"],
     ["kubectl get secret/db --output=jsonpath='{.data}'", "kubectl get secret/db --output=jsonpath={.data}"],
+    ["kubectl get secret db -o custom-columns=DATA:.data", "kubectl get secret db -o custom-columns=DATA:.data"],
+    ["kubectl get secret db -o go-template-file=/tmp/t", "kubectl get secret db -o go-template-file=/tmp/t"],
     ["kubectl -n x get secret db -o yaml", "kubectl -n x get secret db -o yaml"],
     ["security find-generic-password -s x -w", "security find-generic-password -s x -w"],
     ["sops -d secrets.yaml", "sops -d secrets.yaml"],
@@ -493,6 +495,12 @@ describe("findSecretPrinting — invocations whose output is the secret", () => 
     "kubectl get secret db",
     "kubectl describe secret db",
     "kubectl get pods -o yaml",
+    // An output format that carries no values is not a printed credential, and
+    // listing secret names is ordinary work: only the formats that render
+    // `.data` are refused.
+    "kubectl get secrets -o name",
+    "kubectl get secret db -o wide",
+    "kubectl get secrets --output name",
     "git commit -m 'gh auth token is refused'",
     "echo 'aws eks get-token'",
     "rg 'get-token' docs/",
