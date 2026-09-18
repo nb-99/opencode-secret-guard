@@ -98,6 +98,25 @@ describe("tamperTargets", () => {
     expect(isTamperProtected(path.join(repo, ".opencode", "plugins", "evil.ts"), targets)).toBe(true);
     expect(isTamperProtected(path.join(repo, ".opencode", "plugins"), targets)).toBe(true);
   });
+
+  test("protects the directory nodes leading to every target, so none can be swapped for a symlink", () => {
+    const bin = path.join(fixture, "path", "bin");
+    const targets = tamperTargets({ repoRoot: repo, pathEnvironment: bin, policyPath });
+
+    // The nodes themselves cannot be renamed or replaced...
+    for (const node of [
+      path.join(repo, ".opencode"),
+      repo,
+      path.join(fixture, "config"),
+      path.join(fixture, "path"),
+      fixture,
+    ]) {
+      expect(targets.literals).toContain(node);
+    }
+    // ...while writing beside a protected child stays possible.
+    expect(isTamperProtected(path.join(repo, ".opencode", "command", "x.md"), targets)).toBe(false);
+    expect(isTamperProtected(path.join(fixture, "path", "notes.txt"), targets)).toBe(false);
+  });
 });
 
 describe("protectedNodes", () => {

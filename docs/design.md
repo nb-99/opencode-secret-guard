@@ -69,7 +69,8 @@ opencode-secret-guard/
 ```
 
 Neither file is substituted at build time. The wrapper locates the resolver
-relative to itself and takes `bun` from `SECRET_GUARD_BUN` or `PATH`, so the
+relative to itself and takes `bun` from `SECRET_GUARD_BUN` (an absolute path;
+it never searches `PATH`), so the
 package works from a Nix store path or a plain checkout. In return, the plugin
 verifies at startup that OpenCode's configured shell _is_ this package's own
 `bin/opencode-secret-guard`, comparing realpaths rather than matching a store

@@ -110,7 +110,8 @@ Then point OpenCode at the package:
 }
 ```
 
-The wrapper needs `bun` on `PATH`, or `SECRET_GUARD_BUN` pointing at it. Without
+The wrapper needs `SECRET_GUARD_BUN` set to the absolute path of `bun`; it never
+searches `PATH`, for the same reason its interpreter line is fixed. Without
 Nix the policy's `tools.git` defaults to `/usr/bin/git`; set it to the git you
 want the guard to spawn.
 

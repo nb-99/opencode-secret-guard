@@ -35,12 +35,14 @@ const CODE_DIRECTORIES = ["plugin", "plugins", "tool", "tools", "node_modules"];
  * PATH entries a command could plant a binary in: those the current user can
  * write, or that do not exist yet and so could be created. Entries inside the
  * repository are the project's own (`node_modules/.bin`, direnv shims) and
- * stay writable; a project cannot be protected from itself.
+ * stay writable; a project cannot be protected from itself. A relative or
+ * empty entry means the working directory, which is the repository, and is
+ * excluded for the same reason.
  */
 export function writablePathDirectories(pathEnvironment: string | undefined, repoRoot: string | null): string[] {
   const found = new Set<string>();
   for (const entry of (pathEnvironment ?? "").split(":")) {
-    if (!entry || !path.isAbsolute(entry)) continue;
+    if (!path.isAbsolute(entry)) continue;
     const canonical = realpath(entry);
     if (repoRoot && isInside(canonical, repoRoot)) continue;
     let writable: boolean;
@@ -53,6 +55,24 @@ export function writablePathDirectories(pathEnvironment: string | undefined, rep
     if (writable) found.add(canonical);
   }
   return [...found].sort();
+}
+
+/**
+ * Every directory a target's path leads through. A rule matches the path at
+ * the time of the operation, so protecting `~/.local/share/opencode/bin` alone
+ * leaves `mv ~/.local/share/opencode x && ln -s /tmp/evil ~/.local/share/opencode`
+ * open: the old rule matches nothing and the symlink is loaded at next start.
+ * Protecting the node forbids renaming, deleting or replacing it — not
+ * writing inside it, which stays governed by the target's own rule.
+ */
+function ancestors(target: string): string[] {
+  const found: string[] = [];
+  let current = path.dirname(target);
+  while (current !== path.dirname(current)) {
+    found.push(current);
+    current = path.dirname(current);
+  }
+  return found;
 }
 
 export function tamperTargets(options: {
@@ -78,10 +98,15 @@ export function tamperTargets(options: {
 
   if (options.repoRoot) {
     const project = path.join(options.repoRoot, ".opencode");
+    literals.add(project);
     literals.add(path.join(options.repoRoot, "opencode.json"));
     literals.add(path.join(options.repoRoot, "opencode.jsonc"));
     for (const name of CONFIG_FILES) literals.add(path.join(project, name));
     for (const name of CODE_DIRECTORIES) subpaths.add(path.join(project, name));
+  }
+
+  for (const target of [...literals, ...subpaths]) {
+    for (const ancestor of ancestors(target)) literals.add(ancestor);
   }
 
   return { literals: [...literals].sort(), subpaths: [...subpaths].sort() };

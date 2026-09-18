@@ -53,6 +53,9 @@ fi
 fixture="$scratch/repo"
 public_fixture="$scratch/public-repo"
 fakehome="$scratch/home"
+# The data directory holds auth.json and the bin/ OpenCode runs; the fixture
+# under $fakehome stands in for both, so it must be what the resolver protects.
+export XDG_DATA_HOME="$fakehome/.local/share"
 
 # --- fixture -----------------------------------------------------------------
 mkdir -p "$fixture"/{secrets,node_modules/pkg,dist,build,private-notes/nested,docs,infra,.opencode/node_modules/pkg}
@@ -143,6 +146,8 @@ gen_profile - > "$strict" || { echo "FATAL: could not generate strict profile"; 
 for g in kube ssh aws; do
   gen_profile "$g" > "$scratch/$g.sb" || { echo "FATAL: could not generate $g profile"; exit 1; }
 done
+# Strict, as resolved for a caller whose PATH holds a user-writable directory.
+PATH="$fakebin:$PATH" gen_profile - > "$scratch/path.sb" || { echo "FATAL: could not generate PATH profile"; exit 1; }
 
 # --- harness -----------------------------------------------------------------
 # $1 description, $2 command, $3 profile (default: strict)
@@ -243,8 +248,20 @@ expect_shell_allowed() {
 # Whether the write fails loudly is irrelevant; only the resulting content is.
 # $1 description, $2 target path, $3 command, $4 profile (default: strict)
 expect_unwritable() {
-  local description="$1" target="$2" command="$3" profile="${4:-$strict}" after
+  local description="$1" target="$2" command="$3" profile="${4:-$strict}"
   (cd "$fixture" && HOME="$fakehome" sandbox-exec -f "$profile" /bin/zsh -c "$command" >/dev/null 2>&1)
+  assert_untampered "$description" "$target"
+}
+
+# Same through the configured shell, whose resolver sees the caller's PATH.
+expect_shell_unwritable() {
+  local description="$1" target="$2" command="$3"
+  (cd "$fixture" && HOME="$fakehome" PATH="$fakebin:$PATH" "$GUARD_SHELL" -c "$command" >/dev/null 2>&1)
+  assert_untampered "$description" "$target"
+}
+
+assert_untampered() {
+  local description="$1" target="$2" after
   after="$(cat "$target" 2>/dev/null || true)"
   if [[ "$after" != *TAMPER* ]]; then
     pass=$((pass + 1))
@@ -255,17 +272,15 @@ expect_unwritable() {
   fi
 }
 
-# Same through the configured shell, whose resolver sees the caller's PATH.
-expect_shell_unwritable() {
-  local description="$1" target="$2" command="$3" after
-  (cd "$fixture" && HOME="$fakehome" PATH="$fakebin:$PATH" "$GUARD_SHELL" -c "$command" >/dev/null 2>&1)
-  after="$(cat "$target" 2>/dev/null || true)"
-  if [[ "$after" != *TAMPER* ]]; then
+# $1 description, $2 condition that must hold afterwards (a test expression).
+expect_true() {
+  local description="$1"; shift
+  if "$@"; then
     pass=$((pass + 1))
     printf '  ok    %s\n' "$description"
   else
-    fail=$((fail + 1)); failures+=("TAMPERED: $description -- $target")
-    printf '  FAIL  %s -- %s now contains TAMPER\n' "$description" "$target"
+    fail=$((fail + 1)); failures+=("FAILED: $description")
+    printf '  FAIL  %s\n' "$description"
   fi
 }
 
@@ -408,7 +423,21 @@ expect_unwritable "npm plugin cache"       "$XDG_CACHE_HOME/opencode/node_module
   'mkdir -p "$XDG_CACHE_HOME/opencode/node_modules/evil" && printf TAMPER > "$XDG_CACHE_HOME/opencode/node_modules/evil/index.js"'
 expect_unwritable "renamed config dir cannot be recreated" "$opencode_config/opencode.json" \
   'mv "'"$opencode_config"'" "'"$XDG_CONFIG_HOME"'/oc2" 2>/dev/null; mkdir -p "'"$opencode_config"'" && printf TAMPER > "'"$opencode_config"'/opencode.json"'
+expect_true "config dir was not renamed in the first place" test -d "$opencode_config" -a ! -e "$XDG_CONFIG_HOME/oc2"
 mv "$XDG_CONFIG_HOME/oc2" "$opencode_config" 2>/dev/null || true
+# Every directory on the way to a protected path is a node that cannot be
+# swapped for a symlink: the old rule would match nothing and OpenCode would
+# load whatever the link points at.
+mkdir -p "$scratch/evil/plugin" && printf TAMPER > "$scratch/evil/plugin/evil.ts"
+expect_unwritable "project .opencode swapped for a symlink" "$fixture/.opencode/plugin/evil.ts" \
+  'mv .opencode .oc2 2>/dev/null; ln -s "'"$scratch"'/evil" .opencode 2>/dev/null'
+expect_true "project .opencode is still a directory" test -d "$fixture/.opencode" -a ! -L "$fixture/.opencode" -a ! -e "$fixture/.oc2"
+expect_unwritable "opencode data dir swapped for a symlink" "$fakehome/.local/share/opencode/plugin/evil.ts" \
+  'mv "$HOME/.local/share/opencode" "$HOME/.local/share/oc2" 2>/dev/null; ln -s "'"$scratch"'/evil" "$HOME/.local/share/opencode" 2>/dev/null'
+expect_true "opencode data dir is still a directory" test -d "$fakehome/.local/share/opencode" -a ! -L "$fakehome/.local/share/opencode"
+expect_unwritable "PATH parent swapped for a symlink" "$fakebin/git" \
+  'mv "'"$scratch"'/bin" "'"$scratch"'/bin2" 2>/dev/null; ln -s "'"$scratch"'/evil/plugin" "'"$scratch"'/bin" 2>/dev/null' "$scratch/path.sb"
+expect_true "PATH directory is still a directory" test -d "$fakebin" -a ! -L "$fakebin"
 expect_writable "project prompts stay editable" "$fixture/.opencode/command/x.md" \
   'mkdir -p .opencode/command && printf "%s" "'"$PUBLIC"'" > .opencode/command/x.md'
 expect_writable "global skills stay editable" "$opencode_config/skills/x/SKILL.md" \
@@ -419,13 +448,7 @@ tamper_config="$scratch/tamper-policy.json"
 cp "$CONFIG" "$tamper_config"
 (cd "$fixture" && OPENCODE_SECRET_GUARD_CONFIG="$tamper_config" HOME="$fakehome" PATH="$fakebin:$PATH" \
   "$GUARD_SHELL" -c 'printf TAMPER >> "'"$tamper_config"'"' >/dev/null 2>&1)
-if [[ "$(cat "$tamper_config")" != *TAMPER* ]]; then
-  pass=$((pass + 1))
-  printf '  ok    policy file\n'
-else
-  fail=$((fail + 1)); failures+=("TAMPERED: policy file")
-  printf '  FAIL  policy file -- %s now contains TAMPER\n' "$tamper_config"
-fi
+assert_untampered "policy file" "$tamper_config"
 
 echo "== the file-tool predicate and the kernel must agree =="
 # classifyPath mirrors buildProfile by hand. Every other test in this suite
@@ -594,13 +617,13 @@ else
   printf '  FAIL  shell explains a failed strict fallback -- %s\n' "$hint_output"
 fi
 no_hint_output="$(cd "$fixture" && HOME="$fakehome" PATH="$fakebin:$PATH" \
-  "$GUARD_SHELL" -c 'kubectl README.md; true' 2>&1)"
+  "$GUARD_SHELL" -c 'kubectl README.md && false' 2>&1)"
 if [[ "$no_hint_output" != *"strict profile"* ]]; then
   pass=$((pass + 1))
-  printf '  ok    shell stays quiet when a relaxed command succeeds\n'
+  printf '  ok    shell stays quiet when a relaxed command fails\n'
 else
   fail=$((fail + 1)); failures+=("SPURIOUS HINT: $no_hint_output")
-  printf '  FAIL  shell stays quiet when a relaxed command succeeds -- %s\n' "$no_hint_output"
+  printf '  FAIL  shell stays quiet when a relaxed command fails -- %s\n' "$no_hint_output"
 fi
 plain_failure_output="$(cd "$fixture" && HOME="$fakehome" PATH="$fakebin:$PATH" \
   "$GUARD_SHELL" -c 'cat .env' 2>&1)"
@@ -660,6 +683,18 @@ if [[ "$shell_group_env_output" == *"KEPT-FOR-GROUP"* && "$shell_group_env_outpu
 else
   fail=$((fail + 1)); failures+=("SHELL GROUP ENV: $shell_group_env_output")
   printf '  FAIL  a group keeps the variables its binaries need -- %s\n' "$shell_group_env_output"
+fi
+# ...but only for its binaries. An echo beside them would print the kept
+# variable, so that shape costs the group and the scrub removes it.
+shell_echo_env_output="$(cd "$fixture" && OPENCODE_SECRET_GUARD_CONFIG="$scrub_config" \
+  KUBE_CANARY_TOKEN="$SECRET" HOME="$fakehome" PATH="$fakebin:$PATH" \
+  "$GUARD_SHELL" -c 'kubectl README.md; echo "$KUBE_CANARY_TOKEN"' 2>&1)"
+if [[ "$shell_echo_env_output" != *"$SECRET"* ]]; then
+  pass=$((pass + 1))
+  printf '  ok    a kept variable is unreachable from an echo in the same command\n'
+else
+  fail=$((fail + 1)); failures+=("SHELL ECHO KEPT ENV: $shell_echo_env_output")
+  printf '  FAIL  a kept variable is unreachable from an echo in the same command -- %s\n' "$shell_echo_env_output"
 fi
 
 "$GUARD_SHELL" -c true extra >/dev/null 2>&1
