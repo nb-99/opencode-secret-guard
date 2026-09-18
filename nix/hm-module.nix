@@ -34,6 +34,7 @@ let
         extraSecretExceptions
         extraArtifactAllowlist
         extraSecretPrintingCommands
+        removeSecretPrintingCommands
         extraRelaxationGroups
         settings
         ;
@@ -138,6 +139,39 @@ in
         [ { binary = "pass"; args = [ "show" ]; } ]
       '';
       description = "Invocations appended to the default `secretPrintingCommands`.";
+    };
+
+    removeSecretPrintingCommands = mkOption {
+      type = types.listOf (
+        types.submodule {
+          options = {
+            binary = mkOption {
+              type = types.str;
+              description = "Program name of the shipped rule to drop.";
+            };
+            args = mkOption {
+              type = types.listOf types.str;
+              default = [ ];
+              description = ''
+                The shipped rule's `args`, matched exactly. Empty drops every
+                shipped rule for the binary.
+              '';
+            };
+          };
+        }
+      );
+      default = [ ];
+      example = literalExpression ''
+        [ { binary = "terraform"; args = [ "show" "-json" ]; } ]
+      '';
+      description = ''
+        Shipped `secretPrintingCommands` entries this host does not want,
+        removed before `extraSecretPrintingCommands` is appended — so a rule can
+        be replaced with a narrower one while the rest of the default list, and
+        upstream additions to it, still apply. A refusal exists because the
+        invocation's output is a credential; removing one is a decision to let
+        that output reach the agent's context.
+      '';
     };
 
     extraRelaxationGroups = mkOption {
