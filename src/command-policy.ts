@@ -86,7 +86,36 @@ export const PATTERN_FILTERS = new Set(["rg", "grep", "jq"]);
  * `@include`/`@load` all reach beyond stdin. A bare comparison such as `NR>1`
  * or `$3 > 100` does not, which is why `>` is only rejected inside a print.
  */
-export const AWK_ESCAPES = /getline|system\s*\(|close\s*\(|fflush\s*\(|printf?\b[^;}]*[>|]|@(include|load)/;
+export const AWK_ESCAPES = /getline|system\s*\(|close\s*\(|fflush\s*\(|printf?\b[^;}]*[>|]|@(include|load)|ENVIRON/;
+
+/**
+ * True when a segment expands a variable outside single quotes. An inert
+ * builtin that does so is no longer inert: `aws --version && echo
+ * $AWS_SECRET_ACCESS_KEY` would print the variable the `aws` group keeps.
+ * Strict scrubs it, so such a segment costs the group instead.
+ */
+export function expandsVariable(segment: string): boolean {
+  let quote: string | null = null;
+  for (let i = 0; i < segment.length; i++) {
+    const c = segment[i]!;
+    if (quote === "'") {
+      if (c === "'") quote = null;
+      continue;
+    }
+    if (c === "\\") {
+      i++;
+      continue;
+    }
+    if (quote === '"') {
+      if (c === '"') quote = null;
+      else if (c === "$" || c === "`") return true;
+      continue;
+    }
+    if (c === "'" || c === '"') quote = c;
+    else if (c === "$" || c === "`") return true;
+  }
+  return false;
+}
 
 /**
  * True when the segment redirects outside quotes. `awk 'NR>1'` and
@@ -350,6 +379,17 @@ export function isPatternFilter(
  * | single-quote | literal          | literal       |
  * | backslashed  | literal          | literal       |
  *
+ * `$` is opaque unless it names a plain variable: `$NAME` or `${NAME}`. Every
+ * other form produces words the scan cannot see — `$'auth'`, `${:-token}`,
+ * `${A:-auth}`, `${(s: :)X}` — and `gh $'auth' $'token'` would otherwise get the
+ * `ssh` group while the refusal scan looks for words that only exist at run
+ * time. A plain variable's value comes from the environment OpenCode passed,
+ * which the command cannot set for itself: an assignment or `export` segment
+ * belongs to no group. `$_` is the exception — it is the previous command's
+ * last argument, so `echo auth; gh $_ token` would set it through an inert
+ * segment — and is opaque. Positionals and `$?` are plain: setting them
+ * takes a `set` segment, which belongs to no group.
+ *
  * `eval`, `exec`, `source`, and `.` are deliberately *not* matched here. They
  * only run something when they lead a segment, and there `parseCommand` already
  * reports them as the binary, which belongs to no group — so `resolveGroup`
@@ -379,8 +419,11 @@ export function hasOpaqueConstruct(command: string): boolean {
     if (quote === '"') {
       if (c === '"') quote = null;
       else if (c === "`") return true;
-      else if (c === "$" && next === "(") return true;
-      else if (c === "$" && next === "{" && command[i + 2] === "(") return true;
+      else if (c === "$") {
+        const plain = plainVariableLength(command, i);
+        if (plain === 0) return true;
+        i += plain - 1;
+      }
       continue;
     }
 
@@ -389,14 +432,37 @@ export function hasOpaqueConstruct(command: string): boolean {
       continue;
     }
     if (c === "`") return true;
-    if (c === "$" && next === "(") return true;
-    if (c === "$" && next === "{" && command[i + 2] === "(") return true;
+    if (c === "$") {
+      const plain = plainVariableLength(command, i);
+      if (plain === 0) return true;
+      i += plain - 1;
+      continue;
+    }
     if ((c === "<" || c === ">") && next === "(") return true;
     if (c === "=" && next === "(") return true;
     if (c === "(") return true;
   }
 
   return false;
+}
+
+/**
+ * Length of a plain expansion starting at the `$` at `start`, or 0 when the
+ * `$` begins any other form. Plain: `$NAME`, `${NAME}`, a positional or one of
+ * `$? $! $$ $# $* $@ $-` — all values the command cannot choose for itself —
+ * and a bare `$` before whitespace or an operator, which zsh keeps as text
+ * (`costs 5$`). `$_` is not plain: it is the previous segment's last word.
+ */
+export function plainVariableLength(command: string, start: number): number {
+  const rest = command.slice(start + 1);
+  if (rest.length === 0 || /^[\s"\\;&|<>]/.test(rest)) return 1;
+  const special = /^(\d+|[?!#*@$-])/.exec(rest);
+  if (special) return special[0].length + 1;
+  const braced = /^\{([A-Za-z_][A-Za-z0-9_]*)\}/.exec(rest);
+  if (braced) return braced[1] === "_" ? 0 : braced[0].length + 1;
+  const bare = /^[A-Za-z_][A-Za-z0-9_]*/.exec(rest);
+  if (bare && bare[0] !== "_") return bare[0].length + 1;
+  return 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -628,19 +694,33 @@ export function leadingBinary(segment: string): string | null {
 }
 
 /**
+ * Short options of the pipe filters whose value is a file, written attached
+ * or separate: `base64 -i key.pem`, `sort -oout`, `shasum -c manifest`,
+ * `xxd -r dump`. Any other short option is a switch or takes a count.
+ */
+export const FILE_FLAGS: Record<string, string> = {
+  base64: "io",
+  shasum: "c",
+  sort: "o",
+  xxd: "r",
+};
+
+/**
  * True when a segment runs a known filter in a shape that cannot open a file:
  * every argument is either a bare number (`tail -n 30`), a number range or
- * list (`cut -f 2,4-6`), a flag with no path character in it, or a
- * one-character delimiter (`cut -d=`), and the segment carries no redirection.
- * `sort -o/tmp/out`, `base64 -i key.pem` and `cat < ~/.ssh/id_ed25519` all
- * fail this test and keep the strict profile.
+ * list (`cut -f 2,4-6`), a flag with no path character in it that is not a
+ * file option, or a one-character delimiter (`cut -d' '`), and the segment
+ * carries no redirection. `sort -o/tmp/out`, `base64 -ikey.pem` and
+ * `cat < ~/.ssh/id_ed25519` all fail this test and keep the strict profile.
  */
 export function isInertFilter(segment: string, binary: string, args: string): boolean {
   if (!PIPE_FILTERS.has(binary)) return false;
   if (hasRedirection(segment)) return false;
 
   const delimiter = DELIMITER_FLAGS[binary];
-  const tokens = args.split(/\s+/).filter((token) => token.length > 0);
+  const fileFlags = FILE_FLAGS[binary] ?? "";
+  const tokens = shellWords(args);
+  if (!tokens) return false;
   for (let i = 0; i < tokens.length; i++) {
     const token = tokens[i]!;
     if (/^[\d,-]+$/.test(token)) continue;
@@ -650,6 +730,7 @@ export function isInertFilter(segment: string, binary: string, args: string): bo
       continue;
     }
     if (delimiter && token.startsWith(`-${delimiter}`) && [...token.slice(2)].length === 1) continue;
+    if (/^-[^-]/.test(token) && fileFlags.includes(token[1]!)) return false;
     if (token.startsWith("-") && !/[/~=]/.test(token)) continue;
     return false;
   }
@@ -729,7 +810,7 @@ export interface CommandAnalysis {
  * retrying blindly.
  */
 export function analyzeCommand(command: string, config: GuardConfig): CommandAnalysis {
-  const refusal = findSecretPrinting(command, config.secretPrintingCommands ?? []);
+  const refusal = findSecretPrinting(command, config.secretPrintingCommands);
   const binaryToGroup = new Map<string, string>();
   for (const [name, group] of Object.entries(config.relaxationGroups)) {
     for (const binary of group.binaries) binaryToGroup.set(binary, name);
@@ -767,7 +848,12 @@ export function analyzeCommand(command: string, config: GuardConfig): CommandAna
     if (hasEnvironmentAssignments) {
       return strict(`\`${segment.command}\` sets environment variables, which can inject options or programs into ${binary}`);
     }
-    if (INERT_BUILTINS.has(binary) && !hasRedirection(segment.command)) continue;
+    if (INERT_BUILTINS.has(binary)) {
+      if (expandsVariable(segment.command)) {
+        return strict(`\`${segment.command}\` expands a variable, which could print one the group keeps in the environment`);
+      }
+      if (!hasRedirection(segment.command)) continue;
+    }
     if (isInertFilter(segment.command, binary, args)) continue;
     if (isInertAwk(segment.command, binary, args, segment.receivesPipe)) continue;
     if (isPatternFilter(segment.command, binary, args, segment.receivesPipe, hasEnvironmentAssignments)) continue;
@@ -798,8 +884,8 @@ export function analyzeCommand(command: string, config: GuardConfig): CommandAna
  * refuses more, while over-unwrapping there would grant more.
  */
 export const REFUSAL_WRAPPERS = new Set([
-  "builtin", "caffeinate", "command", "doas", "env", "exec", "nice", "nohup",
-  "rtk", "stdbuf", "sudo", "time", "timeout", "xargs",
+  "builtin", "caffeinate", "command", "doas", "env", "exec", "nice", "nocorrect",
+  "noglob", "nohup", "rtk", "stdbuf", "sudo", "time", "timeout", "xargs",
 ]);
 
 /** Shells whose `-c` operand, and `eval`, whose words, are a nested command. */
@@ -874,8 +960,8 @@ export function findSecretPrinting(command: string, rules: SecretPrintingCommand
           const word = words[0];
           if (word === undefined) break;
           // A wrapper option that consumes the next word: `env -u NAME`,
-          // `sudo -u user`, `timeout -s KILL`, `xargs -n 1`, `nice -n 5`.
-          if (/^-(u|C|S|s|k|n|I|L|P|E|g|h|p|r)$/.test(word) && head !== "rtk") {
+          // `sudo -u user`, `timeout -s KILL`, `xargs -n 1`, `exec -a name`.
+          if (/^-(a|u|C|S|s|k|n|I|L|P|E|g|h|p|r)$/.test(word) && head !== "rtk") {
             words = words.slice(2);
             continue;
           }
