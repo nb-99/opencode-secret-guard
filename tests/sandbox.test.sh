@@ -700,7 +700,7 @@ expect_shell_hint "shell explains an install into a PATH directory" \
   "installs into a directory on PATH" 'cargo install --secret-guard-not-a-flag'
 # sandbox-exec refuses to execute a setuid binary at all. zsh reports that as
 # 127, the same status as a missing binary, so this asserts the marker works:
-# the certain hint survives a status the conditional ones are suppressed on.
+# the setuid hint survives a status the other hints are suppressed on.
 expect_shell_hint "shell explains a setuid binary" "is setuid" 'ps aux'
 expect_shell_hint "shell prefers setuid over the strict reason" "is setuid" 'git --version && sudo -n true'
 # A missing binary exits 127 too, and is never this guard's doing; hinting

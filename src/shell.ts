@@ -163,11 +163,9 @@ export function strictHint(analysis: CommandAnalysis): string {
 }
 
 /**
- * Binaries that are setuid on macOS. `sandbox-exec` refuses to execute one at
- * all, which is the kernel's rule and not the profile's, so this failure is
- * certain rather than conditional — and the error, `operation not permitted`,
- * looks exactly like a denied file. Only the common ones an agent reaches for
- * are listed; the alternatives matter more than completeness.
+ * Common system binaries that are setuid on macOS. Their sandbox denial looks
+ * like a denied file, so the hint names an alternative. A matching name does
+ * not prove that this command reached the system binary.
  */
 export const SETUID_BINARIES: Record<string, string> = {
   ps: "use `pgrep -fl PATTERN` to find a process and `lsof -i :PORT` for a port",
@@ -177,7 +175,6 @@ export const SETUID_BINARIES: Record<string, string> = {
   crontab: "edit the crontab from your own terminal",
   at: "schedule from your own terminal",
   traceroute: "run it from your own terminal",
-  ping: "run it from your own terminal",
 };
 
 /** The first setuid binary the command invokes, or null. */
@@ -266,14 +263,12 @@ export function scrubbedReferences(command: string, scrub: string[]): string[] {
  * What the wrapper prints when the command fails, and whether that line
  * survives a 127 exit.
  *
- * `certain` means the denial happens every time the command is run at all, so
- * the status does not need to corroborate it. Everything else is a note that
- * only applies if the failure was a permission error, which the wrapper cannot
- * see — it knows the exit status and nothing more.
+ * zsh uses 127 for both missing and sandbox-denied executables. `showOn127`
+ * keeps the setuid hint visible in that case; it does not establish a cause.
  */
 export interface FailureHint {
   text: string;
-  certain: boolean;
+  showOn127: boolean;
 }
 
 /**
@@ -284,7 +279,7 @@ export interface FailureHint {
  * what to do instead; silence is the default, because most failures are the
  * command's own.
  *
- * Every case but the setuid one is worded as a condition. A hint that asserts
+ * Every case is worded as a condition. A hint that asserts
  * the cause of a failure it cannot see is worse than no hint: `mkdir /root/x
  * && git log` fails on the mkdir, and "the credentials were unreadable" sends
  * the reader after the wrong thing.
@@ -298,17 +293,16 @@ export function failureHint(options: {
   cwd: string;
 }): FailureHint {
   const { analysis, command, tamper, scrub, home, cwd } = options;
-  const conditional = (text: string): FailureHint => ({ text, certain: false });
+  const conditional = (text: string): FailureHint => ({ text, showOn127: false });
 
-  // First: the only certain one. It also outranks the strict reason, which for
-  // `sudo …` would blame the group it cost rather than the refusal to exec.
+  // An exec denial needs a different remedy than a lost credential group.
   const setuid = setuidBinary(command);
   if (setuid) {
     return {
       text:
-        `secret-guard: \`${setuid}\` is setuid, and sandbox-exec refuses to execute a setuid binary — ` +
-        `that is the kernel's rule, not the policy's, so it cannot be granted. Instead, ${SETUID_BINARIES[setuid]}.`,
-      certain: true,
+        `secret-guard: if this failed while executing the macOS system \`${setuid}\`, that binary is setuid ` +
+        `and sandbox-exec refuses to execute it regardless of the profile. Instead, ${SETUID_BINARIES[setuid]}.`,
+      showOn127: true,
     };
   }
 
@@ -346,14 +340,14 @@ export function failureHint(options: {
   return conditional("");
 }
 
-/** The hint as the wrapper reads it: a certainty marker, then the text. */
+/** One protocol line: the exit-127 marker, then text without embedded newlines. */
 export function encodeHint(hint: FailureHint): string {
-  return hint.text ? `${hint.certain ? "!" : "?"}${hint.text}` : "";
+  return hint.text ? `${hint.showOn127 ? "!" : "?"}${hint.text.replace(/[\r\n]+/g, " ")}` : "";
 }
 
 /**
  * The shell wrapper's side of the contract: the profile path, then the hint
- * with its certainty marker (an empty line when there is nothing to say), then
+ * with its exit-127 marker (an empty line when there is nothing to say), then
  * one environment variable to scrub per line. All come from one invocation
  * because the wrapper pays the interpreter's startup cost on every command.
  */
@@ -361,4 +355,3 @@ export function resolveForShell(command: string, guardConfig: GuardConfig): stri
   const plan = resolveShellPlan(command, guardConfig);
   return [plan.profile, encodeHint(plan.hint), ...plan.scrub].join("\n");
 }
-

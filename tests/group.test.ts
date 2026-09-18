@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { analyzeCommand, findSecretPrinting, hasOpaqueConstruct, leadingBinary, resolveGroup, splitSegments, stripHeredocs } from "../src/command-policy.ts";
 import type { GuardConfig } from "../src/policy.ts";
+import { loadConfig } from "../src/policy.ts";
 
 const config: GuardConfig = {
   configVersion: 3,
@@ -452,13 +453,8 @@ describe("analyzeCommand — why a command ran strict", () => {
 });
 
 describe("findSecretPrinting — invocations whose output is the secret", () => {
-  const rules = [
-    { binary: "aws", args: ["eks", "get-token"] },
-    { binary: "gh", args: ["auth", "token"] },
-    { binary: "kubectl", args: ["get", "secrets?(/.*)?", "(-o|--output)?=?(yaml|json|jsonpath(-as-json)?=.*|go-template(-file)?=.*|custom-columns(-file)?=.*|template=?.*)"] },
-    { binary: "security", args: ["find-(generic|internet)-password"] },
-    { binary: "sops", args: ["(-d|--decrypt|decrypt)"] },
-  ];
+  // Nix supplies the shipped policy with only tools.git replaced.
+  const rules = loadConfig(process.env.OPENCODE_SECRET_GUARD_CONFIG ?? `${import.meta.dir}/../policy/default.json`).secretPrintingCommands;
   const find = (command: string) => findSecretPrinting(command, rules);
 
   test.each([
@@ -486,6 +482,12 @@ describe("findSecretPrinting — invocations whose output is the secret", () => 
     ["kubectl get secret/db --output=jsonpath='{.data}'", "kubectl get secret/db --output=jsonpath={.data}"],
     ["kubectl get secret db -o custom-columns=DATA:.data", "kubectl get secret db -o custom-columns=DATA:.data"],
     ["kubectl get secret db -o go-template-file=/tmp/t", "kubectl get secret db -o go-template-file=/tmp/t"],
+    ["kubectl get secret db -o go-template --template='{{.data}}'", "kubectl get secret db -o go-template --template={{.data}}"],
+    ["kubectl get secret db --output go-template --template='{{.data}}'", "kubectl get secret db --output go-template --template={{.data}}"],
+    ["kubectl get secret db -o jsonpath-file=/tmp/t", "kubectl get secret db -o jsonpath-file=/tmp/t"],
+    ["kubectl get secret db -o jsonpath --template='{.data}'", "kubectl get secret db -o jsonpath --template={.data}"],
+    ["kubectl get secret db -o jsonpath-as-json --template='{.data}'", "kubectl get secret db -o jsonpath-as-json --template={.data}"],
+    ["kubectl get secret db -o templatefile --template=/tmp/t", "kubectl get secret db -o templatefile --template=/tmp/t"],
     ["kubectl -n x get secret db -o yaml", "kubectl -n x get secret db -o yaml"],
     ["security find-generic-password -s x -w", "security find-generic-password -s x -w"],
     ["sops -d secrets.yaml", "sops -d secrets.yaml"],
@@ -530,11 +532,20 @@ describe("findSecretPrinting — invocations whose output is the secret", () => 
       // impossible while a body line parsed as the command it describes.
       expect(find("git commit -F - <<'EOF'\nfix: narrow the rule\n\n`gh auth token` is refused.\nEOF")).toBeNull();
       expect(find("cat <<'EOF' > docs/note.md\nRun `aws eks get-token` yourself.\nEOF")).toBeNull();
+      expect(find("git commit --file=- <<'EOF'\ngh auth token is refused\nEOF")).toBeNull();
     });
 
     test("a body a shell would execute is still scanned", () => {
       expect(find("bash <<'EOF'\ngh auth token\nEOF")).toBe("gh auth token");
       expect(find("cat <<'EOF' | sh\ngh auth token\nEOF")).toBe("gh auth token");
+    });
+
+    test.each([
+      "env sh", "xargs -I% sh -c %", "timeout 5 sh", "ssh host",
+      "python3", "node", "kubectl exec -i pod -- sh", "docker exec -i container sh",
+      "git shell", "cat | ssh host", "unknown-consumer",
+    ])("keeps scanning stdin for %s", (consumer) => {
+      expect(find(`${consumer} <<'EOF'\ngh auth token\nEOF`)).toBe("gh auth token");
     });
 
     test("a body the stripper cannot understand is still scanned", () => {

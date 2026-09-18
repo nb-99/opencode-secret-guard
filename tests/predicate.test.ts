@@ -6,7 +6,7 @@ import * as path from "node:path";
 import { findRepoRoot, gitignoreRules } from "../src/gitignore.ts";
 import { createHooks } from "../src/hooks.ts";
 import type { CommandAnalysis } from "../src/command-policy.ts";
-import { configPath, loadConfig } from "../src/policy.ts";
+import { configPath, loadConfig, opencodeConfigDirectory } from "../src/policy.ts";
 import type { GuardConfig } from "../src/policy.ts";
 import { classifyPath, classifyPaths, filterSearchOutput } from "../src/predicate.ts";
 import { buildProfile } from "../src/profile.ts";
@@ -530,6 +530,16 @@ describe("shell resolver protocol", () => {
     ]);
   });
 
+  test("a newline in a protected path cannot become a scrub entry", () => {
+    const target = path.join(opencodeConfigDirectory(), "plugins/a\nb");
+    const lines = resolveForShell(`touch '${target}'`, {
+      ...quiet(), secretEnvironment: ["TEST_TOKEN"],
+    }).split("\n");
+    expect(lines).toHaveLength(3);
+    expect(lines[1]).toContain("plugins/a b");
+    expect(lines.slice(2)).toEqual(["TEST_TOKEN"]);
+  });
+
   test("explains a strict fallback on one line, naming the group that was lost", () => {
     const lines = resolveForShell("kubectl get pods && cat ~/.kube/config", quiet()).split("\n");
     expect(lines).toHaveLength(2);
@@ -647,31 +657,33 @@ describe("failureHint", () => {
     expect(hint("git status && npm test", ["GITHUB_TOKEN"], strict)).toContain("strict profile");
   });
 
-  test("a setuid binary outranks everything: it is the one certain failure", () => {
+  test("a possible setuid exec denial outranks the strict reason", () => {
     const strict: CommandAnalysis = {
       group: null,
       reason: "`sudo` belongs to no credential group",
       candidates: ["ssh"],
       refusal: null,
     };
-    expect(hint("ps aux | rg node")).toContain("`ps` is setuid");
+    expect(hint("ps aux | rg node")).toContain("system `ps`, that binary is setuid");
     expect(hint("ps aux")).toContain("pgrep");
-    expect(hint("git log && sudo tee /etc/hosts", [], strict)).toContain("`sudo` is setuid");
+    expect(hint("git log && sudo tee /etc/hosts", [], strict)).toContain("system `sudo`, that binary is setuid");
     expect(hint("git log --format=%h")).toBe("");
+    expect(hint("ping -c 1 unreachable.invalid")).toBe("");
+    expect(hint("false && ps aux")).toContain("if this failed while executing");
   });
 
-  test("only the setuid hint is certain, and only a certain hint survives a 127 exit", () => {
+  test("only the setuid hint survives a 127 exit, without asserting a cause", () => {
     // zsh reports both a missing binary and a binary it may not execute as
     // 127, so the marker, not the status, decides which line the wrapper
     // prints. `!` survives it; `?` does not.
-    expect(full("ps aux").certain).toBe(true);
+    expect(full("ps aux").showOn127).toBe(true);
     expect(encodeHint(full("ps aux")).startsWith("!")).toBe(true);
-    expect(full("brew install jq").certain).toBe(false);
+    expect(full("brew install jq").showOn127).toBe(false);
     expect(encodeHint(full("brew install jq")).startsWith("?")).toBe(true);
     expect(encodeHint(full("git push origin HEAD"))).toBe("");
   });
 
-  test("every hint but the setuid one is worded as a condition, not a cause", () => {
+  test("every hint is worded as a condition, not a cause", () => {
     const strict: CommandAnalysis = {
       group: null,
       reason: "`make` belongs to no credential group",
@@ -679,6 +691,7 @@ describe("failureHint", () => {
       refusal: null,
     };
     // The wrapper sees an exit status, not what failed.
+    expect(hint("ps aux")).toContain("if this failed");
     expect(hint("git status && make", [], strict)).toContain("if this failed");
     expect(hint("printf x > ~/.zshenv")).toContain("if this failed");
     expect(hint("brew install jq")).toContain("if this failed");
