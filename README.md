@@ -62,6 +62,8 @@ in
     # Additions to the shipped default; upstream fixes still apply.
     extraRelaxationGroups.oci.binaries = [ "ko" ];
     extraSecretExceptions = [ "/pkg/store/secrets/obfuscator\\.go$" ];
+    # A shipped refusal this host does not want.
+    removeSecretPrintingCommands = [ { binary = "sops"; } ];
     # Whole-key overrides.
     settings = {
       denyRoots = [ "~/.config/secrets" ];
@@ -84,9 +86,11 @@ over values this module cannot see.
 
 `extraSecretPatterns`, `extraSecretExceptions`, `extraArtifactAllowlist`,
 `extraSecretPrintingCommands` and `extraRelaxationGroups` append to the shipped
-default, so a host carries only its deltas. `settings` replaces a key wholesale.
-`gitPackage` (default `pkgs.git`) is the git the guard itself spawns, written as
-a store path.
+default, so a host carries only its deltas. `removeSecretPrintingCommands` drops
+shipped refusal rules before the additions are appended, for a host that needs
+`sops -d` or a narrower `kubectl` rule without giving up the rest of the list.
+`settings` replaces a key wholesale. `gitPackage` (default `pkgs.git`) is the
+git the guard itself spawns, written as a store path.
 
 `shellPath` and `pluginPath` are **null when they do not apply** — `shellPath`
 whenever the guard is disabled or in `files-only` mode, since the wrapper
@@ -165,24 +169,38 @@ wrapper prints one line saying which segment cost the group, so the fix is to
 split the command, not to retry it.
 
 **Some invocations are refused outright.** `gh auth token`,
-`aws eks get-token`, `kubectl config view --raw`, `kubectl get secret … -o yaml`,
-`security find-generic-password -w` and the rest of `secretPrintingCommands`
-never run, wrapped in `sudo`/`env`/`sh -c`/`$(…)` or not: their output *is* the
-secret. Use the credential through the tool that needs it.
+`aws eks get-token`, `kubectl config view --raw`,
+`kubectl get secret … -o yaml`, `security find-generic-password -w` and the rest
+of `secretPrintingCommands` never run, wrapped in `sudo`/`env`/`sh -c`/`$(…)` or
+not: their output *is* the secret. Use the credential through the tool that
+needs it. Output formats that carry no values — `kubectl get secrets -o name`,
+`-o wide` — are not refused. A host that needs one of the shipped rules gone
+drops it with `removeSecretPrintingCommands` rather than replacing the key.
 
 **The environment is scrubbed.** Names in `secretEnvironment`, and every
 inherited variable matching `secretEnvironmentPatterns` (`*_TOKEN`,
 `*_SECRET`, `*_PASSWORD`, `*_API_KEY`, …), are removed before the command
 starts. A group's `allowEnvironment` re-admits pattern hits its binaries need
-(`aws` keeps `AWS_*`); explicitly named variables are never re-admitted.
+(`aws` keeps `AWS_*`); explicitly named variables are never re-admitted. A
+command may expand any variable the group does not keep — `echo $PWD && git
+status` keeps its group — because the rest are gone before it runs.
 
 **The guard's inputs are immutable.** No command can write OpenCode's global or
 project config, its plugin and tool directories, the `package.json` that makes
-it run `bun install`, the npm plugin cache, this package, the policy, or any
-user-writable directory on `PATH` outside the repository (`/opt/homebrew/bin`,
-`/usr/local/bin`, …). Reads are unaffected; prompts, skills and commands stay
+it run `bun install`, the npm plugin cache, this package, the policy, `~/.zshenv`
+(which the interpreter sources before every command), or any user-writable
+directory on `PATH` outside the repository (`/opt/homebrew/bin`,
+`/usr/local/bin`, …). Each of those is protected at the path it is named by
+*and* at the path it resolves to, so replacing a Home Manager symlink is denied
+too. Reads are unaffected; prompts, skills, commands and `~/.zshrc` stay
 editable. Practically: `brew install` and `npm i -g` from the agent shell fail —
 install tools from your own terminal.
+
+**A failed command says which rule it hit.** When a command exits non-zero, the
+wrapper adds one line if the guard is a plausible cause: the segment that cost
+the relaxation, the protected path a write was denied on, the installer that
+targets a `PATH` directory, or the scrubbed variable the command asked for.
+Otherwise it stays silent.
 
 **Renaming does not move a secret out from under its rule.** The directory
 nodes that carry a protected name (`~/.kube`, `secrets/`) and the ancestors a
