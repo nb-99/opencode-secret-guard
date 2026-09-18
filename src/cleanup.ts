@@ -140,7 +140,7 @@ export function cleanupProfile(config: GuardConfig, plan: CleanupPlan): string {
     gitignore: repoRoot
       ? gitignoreRules(config.tools.git, repoRoot, config.artifactAllowlist)
       : { repoRoot: null, subpaths: [], literals: [], directories: [] },
-    tamper: tamperTargets({ repoRoot, pathEnvironment: process.env.PATH }),
+    tamper: tamperTargets({ repoRoot, pathEnvironment: process.env.PATH, home: os.homedir() }),
   });
   const targets = plan.entries.map((target) => `(literal ${sbplString(target)})`).join(" ");
   const confined = profile +

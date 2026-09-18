@@ -68,7 +68,7 @@ describe("writablePathDirectories", () => {
 
 describe("tamperTargets", () => {
   test("names what OpenCode executes at startup, globally and per project", () => {
-    const targets = tamperTargets({ repoRoot: repo, pathEnvironment: "", policyPath });
+    const targets = tamperTargets({ repoRoot: repo, pathEnvironment: "", home: fixture, policyPath });
     const configDirectory = path.join(fixture, "config", "opencode");
 
     expect(targets.literals).toContain(fs.realpathSync(policyPath));
@@ -84,7 +84,7 @@ describe("tamperTargets", () => {
   });
 
   test("leaves prompts and skills alone", () => {
-    const targets = tamperTargets({ repoRoot: repo, pathEnvironment: "", policyPath });
+    const targets = tamperTargets({ repoRoot: repo, pathEnvironment: "", home: fixture, policyPath });
     const configDirectory = path.join(fixture, "config", "opencode");
 
     expect(isTamperProtected(path.join(configDirectory, "skills", "x", "SKILL.md"), targets)).toBe(false);
@@ -94,14 +94,22 @@ describe("tamperTargets", () => {
   });
 
   test("covers a file inside a protected tree and the tree itself", () => {
-    const targets = tamperTargets({ repoRoot: repo, pathEnvironment: "", policyPath });
+    const targets = tamperTargets({ repoRoot: repo, pathEnvironment: "", home: fixture, policyPath });
     expect(isTamperProtected(path.join(repo, ".opencode", "plugins", "evil.ts"), targets)).toBe(true);
     expect(isTamperProtected(path.join(repo, ".opencode", "plugins"), targets)).toBe(true);
   });
 
+  test("protects the file the command interpreter sources before every command", () => {
+    const targets = tamperTargets({ repoRoot: repo, pathEnvironment: "", home: fixture, policyPath });
+    expect(isTamperProtected(path.join(fixture, ".zshenv"), targets)).toBe(true);
+    // Read for interactive shells only, so the wrapper never runs them.
+    expect(isTamperProtected(path.join(fixture, ".zshrc"), targets)).toBe(false);
+    expect(isTamperProtected(path.join(fixture, ".zprofile"), targets)).toBe(false);
+  });
+
   test("protects the directory nodes leading to every target, so none can be swapped for a symlink", () => {
     const bin = path.join(fixture, "path", "bin");
-    const targets = tamperTargets({ repoRoot: repo, pathEnvironment: bin, policyPath });
+    const targets = tamperTargets({ repoRoot: repo, pathEnvironment: bin, home: fixture, policyPath });
 
     // The nodes themselves cannot be renamed or replaced...
     for (const node of [

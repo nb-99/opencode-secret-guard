@@ -1,3 +1,4 @@
+import * as os from "node:os";
 import * as path from "node:path";
 import { findRepoRoot, isGitIgnored, primeIgnoreCache } from "./gitignore.ts";
 import { isExistingDirectory, isInside, matchesAny, realpath } from "./paths.ts";
@@ -28,7 +29,11 @@ export function classifyPath(
 
   if (isInside(canonical, realpath(cacheDirectory()))) return "deny";
   if (operation === "write") {
-    const targets = tamperTargets({ repoRoot: findRepoRoot(canonical), pathEnvironment: process.env.PATH });
+    const targets = tamperTargets({
+      repoRoot: findRepoRoot(canonical),
+      pathEnvironment: process.env.PATH,
+      home: os.homedir(),
+    });
     if (isTamperProtected(canonical, targets)) return "deny";
   }
   if (config.exemptRoots.some((root) => isInside(canonical, realpath(root)))) return "allow";

@@ -33,6 +33,6 @@ process.stdout.write(
     home,
     group: groupArgument === "-" ? null : groupArgument,
     gitignore: gitignoreRules(config.tools.git, repoRoot, config.artifactAllowlist),
-    tamper: tamperTargets({ repoRoot, pathEnvironment: process.env.PATH, policyPath }),
+    tamper: tamperTargets({ repoRoot, pathEnvironment: process.env.PATH, home, policyPath }),
   }),
 );
