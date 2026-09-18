@@ -687,10 +687,35 @@ describe("failureHint", () => {
 
   test("names the protected path a write was denied on, however it was spelled", () => {
     expect(hint("printf x > ~/.zshenv")).toContain("~/.zshenv");
+    // Taken as written, because a protected directory's entry may be a symlink
+    // whose destination is not protected — the guard denies at the link.
     expect(hint("echo {} > /opt/homebrew/bin/git")).toContain("/opt/homebrew/bin/git");
     // Relative to the working directory, and through a protected parent.
     expect(hint("cp evil.ts ../.config/opencode/plugins/evil.ts")).toContain("plugins/evil.ts");
     expect(hint("printf x > ~/notes.md")).toBe("");
+  });
+
+  test("names a protected path reached through a symlinked parent", () => {
+    // The other direction: the word itself is unremarkable and only resolving
+    // it lands inside a target. Both spellings have to be tested.
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "guard-hint-"));
+    const plugins = path.join(root, "config", "opencode", "plugins");
+    fs.mkdirSync(plugins, { recursive: true });
+    const link = path.join(root, "shortcut");
+    fs.symlinkSync(plugins, link);
+    const targets = { literals: [], subpaths: [fs.realpathSync(plugins)] };
+
+    const text = failureHint({
+      analysis: quiet,
+      command: `cp evil.ts ${link}/evil.ts`,
+      tamper: targets,
+      scrub: [],
+      home: root,
+      cwd: root,
+    }).text;
+
+    expect(text).toContain("shortcut/evil.ts");
+    fs.rmSync(root, { recursive: true, force: true });
   });
 
   test("names an installer that writes a PATH directory it never spells out", () => {

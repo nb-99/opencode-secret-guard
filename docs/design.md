@@ -119,7 +119,10 @@ guard is a plausible cause, in this order:
    splitting the command is the fix;
 3. the tamper-protected path a word of the command names — the scan resolves
    each word against `$HOME` and the working directory, so `~/.zshenv` and
-   `../.config/opencode/plugins/x.ts` are both recognised;
+   `../.config/opencode/plugins/x.ts` are both recognised, and it tests the
+   word both as written and resolved, because a target is protected at the
+   link as well as at its destination: `/opt/homebrew/bin/git` is denied at the
+   entry the guard names, while its realpath leads out to the Cellar;
 4. the installer that writes a `PATH` directory without naming it —
    `brew install`, `npm -g`, `cargo install` and the like;
 5. the scrubbed variable the command asked for by name.
