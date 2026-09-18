@@ -1,24 +1,25 @@
 import { describe, expect, test } from "bun:test";
 import { analyzeCommand, findSecretPrinting, hasOpaqueConstruct, leadingBinary, resolveGroup, splitSegments, stripHeredocs } from "../src/command-policy.ts";
+import type { GuardConfig } from "../src/policy.ts";
 
-type RelaxationGroup = { binaries: string[]; allowPaths: string[] };
-
-const groups: Record<string, RelaxationGroup> = {
-  ssh: { binaries: ["git", "ssh", "gh"], allowPaths: [".ssh"] },
-  kube: { binaries: ["kubectl", "helm"], allowPaths: [".kube"] },
-  aws: { binaries: ["aws", "terraform", "tofu"], allowPaths: [".aws"] },
-};
-
-// Only relaxationGroups affects group resolution; the remaining fields satisfy
-// the production GuardConfig shape used by the exported helper.
-const config = {
+const config: GuardConfig = {
+  configVersion: 3,
+  mode: "shell+files",
+  cleanupRoot: null,
+  tools: { git: "/usr/bin/git" },
   secretPatterns: ["/\\.kube/", "/\\.ssh/", "\\.env$", "/secrets/"],
   secretExceptions: ["/\\.env\\.example$"],
   artifactAllowlist: [],
-  relaxationGroups: groups,
+  relaxationGroups: {
+    ssh: { binaries: ["git", "ssh", "gh"], allowPaths: [".ssh"], allowEnvironment: [] },
+    kube: { binaries: ["kubectl", "helm"], allowPaths: [".kube"], allowEnvironment: [] },
+    aws: { binaries: ["aws", "terraform", "tofu"], allowPaths: [".aws"], allowEnvironment: [] },
+  },
+  secretPrintingCommands: [],
   denyRoots: [],
   exemptRoots: [],
   secretEnvironment: [],
+  secretEnvironmentPatterns: [],
   cacheTtlMs: 0,
 };
 
@@ -170,6 +171,13 @@ describe("hasOpaqueConstruct — expansion the segment scan cannot see", () => {
     ["zsh parameter flag evaluation", "kubectl ${(@e):-'cat ~/.kube/config'}"],
     ["quoted zsh parameter flag evaluation", "kubectl get \"${(e):-\\$(cat ~/.kube/config)}\""],
     ["substitution after a single-quoted run", "git commit -m 'literal' && git log $(x)"],
+    // zsh evaluates these into words the refusal scan never sees.
+    ["dollar-quoted word", "gh $'auth' $'token'"],
+    ["parameter default with empty name", "gh ${:-auth} ${:-token}"],
+    ["parameter default with a name", "gh ${A:-auth} token"],
+    ["parameter flag", "kubectl config view ${(U):-x}"],
+    ["last-argument special", "echo auth; gh $_ token"],
+    ["dollar-quoted inside double quotes", "gh \"$'auth'\" token"],
   ])("%s", (_label, command) => {
     expect(hasOpaqueConstruct(command)).toBe(true);
   });
@@ -186,6 +194,11 @@ describe("hasOpaqueConstruct — expansion the segment scan cannot see", () => {
     ["the word exec", 'git commit -m "document exec semantics"'],
     ["a branch named source-maps", "git push origin source-maps"],
     ["a sentence-ending dot", 'git commit -m "done . next"'],
+    ["a plain variable", 'git commit -m "$MSG" && echo $HOME'],
+    ["a plain braced variable", 'git push ${REMOTE}'],
+    ["a variable with an underscore", "kubectl --context $KUBE_CTX get pods"],
+    ["a trailing dollar", 'git commit -m "5 $"'],
+    ["a positional and the exit status", 'git commit -m "$1 $?"'],
   ])("%s", (_label, command) => {
     expect(hasOpaqueConstruct(command)).toBe(false);
   });
@@ -212,6 +225,8 @@ describe("resolveGroup — relaxation applies", () => {
     ["git log | sort -u | uniq -c", "ssh"],
     ["git config --list | cut -d= -f1", "ssh"],
     ["git config --list | cut -d = -f 1,3-5", "ssh"],
+    ["git log --format='%an %s' | cut -d' ' -f1", "ssh"],
+    ["git log | sort -t ',' -k2", "ssh"],
     ["git log --format=%an | sort -t: -k2 | uniq", "ssh"],
     ["kubectl get pods | paste -d, -s", "kube"],
     ["git log | fold -w 80", "ssh"],
@@ -370,6 +385,14 @@ describe("resolveGroup — falls back to strict", () => {
     ["awk with an unknown flag", "git log | awk --exec x '{print}'"],
     ["awk with two program operands", "git log | awk '{print}' '{print}'"],
     ["cut with a path-like delimiter value", "git log | cut -d /etc -f1"],
+    ["base64 with an attached input file", "aws --version | base64 -icredentials"],
+    ["sort with an attached output file", "git log | sort -oout"],
+    ["shasum checking a manifest", "git log | shasum -c manifest"],
+    ["xxd reversing a dump", "git log | xxd -r dump"],
+    ["echo expanding a variable the group keeps", "aws --version && echo $AWS_SECRET_ACCESS_KEY"],
+    ["printf expanding a variable in double quotes", 'npm --version; printf "%s" "$NPM_TOKEN"'],
+    ["echo expanding a backtick in single quotes is fine, a dollar is not", "git --version && echo x$Y"],
+    ["awk reading ENVIRON", "aws sts get-caller-identity | awk '{print ENVIRON[\"AWS_SECRET_ACCESS_KEY\"]}'"],
     ["sort writing to a file", "git log | sort -o out.txt"],
     ["base64 reading a file", "git log | base64 -i ~/.ssh/id_ed25519"],
     ["base64 reading a relative file", "git log | base64 -i key.pem"],
@@ -443,6 +466,8 @@ describe("findSecretPrinting — invocations whose output is the secret", () => 
     ["rtk gh auth token", "gh auth token"],
     ["timeout 5 gh auth token", "gh auth token"],
     ["xargs -n1 gh auth token", "gh auth token"],
+    ["exec -a fake gh auth token", "gh auth token"],
+    ["noglob gh auth token", "gh auth token"],
     ["sh -c 'gh auth token'", "gh auth token"],
     ['bash -lc "aws eks get-token"', "aws eks get-token"],
     ["eval gh auth token", "gh auth token"],
