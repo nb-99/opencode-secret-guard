@@ -169,13 +169,16 @@ export function profilePath(options: {
   cwd: string;
   group: string | null;
   directory?: string;
+  /** Reuses the caller's targets; recomputed when absent. */
+  tamper?: TamperTargets;
 }): string {
   const { config, home, cwd, group } = options;
   const directory = options.directory ?? cacheDirectory();
   const repoRoot = findRepoRoot(cwd);
   // PATH differs between invocations (direnv, per-project shells), and the
   // writable entries become deny rules, so they are part of the identity.
-  const tamper = tamperTargets({ repoRoot, pathEnvironment: process.env.PATH, home });
+  const tamper =
+    options.tamper ?? tamperTargets({ repoRoot, pathEnvironment: process.env.PATH, home });
 
   const key = createHash("sha256")
     .update(JSON.stringify({ version: PROFILE_VERSION, repoRoot, group, home, config, tamper }))
