@@ -90,7 +90,8 @@ layer treats "git said nothing" as "nothing is ignored", so a silent spawn
 failure would quietly shrink the boundary.
 
 One resolver invocation returns the profile path on its first line, a hint on
-the second, and the names to scrub on the following ones, which
+the second — prefixed with `!` or `?` for whether it survives a 127 exit — and
+the names to scrub on the following ones, which
 `/usr/bin/env -u …` then removes. The scrub list is the policy's
 `secretEnvironment` plus every inherited variable whose name matches
 `secretEnvironmentPatterns` (`*_TOKEN`, `*_SECRET`, `*_PASSWORD`, …), minus
@@ -111,21 +112,37 @@ permitted` from inside whatever attempted it. Unexplained, an agent retries the
 same shape. When the command exits non-zero the wrapper prints one line, if the
 guard is a plausible cause, in this order:
 
-1. the segment that cost the relaxation, why (a path-opening filter, a foreign
+1. the setuid binary the command invokes, with what to use instead — this one
+   fails identically every time, so it is stated as a cause;
+2. the segment that cost the relaxation, why (a path-opening filter, a foreign
    binary, mixed groups, an environment assignment, substitution), and that
    splitting the command is the fix;
-2. the tamper-protected path a word of the command names — the scan resolves
+3. the tamper-protected path a word of the command names — the scan resolves
    each word against `$HOME` and the working directory, so `~/.zshenv` and
    `../.config/opencode/plugins/x.ts` are both recognised;
-3. the installer that writes a `PATH` directory without naming it —
+4. the installer that writes a `PATH` directory without naming it —
    `brew install`, `npm -g`, `cargo install` and the like;
-4. the scrubbed variable the command asked for by name.
+5. the scrubbed variable the command asked for by name.
 
 A strict command that never named a credential binary, a command that names no
 protected path and no scrubbed variable, or a relaxed one that succeeds, prints
-nothing. The hint is a courtesy on top of the boundary: it is derived from the
-command text, so a path spelled by a variable is not recognised — and such a
-command has already been forced strict.
+nothing. The resolver marks each line as certain (`!`) or conditional (`?`) and
+the wrapper suppresses a conditional one on exit status 127: zsh reports a
+binary it cannot find that way, and hinting there would blame the sandbox for a
+typo or an uninstalled tool. The marker is needed because 127 is also how zsh
+reports a binary it may not *execute*, which is exactly how a setuid program
+fails here — the status alone cannot tell the two apart.
+
+The wrapper knows the exit status and nothing else, so every case but the first
+is worded as a condition ("if this failed on a permission error…"). Stating a
+cause the wrapper cannot see is worse than saying nothing: `mkdir /root/x &&
+git log` fails on the `mkdir`, and a hint asserting that the credentials were
+unreadable sends the reader after the wrong thing. Reading the command's stderr
+would make the hint exact, but it would put a `tee` between every command and
+the terminal — a non-tty stderr and changed interleaving with stdout, for a
+courtesy line. The hint is a courtesy on top of the boundary in another sense
+too: it is derived from the command text, so a path spelled by a variable is
+not recognised — and such a command has already been forced strict.
 
 Enforcement happens in the kernel, so it covers variable expansion, globs,
 redirections, `find -exec`, interpreters, archivers, and recursive greps
@@ -320,6 +337,15 @@ would grant more. Prose stays untouched: in `git commit -m "gh auth token is
 refused"` the binary is `git` and the quoted string is a single word, so no
 rule's words appear, and `echo 'aws eks get-token'` is one quoted word.
 
+A heredoc body is the exception that had to be made explicit. It is stdin text
+for the next command, but the scan splits on newlines and backticks, so a line
+of a commit message written with `git commit -F - <<'EOF'` parsed as the
+invocation it described — documenting this guard from inside it was impossible.
+The body is therefore dropped before the scan, unless something in the command
+could execute it: a shell reading its script from stdin (`bash <<'EOF'`,
+`… | sh`), a segment whose binary cannot be seen, or a heredoc `stripHeredocs`
+cannot understand. The body of `bash <<'EOF'` is still scanned.
+
 The scan sees lexical words, and zsh builds words at run time. `gh $'auth'
 $'token'` and `gh ${:-auth} ${:-token}` contain neither `auth` nor `token`
 until zsh expands them, so they would slip past the scan while still resolving
@@ -337,22 +363,15 @@ with one message naming the invocation. The hook covers `files-only` mode,
 where no wrapper backs the plugin, and gives a clear error before anything
 runs.
 
-A heredoc body is the exception that had to be made explicit. It is stdin text
-for the next command, but the scan splits on newlines and backticks, so a line
-of a commit message written with `git commit -F - <<'EOF'` parsed as the
-invocation it described — documenting this guard from inside it was impossible.
-The body is therefore dropped before the scan, unless something in the command
-could execute it: a shell reading its script from stdin (`bash <<'EOF'`,
-`… | sh`), a segment whose binary cannot be seen, or a heredoc `stripHeredocs`
-cannot understand. The body of `bash <<'EOF'` is still scanned.
-
 ## Setuid binaries
 
 `sandbox-exec` does not run setuid programs: `ps`, `top`, `sudo`, `su`,
 `crontab`, `at` and `traceroute` fail with `operation not permitted`. This is
 the kernel's rule, not the profile's, and there is no allow for it. `pgrep`,
 `pkill`, `lsof` and `netstat` are not setuid and work. The agent-facing
-guidance names the substitutes.
+guidance names the substitutes, and so does the failure hint: this is the one
+denial certain enough to state as a cause, and its error is indistinguishable
+from a denied file.
 
 ## Per-binary relaxation
 
