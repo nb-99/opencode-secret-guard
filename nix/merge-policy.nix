@@ -35,11 +35,14 @@ let
     }
     // group
   ) (lib.filterAttrs (name: _: !(defaultPolicy.relaxationGroups ? ${name})) extraRelaxationGroups);
+  # `mode` and `tools.git` have their own options, which the module validates
+  # and wires into OpenCode's shell setting; a `settings` value for either
+  # would silently disagree with what the module assumed.
+  reserved = lib.intersectLists [ "mode" "tools" ] (lib.attrNames settings);
 in
+assert lib.assertMsg (reserved == [ ]) "opencode-secret-guard: set ${lib.concatStringsSep ", " reserved} through the module option, not through settings";
 defaultPolicy
 // {
-  inherit mode;
-  tools.git = gitPath;
   secretPatterns = defaultPolicy.secretPatterns ++ extraSecretPatterns;
   secretExceptions = defaultPolicy.secretExceptions ++ extraSecretExceptions;
   artifactAllowlist = defaultPolicy.artifactAllowlist ++ extraArtifactAllowlist;
@@ -47,3 +50,7 @@ defaultPolicy
   relaxationGroups = extendedGroups // newGroups;
 }
 // settings
+// {
+  inherit mode;
+  tools = defaultPolicy.tools // { git = gitPath; };
+}

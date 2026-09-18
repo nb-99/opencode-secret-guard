@@ -64,8 +64,10 @@ The wrapper and the plugin ship as one package:
 
 ```text
 opencode-secret-guard/
-├── bin/opencode-secret-guard   # the configured shell
-└── lib/secret-guard.ts         # plugin hooks and profile resolver
+├── bin/opencode-secret-guard             # the configured shell
+├── lib/plugin.ts                         # plugin entry point (hooks)
+├── lib/cli.ts                            # profile resolver the shell calls
+└── share/opencode-secret-guard/default-policy.json
 ```
 
 Neither file is substituted at build time. The wrapper locates the resolver
@@ -231,11 +233,18 @@ runs with no profile at all.
 
 Step 11 denies `file-write*` on all of these, last, after the exemptions — no
 `exemptRoots` entry may reopen them. Literal files (`opencode.json`,
-`package.json`, the policy, the config directory node so it cannot be renamed
-and recreated) and whole trees (plugin and tool directories, the cache,
-`~/.local/share/opencode/bin`, this package, every writable `PATH` entry outside
-the repository). `PATH` entries inside the repository (`node_modules/.bin`,
-direnv shims) stay writable; a project cannot be protected from itself. Reads
+`package.json`, the policy) and whole trees (plugin and tool directories, the
+cache, `~/.local/share/opencode/bin`, this package, every writable `PATH`
+entry outside the repository). Every directory node on the way to one of
+these is a literal too — `~/.config/opencode`, `<repo>/.opencode`,
+`~/.local/share/opencode`, `~/.zplug` for `~/.zplug/bin`, up to `/` — because
+a rule matches the path at the time of the operation: rename the parent, put
+a symlink in its place, and OpenCode would load whatever the link points at.
+A protected node cannot be renamed, deleted or replaced; writing beside a
+protected child under it is unaffected. `PATH` entries inside the repository
+(`node_modules/.bin`, direnv shims) and relative ones (which mean the working
+directory, the repository) stay writable; a project cannot be protected from
+itself. Reads
 are never affected, and prompts, skills and commands stay editable — they are
 text for the model, not code OpenCode executes.
 
@@ -256,7 +265,7 @@ token`, `aws eks get-token`, `kubectl config view --raw`, `kubectl get secret
 … -o yaml`, `security find-generic-password -w`: no profile makes these safe,
 because the secret is the command's stdout. `secretPrintingCommands` lists them
 as a binary plus per-word patterns, each matched in full against some word of
-the invocation, and the default ships 34 rules across the cloud CLIs, kubectl,
+the invocation, and the default ships 33 rules across the cloud CLIs, kubectl,
 argocd, the forge CLIs, git credential helpers, npm, the macOS keychain,
 1Password, Vault, Terraform outputs, sops, age and gpg.
 
@@ -264,9 +273,21 @@ The scan is deliberately more eager than the group scan: it splits on
 parentheses and backticks too, unwraps `sudo`, `env`, `xargs`, `timeout` and
 friends (skipping their options), and recurses into `sh -c '…'` and `eval`.
 Over-matching here only refuses more, whereas over-unwrapping in the group scan
-would grant more. Prose stays untouched — `git commit -m "gh auth token is
-refused"` is one word `gh` followed by words that are not `auth` and `token`
-in that quoted string, and `echo 'aws eks get-token'` is one quoted word.
+would grant more. Prose stays untouched: in `git commit -m "gh auth token is
+refused"` the binary is `git` and the quoted string is a single word, so no
+rule's words appear, and `echo 'aws eks get-token'` is one quoted word.
+
+The scan sees lexical words, and zsh builds words at run time. `gh $'auth'
+$'token'` and `gh ${:-auth} ${:-token}` contain neither `auth` nor `token`
+until zsh expands them, so they would slip past the scan while still resolving
+to the `ssh` group. The group scan therefore treats every `$` as opaque unless
+it is a plain `$NAME`, `${NAME}`, a positional or `$?`-style special: those
+values come from the environment OpenCode passed, which the command cannot
+choose for itself (an assignment or `export` segment belongs to no group). The
+one exception is `$_`, the previous segment's last word, which an inert
+`echo auth` would set. Every other form runs strict, where the credential file
+is denied and the variable scrubbed, so the refusal scan is a courtesy on top
+of a boundary rather than the boundary itself.
 
 Both the configured shell and the plugin's `tool.execute.before` hook refuse,
 with one message naming the invocation. The hook covers `files-only` mode,
@@ -289,7 +310,7 @@ be able to read _indirectly_ — denying them outright breaks git-over-SSH,
 
 | Group   | Binaries                                                  | Re-allows                                                             | Keeps in env                    |
 | ------- | --------------------------------------------------------- | --------------------------------------------------------------------- | ------------------------------- |
-| `ssh`   | `git`, `ssh`, `scp`, `rsync`, `gh`, `glab`, `fj`, `jj`, … | `~/.ssh`, `~/.gnupg`, `~/.git-credentials`, `~/.netrc`, `~/.config/gh`, `~/.config/glab-cli`, `~/.config/fj` | `GH_TOKEN`, `GITHUB_TOKEN`, `GITLAB_TOKEN`, … |
+| `ssh`   | `git`, `ssh`, `scp`, `rsync`, `gh`, `glab`, `fj`, `jj`, … | `~/.ssh`, `~/.gnupg`, `~/.git-credentials`, `~/.netrc`, `~/.config/gh`, `~/.config/hub`, `~/.config/glab-cli`, `~/.config/fj`, … | `GH_TOKEN`, `GITHUB_TOKEN`, `GITLAB_TOKEN`, … |
 | `kube`  | `kubectl`, `helm`, `k9s`, `stern`, `flux`, `argocd`, …    | `~/.kube`                                                             | —                               |
 | `aws`   | `aws`, `terraform`, `tofu`, `terragrunt`, `packer`, `sam` | `~/.aws`, `~/.terraform.d/credentials.tfrc.json`                      | `AWS_*`                         |
 | `oci`   | `docker`, `podman`, `nerdctl`, `skopeo`, `crane`          | `~/.docker`                                                           | —                               |
@@ -324,7 +345,7 @@ file form), zsh evaluation flags/glob qualifiers, subshells, and unbalanced
 quoting all force the strict profile. Leading environment assignments do too:
 variables such as `GIT_SSH_COMMAND`, `GIT_EXTERNAL_DIFF`, and
 `RIPGREP_CONFIG_PATH` can inject programs or options that the argument scan
-cannot see. `rtk`, `command`, `nohup`, and `time` are
+cannot see. `rtk`, `command`, `builtin`, `nohup`, and `time` are
 unwrapped first; `sudo` and `xargs` deliberately are not, so they fall through to
 strict.
 
@@ -355,7 +376,10 @@ relaxation grants. Without that, `cd repo && git commit` runs strict and fails
 deep inside git — as a gpg error about `~/.gnupg`, which names neither the guard
 nor the cause. `git log; echo done` and `git status || true` failed the same
 way. A segment containing `<` or `>` is never skipped, since a redirection can
-create or truncate a file even from a builtin.
+create or truncate a file even from a builtin. Nor is one that expands a
+variable outside single quotes: `aws --version && echo $AWS_SECRET_ACCESS_KEY`
+would print the variable the `aws` group keeps in the environment, so that
+shape costs the group and strict scrubs it.
 
 `cat`, `head`, `tail`, `wc`, `sort`, `uniq`, `tr`, `nl`, `rev`, `column`,
 `cut`, `paste`, `fold`, `base64`, `xxd` and the checksum tools are skipped
@@ -363,15 +387,16 @@ create or truncate a file even from a builtin.
 caller could already read, so they add no reach of their own — but they can
 open a file when given one. A segment is therefore only skipped when every
 argument is a number or number list (`tail -n 30`, `cut -f 2,4-6`), a flag with
-no `/`, `~`, or `=` in it, or a one-character delimiter (`cut -d=`, `sort -t:`).
-`cat ~/.ssh/id_ed25519`, `cat pubring.kbx`, `sort -o/tmp/out`,
-`base64 -i key.pem` and `cat < ~/.ssh/id_ed25519` all fail that test and keep
-the strict profile. The redirection check is quote-aware, so `rg 'a>b'` is
+no `/`, `~`, or `=` in it that is not a file option (`base64 -i`, `sort -o`,
+`shasum -c`, `xxd -r`, attached or separate), or a one-character delimiter
+(`cut -d' '`, `sort -t:`). `cat ~/.ssh/id_ed25519`, `cat pubring.kbx`,
+`sort -oout`, `base64 -i key.pem` and `cat < ~/.ssh/id_ed25519` all fail that
+test and keep the strict profile. The redirection check is quote-aware, so `rg 'a>b'` is
 not a redirection.
 
 `awk` is skipped as a direct pipe consumer when it has exactly one program
 operand, no `-f`, and a program that neither redirects a `print`, pipes, nor
-calls `getline`, `system`, `close` or `fflush`. `NR>1` is a comparison, not a
+calls `getline`, `system`, `close` or `fflush`, nor reads `ENVIRON`. `NR>1` is a comparison, not a
 redirection; `{print > "x"}` is. `-F` and `-v` are accepted since their values
 cannot name a file awk would open.
 
@@ -499,7 +524,7 @@ may already have removed some allowed descendants.
 - Credentials in the macOS keychain are reachable through Security.framework by
   any process the keychain trusts. The `security` CLI's dump commands are
   refused, but a program linking the framework directly is not.
-- `sandbox-exec` is formally deprecated by Apple. It still ships in macOS 26.5
+- `sandbox-exec` is formally deprecated by Apple. It still ships in macOS 26
   and is still used by Chrome and Claude Code.
 
 ## Tests

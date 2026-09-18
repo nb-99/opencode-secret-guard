@@ -142,7 +142,15 @@ in
         ];
       };
       mergedFile = pkgs.writeText "merged-policy.json" (builtins.toJSON merged);
+      # A settings.mode would disagree with the shell the module wires up.
+      reservedRejected = !(builtins.tryEval (mergePolicy {
+        defaultPolicy = builtins.fromJSON (builtins.readFile ../policy/default.json);
+        mode = "shell+files";
+        gitPath = "/usr/bin/git";
+        settings.mode = "files-only";
+      })).success;
     in
+    assert reservedRejected;
     pkgs.runCommand "secret-guard-merge-policy" { nativeBuildInputs = [ pkgs.bun ]; } ''
       cp -r ${../src} src
       bun -e '

@@ -209,7 +209,6 @@
     { "binary": "aws", "args": ["secretsmanager", "get-secret-value"] },
     { "binary": "aws", "args": ["ssm", "get-parameters?(-by-path)?", "--with-decryption"] },
     { "binary": "gcloud", "args": ["auth", "print-(access|identity)-token"] },
-    { "binary": "gcloud", "args": ["auth", "application-default", "print-access-token"] },
     { "binary": "gcloud", "args": ["secrets", "versions", "access"] },
     { "binary": "az", "args": ["account", "get-access-token"] },
     { "binary": "az", "args": ["keyvault", "secret", "(show|download)"] },
