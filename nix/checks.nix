@@ -129,6 +129,16 @@ in
             args = [ "show" ];
           }
         ];
+        removeSecretPrintingCommands = [
+          {
+            binary = "terraform";
+            args = [
+              "show"
+              "-json"
+            ];
+          }
+          { binary = "sops"; }
+        ];
         extraRelaxationGroups = {
           oci.binaries = [ "ko" ];
           vault = {
@@ -143,12 +153,13 @@ in
       };
       mergedFile = pkgs.writeText "merged-policy.json" (builtins.toJSON merged);
       # A settings.mode would disagree with the shell the module wires up.
-      reservedRejected = !(builtins.tryEval (mergePolicy {
-        defaultPolicy = builtins.fromJSON (builtins.readFile ../policy/default.json);
-        mode = "shell+files";
-        gitPath = "/usr/bin/git";
-        settings.mode = "files-only";
-      })).success;
+      reservedRejected =
+        !(builtins.tryEval (mergePolicy {
+          defaultPolicy = builtins.fromJSON (builtins.readFile ../policy/default.json);
+          mode = "shell+files";
+          gitPath = "/usr/bin/git";
+          settings.mode = "files-only";
+        })).success;
     in
     assert reservedRejected;
     pkgs.runCommand "secret-guard-merge-policy" { nativeBuildInputs = [ pkgs.bun ]; } ''
@@ -163,6 +174,11 @@ in
         assert(config.secretExceptions.at(-1) === "/obfuscator\\.go$", "extra exception not appended");
         assert(config.artifactAllowlist.at(-1) === ".zig-cache", "extra artefact not appended");
         assert(config.secretPrintingCommands.at(-1).binary === "pass", "extra printing command not appended");
+        const printing = (binary) => config.secretPrintingCommands.filter((rule) => rule.binary === binary);
+        assert(printing("terraform").length === 1, "the named terraform rule was not the only one removed");
+        assert(printing("terraform")[0].args[0] === "output", "the wrong terraform rule was removed");
+        assert(printing("sops").length === 0, "an empty args list must remove every rule for the binary");
+        assert(printing("gh").length === 1, "unrelated printing rules were dropped");
         assert(config.relaxationGroups.oci.binaries.includes("docker"), "default oci binaries lost");
         assert(config.relaxationGroups.oci.binaries.includes("ko"), "oci addition not merged");
         assert(config.relaxationGroups.vault.binaries[0] === "vault", "new group not created");
