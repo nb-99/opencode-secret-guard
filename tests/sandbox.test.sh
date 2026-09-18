@@ -284,6 +284,20 @@ expect_true() {
   fi
 }
 
+# $1 description, $2 phrase the wrapper must print when the command fails,
+# $3 command. The hint only ever appears on a non-zero exit.
+expect_shell_hint() {
+  local description="$1" phrase="$2" command="$3" output
+  output="$(cd "$fixture" && HOME="$fakehome" PATH="$fakebin:$PATH" "$GUARD_SHELL" -c "$command" 2>&1)"
+  if [[ "$output" == *"$phrase"* ]]; then
+    pass=$((pass + 1))
+    printf '  ok    %s\n' "$description"
+  else
+    fail=$((fail + 1)); failures+=("NO HINT: $description -- $output")
+    printf '  FAIL  %s -- %s\n' "$description" "$output"
+  fi
+}
+
 # $1 description, $2 target path, $3 command: the write must land.
 expect_writable() {
   local description="$1" target="$2" command="$3" profile="${4:-$strict}" after
@@ -667,6 +681,15 @@ else
   printf '  FAIL  shell stays quiet when no credential binary was involved -- %s\n' "$plain_failure_output"
 fi
 
+# A tamper denial reaches the command as a bare "operation not permitted" from
+# inside whatever tried the write. Unexplained, an agent retries the same shape;
+# the same is true of an install that lands in a PATH directory it never names.
+expect_shell_hint "shell explains a denied write to a guarded path" \
+  "what OpenCode loads at its next start" 'printf TAMPER > "'"$fakebin"'/git"'
+rm -f "$fakebin/git"
+expect_shell_hint "shell explains an install into a PATH directory" \
+  "installs into a directory on PATH" 'cargo install --secret-guard-not-a-flag'
+
 # The scrub list comes from the policy, and the shipped default deliberately
 # names no variables — only a user knows theirs. Asserting the mechanism against
 # whichever policy the run was handed would therefore pass or fail depending on
@@ -705,6 +728,19 @@ if [[ "$shell_pattern_output" == "$PUBLIC" ]]; then
 else
   fail=$((fail + 1)); failures+=("SHELL PATTERN ENV LEAKED: $shell_pattern_output")
   printf '  FAIL  shell scrubs environment by pattern under the strict profile -- %s\n' "$shell_pattern_output"
+fi
+# A scrubbed variable is simply absent, so the command fails as if the user had
+# never set it. Naming it is the difference between "fix the command" and
+# "understand the guard".
+scrub_hint_output="$(cd "$fixture" && OPENCODE_SECRET_GUARD_CONFIG="$scrub_config" \
+  OTHER_CANARY_TOKEN="$SECRET" HOME="$fakehome" PATH="$fakebin:$PATH" \
+  "$GUARD_SHELL" -c 'test -n "$OTHER_CANARY_TOKEN"' 2>&1)"
+if [[ "$scrub_hint_output" == *"OTHER_CANARY_TOKEN"* && "$scrub_hint_output" == *"removed from the"* ]]; then
+  pass=$((pass + 1))
+  printf '  ok    shell names the scrubbed variable a failed command asked for\n'
+else
+  fail=$((fail + 1)); failures+=("NO SCRUB HINT: $scrub_hint_output")
+  printf '  FAIL  shell names the scrubbed variable a failed command asked for -- %s\n' "$scrub_hint_output"
 fi
 shell_group_env_output="$(cd "$fixture" && OPENCODE_SECRET_GUARD_CONFIG="$scrub_config" \
   KUBE_CANARY_TOKEN="KEPT-FOR-GROUP" OTHER_CANARY_TOKEN="$SECRET" \

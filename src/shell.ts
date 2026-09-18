@@ -2,10 +2,13 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { CommandAnalysis } from "./command-policy.ts";
-import { analyzeCommand } from "./command-policy.ts";
+import { analyzeCommand, analyzeSegments, parseCommand, shellWords } from "./command-policy.ts";
+import { findRepoRoot } from "./gitignore.ts";
 import { matchesAny, realpath } from "./paths.ts";
 import type { GuardConfig } from "./policy.ts";
 import { profilePath } from "./profile.ts";
+import type { TamperTargets } from "./tamper.ts";
+import { isTamperProtected, tamperTargets } from "./tamper.ts";
 
 export const SANDBOX_EXEC = "/usr/bin/sandbox-exec";
 
@@ -104,17 +107,26 @@ export function resolveShellPlan(
 
   const analysis = analyzeCommand(command, guardConfig);
   if (analysis.refusal) throw new Error(refusalMessage(analysis.refusal));
+  const home = os.homedir();
+  const cwd = process.cwd();
+  const tamper = tamperTargets({
+    repoRoot: findRepoRoot(cwd),
+    pathEnvironment: process.env.PATH,
+    home,
+  });
   const profile = profilePath({
     config: guardConfig,
-    home: os.homedir(),
-    cwd: process.cwd(),
+    home,
+    cwd,
     group: analysis.group,
+    tamper,
   });
+  const scrub = scrubbedEnvironment(guardConfig, analysis.group);
   return {
     profile,
     group: analysis.group,
-    hint: strictHint(analysis),
-    scrub: scrubbedEnvironment(guardConfig, analysis.group),
+    hint: failureHint({ analysis, command, tamper, scrub, home, cwd }),
+    scrub,
   };
 }
 
@@ -142,6 +154,121 @@ export function strictHint(analysis: CommandAnalysis): string {
     `The ${groups} credentials were unreadable. Split it into one call per step, ` +
     `keeping only credential binaries and stdin-only filters together.`
   ).replace(/\s*\n\s*/g, " ");
+}
+
+/**
+ * Commands that install a program into a directory on `PATH` without naming
+ * that directory anywhere in their words. The tamper rules deny the write, and
+ * the tool's own error rarely mentions a path the scan below could recognise.
+ */
+export const GLOBAL_INSTALLERS: { binary: string; pattern: RegExp }[] = [
+  { binary: "brew", pattern: /^(install|upgrade|reinstall|tap|link)$/ },
+  { binary: "npm", pattern: /^(-g|--global|--location=global)$/ },
+  { binary: "pnpm", pattern: /^(-g|--global)$/ },
+  { binary: "yarn", pattern: /^global$/ },
+  { binary: "bun", pattern: /^(-g|--global)$/ },
+  { binary: "cargo", pattern: /^install$/ },
+  { binary: "go", pattern: /^install$/ },
+  { binary: "gem", pattern: /^install$/ },
+  { binary: "pipx", pattern: /^install$/ },
+  { binary: "uv", pattern: /^tool$/ },
+];
+
+/**
+ * The first word of the command that names a path no command may write, or
+ * null. Words are taken as written: a path spelled by a variable is invisible
+ * here, and a command that uses one has already been forced strict.
+ */
+export function tamperedPath(
+  command: string,
+  tamper: TamperTargets,
+  home: string,
+  cwd: string,
+): string | null {
+  for (const segment of analyzeSegments(command) ?? []) {
+    for (const word of shellWords(segment.command) ?? []) {
+      if (!word || word.startsWith("-")) continue;
+      if (!word.includes("/") && !word.startsWith("~")) continue;
+      const expanded = word.startsWith("~/") ? path.join(home, word.slice(2)) : word;
+      const resolved = realpath(path.resolve(cwd, expanded));
+      if (isTamperProtected(resolved, tamper)) return word;
+    }
+  }
+  return null;
+}
+
+/** The installer invocation in the command, as `binary subcommand`, or null. */
+export function globalInstaller(command: string): string | null {
+  for (const segment of analyzeSegments(command) ?? []) {
+    const parsed = parseCommand(segment.command);
+    if (!parsed) continue;
+    const words = shellWords(parsed.args) ?? [];
+    for (const { binary, pattern } of GLOBAL_INSTALLERS) {
+      if (parsed.binary === binary && words.some((word) => pattern.test(word))) {
+        return `${binary} ${words.find((word) => pattern.test(word))}`;
+      }
+    }
+  }
+  return null;
+}
+
+/** Scrubbed variables the command names outright, in the order they appear. */
+export function scrubbedReferences(command: string, scrub: string[]): string[] {
+  if (scrub.length === 0) return [];
+  const named = new Set<string>();
+  for (const match of command.matchAll(/\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?/g)) {
+    if (scrub.includes(match[1]!)) named.add(match[1]!);
+  }
+  return [...named];
+}
+
+/**
+ * The one line the wrapper prints when the command fails. A failure under this
+ * guard is often a denial the kernel reports as a bare `operation not
+ * permitted`, naming neither the guard nor the rule — so an agent retries the
+ * same shape instead of changing it. Each case below says what was denied and
+ * what to do instead; silence is the default, because most failures are the
+ * command's own.
+ */
+export function failureHint(options: {
+  analysis: CommandAnalysis;
+  command: string;
+  tamper: TamperTargets;
+  scrub: string[];
+  home: string;
+  cwd: string;
+}): string {
+  const { analysis, command, tamper, scrub, home, cwd } = options;
+  const strict = strictHint(analysis);
+  if (strict) return strict;
+
+  const tampered = tamperedPath(command, tamper, home, cwd);
+  if (tampered) {
+    return (
+      `secret-guard: if this failed with "operation not permitted", it is because \`${tampered}\` is part of ` +
+      "what OpenCode loads at its next start, or a directory on PATH. No command may write those, " +
+      "so one command cannot disable the guard for the next. Make the change from your own terminal."
+    );
+  }
+
+  const installer = globalInstaller(command);
+  if (installer) {
+    return (
+      `secret-guard: \`${installer}\` installs into a directory on PATH, which no command may write — ` +
+      "a planted binary would run unsandboxed. Install it from your own terminal, or into the repository."
+    );
+  }
+
+  const referenced = scrubbedReferences(command, scrub);
+  if (referenced.length > 0) {
+    return (
+      `secret-guard: ${referenced.join(", ")} ${referenced.length === 1 ? "was" : "were"} removed from the ` +
+      "environment before this command ran, because the name matches a credential pattern. Only a relaxation " +
+      "group's own binaries keep such a variable; pass the value through the tool that needs it."
+    );
+  }
+
+  return "";
 }
 
 /**

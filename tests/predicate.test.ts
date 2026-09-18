@@ -5,11 +5,12 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { findRepoRoot, gitignoreRules } from "../src/gitignore.ts";
 import { createHooks } from "../src/hooks.ts";
+import type { CommandAnalysis } from "../src/command-policy.ts";
 import { configPath, loadConfig } from "../src/policy.ts";
 import type { GuardConfig } from "../src/policy.ts";
 import { classifyPath, classifyPaths, filterSearchOutput } from "../src/predicate.ts";
 import { buildProfile } from "../src/profile.ts";
-import { expectedShell, resolveForShell, resolveProfile, scrubbedEnvironment } from "../src/shell.ts";
+import { expectedShell, failureHint, resolveForShell, resolveProfile, scrubbedEnvironment } from "../src/shell.ts";
 
 const policyPath = process.env.OPENCODE_SECRET_GUARD_CONFIG;
 if (!policyPath) {
@@ -617,6 +618,60 @@ describe("scrubbedEnvironment", () => {
     // allowEnvironment only re-admits pattern hits: an explicitly named
     // variable is the user saying "never", and the group must not override it.
     expect(scrubbedEnvironment(named, "ssh", environment)).toEqual(["GITHUB_TOKEN"]);
+  });
+});
+
+describe("failureHint", () => {
+  const tamper = {
+    literals: ["/Users/test/.config/opencode/opencode.json", "/Users/test/.zshenv"],
+    subpaths: ["/Users/test/.config/opencode/plugins", "/opt/homebrew/bin"],
+  };
+  const quiet: CommandAnalysis = { group: "ssh", reason: null, candidates: ["ssh"], refusal: null };
+  const hint = (command: string, scrub: string[] = [], analysis: CommandAnalysis = quiet) =>
+    failureHint({ analysis, command, tamper, scrub, home: "/Users/test", cwd: "/Users/test/repo" });
+
+  test("says nothing about an ordinary failure", () => {
+    expect(hint("git push origin HEAD")).toBe("");
+    expect(hint("cat README.md")).toBe("");
+  });
+
+  test("the strict reason wins, because it explains the denial the command hit first", () => {
+    const strict: CommandAnalysis = {
+      group: null,
+      reason: "`npm test` belongs to no credential group",
+      candidates: ["ssh"],
+      refusal: null,
+    };
+    expect(hint("git status && npm test", ["GITHUB_TOKEN"], strict)).toContain("strict profile");
+  });
+
+  test("names the protected path a write was denied on, however it was spelled", () => {
+    expect(hint("printf x > ~/.zshenv")).toContain("~/.zshenv");
+    expect(hint("echo {} > /opt/homebrew/bin/git")).toContain("/opt/homebrew/bin/git");
+    // Relative to the working directory, and through a protected parent.
+    expect(hint("cp evil.ts ../.config/opencode/plugins/evil.ts")).toContain("plugins/evil.ts");
+    expect(hint("printf x > ~/notes.md")).toBe("");
+  });
+
+  test("names an installer that writes a PATH directory it never spells out", () => {
+    expect(hint("brew install jq")).toContain("`brew install`");
+    expect(hint("npm i -g @openai/codex")).toContain("`npm -g`");
+    expect(hint("cargo install ripgrep")).toContain("`cargo install`");
+    expect(hint("npm ci")).toBe("");
+    expect(hint("go test ./...")).toBe("");
+  });
+
+  test("names a scrubbed variable the command asked for, and stays quiet otherwise", () => {
+    expect(hint('curl -H "Authorization: Bearer $GH_TOKEN" https://api', ["GH_TOKEN"]))
+      .toContain("GH_TOKEN");
+    expect(hint("echo ${GH_TOKEN}", ["GH_TOKEN"])).toContain("GH_TOKEN");
+    expect(hint("curl https://api", ["GH_TOKEN"])).toBe("");
+  });
+
+  test("is a single line, so the wrapper's payload stays unambiguous", () => {
+    for (const command of ["printf x > ~/.zshenv", "brew install jq", "echo $GH_TOKEN"]) {
+      expect(hint(command, ["GH_TOKEN"])).not.toContain("\n");
+    }
   });
 });
 
