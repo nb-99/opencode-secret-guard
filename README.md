@@ -48,11 +48,12 @@ worse than one that refuses to start.
 ## Install with Home Manager
 
 ```nix
+{ config, lib, inputs, ... }:
+let
+  guard = config.programs.opencode-secret-guard;
+in
 {
-  inputs.opencode-secret-guard.url = "github:nb-99/opencode-secret-guard";
-
-  # …
-
+  # flake input: inputs.opencode-secret-guard.url = "github:nb-99/opencode-secret-guard";
   imports = [ inputs.opencode-secret-guard.homeManagerModules.default ];
 
   programs.opencode-secret-guard = {
