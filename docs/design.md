@@ -103,15 +103,29 @@ is line-oriented, the policy validator restricts these names to
 agent shell children lose these inherited variables. The command stored and
 shown by OpenCode is not replaced with this implementation detail.
 
-The hint exists because a strict fallback is invisible until it fails, and then
-it fails inside the credential binary — `gpg: keyblock resource
+The hint exists because a denial is invisible until something fails, and then
+it fails wherever the denial landed — `gpg: keyblock resource
 ~/.gnupg/pubring.kbx: Permission denied` names neither the guard nor the
-segment that cost the group. When the command exits non-zero and a credential
-binary was involved, the wrapper prints one line: which segment, why (a
-path-opening filter, a foreign binary, mixed groups, an environment
-assignment, substitution), and that splitting the command is the fix. A strict
-command that never named a credential binary, or a relaxed one that succeeds,
-prints nothing.
+segment that cost the group, and a denied write is a bare `operation not
+permitted` from inside whatever attempted it. Unexplained, an agent retries the
+same shape. When the command exits non-zero the wrapper prints one line, if the
+guard is a plausible cause, in this order:
+
+1. the segment that cost the relaxation, why (a path-opening filter, a foreign
+   binary, mixed groups, an environment assignment, substitution), and that
+   splitting the command is the fix;
+2. the tamper-protected path a word of the command names — the scan resolves
+   each word against `$HOME` and the working directory, so `~/.zshenv` and
+   `../.config/opencode/plugins/x.ts` are both recognised;
+3. the installer that writes a `PATH` directory without naming it —
+   `brew install`, `npm -g`, `cargo install` and the like;
+4. the scrubbed variable the command asked for by name.
+
+A strict command that never named a credential binary, a command that names no
+protected path and no scrubbed variable, or a relaxed one that succeeds, prints
+nothing. The hint is a courtesy on top of the boundary: it is derived from the
+command text, so a path spelled by a variable is not recognised — and such a
+command has already been forced strict.
 
 Enforcement happens in the kernel, so it covers variable expansion, globs,
 redirections, `find -exec`, interpreters, archivers, and recursive greps
@@ -229,14 +243,20 @@ and `~/.cache/opencode/node_modules/` is where that lands. The policy file and
 this package are the guard itself. User-writable `PATH` directories are the
 same hole one hop removed: the unsandboxed resolver, OpenCode and its
 formatters spawn programs by name, and a `git` planted in `/opt/homebrew/bin`
-runs with no profile at all.
+runs with no profile at all. `~/.zshenv` is the same hole one level down: the
+wrapper hands every command to `/bin/zsh -c`, which sources that file first, so
+a function left there named after a credential binary would be handed that
+binary's relaxation by the next command. `.zshrc` and `.zprofile` are read only
+by interactive and login shells, which the wrapper never starts, and stay
+editable. Starting zsh with `-f` instead would also skip `/etc/zshenv`, where a
+nix-darwin host sets `PATH` for non-interactive shells.
 
 Step 11 denies `file-write*` on all of these, last, after the exemptions — no
 `exemptRoots` entry may reopen them. Literal files (`opencode.json`,
-`package.json`, the policy) and whole trees (plugin and tool directories, the
-cache, `~/.local/share/opencode/bin`, this package, every writable `PATH`
-entry outside the repository). Every directory node on the way to one of
-these is a literal too — `~/.config/opencode`, `<repo>/.opencode`,
+`package.json`, the policy, `~/.zshenv`) and whole trees (plugin and tool
+directories, the cache, `~/.local/share/opencode/bin`, this package, every
+writable `PATH` entry outside the repository). Every directory node on the way
+to one of these is a literal too — `~/.config/opencode`, `<repo>/.opencode`,
 `~/.local/share/opencode`, `~/.zplug` for `~/.zplug/bin`, up to `/` — because
 a rule matches the path at the time of the operation: rename the parent, put
 a symlink in its place, and OpenCode would load whatever the link points at.
@@ -248,6 +268,17 @@ itself. Reads
 are never affected, and prompts, skills and commands stay editable — they are
 text for the model, not code OpenCode executes.
 
+Each target is protected at the path it is named by *and* at the path it
+resolves to. Home Manager installs every file it manages as a symlink into the
+store, so `~/.config/opencode/secret-guard.json` — the policy this whole
+boundary is derived from — is a link. Unlinking, renaming or replacing a link
+operates on the link, not on its destination: a rule naming only the resolved
+path would leave the store copy immutable (it already is, for a different
+reason) while the link beside it decided which policy the next command was
+judged by, including its `tools.git`, which the unsandboxed resolver spawns. A
+`PATH` entry that is a symlink is kept for the same reason even when what it
+points at cannot be written.
+
 The set depends on `PATH`, which differs between invocations (direnv,
 per-project shells), so it is part of the profile cache key. The file-tool
 predicate mirrors it for `write`, `edit` and `patch` only; `read` is
@@ -256,7 +287,9 @@ generated profile and asserts the file did not change.
 
 The cost is that `brew install`, `npm i -g` and anything else that writes into
 a `PATH` directory fails from the agent shell. On a Nix-managed host that is
-correct; elsewhere it is the price of the boundary.
+correct; elsewhere it is the price of the boundary. The denial reaches the
+command as a bare `operation not permitted`, so the wrapper names the rule when
+such a command fails — see "Explaining a failure" below.
 
 ## Refused invocations
 
@@ -268,6 +301,16 @@ as a binary plus per-word patterns, each matched in full against some word of
 the invocation, and the default ships 33 rules across the cloud CLIs, kubectl,
 argocd, the forge CLIs, git credential helpers, npm, the macOS keychain,
 1Password, Vault, Terraform outputs, sops, age and gpg.
+
+A rule names the invocations whose output *is* the credential, not every
+invocation of a sensitive resource: `kubectl get secrets -o name` and `-o wide`
+list names and types, so the rule matches only the output formats that render
+`.data` — `yaml`, `json`, `jsonpath=…`, `go-template=…`, `custom-columns=…`.
+Bare `kubectl get secrets` was never matched. Where a host disagrees with a
+shipped rule — a repository whose ordinary work is `sops -d` — the Home Manager
+module's `removeSecretPrintingCommands` drops that rule before the additions are
+appended, so the rest of the list, and upstream additions to it, keep applying.
+Removing a rule is a decision to let that output reach the agent's context.
 
 The scan is deliberately more eager than the group scan: it splits on
 parentheses and backticks too, unwraps `sudo`, `env`, `xargs`, `timeout` and
@@ -376,10 +419,19 @@ relaxation grants. Without that, `cd repo && git commit` runs strict and fails
 deep inside git — as a gpg error about `~/.gnupg`, which names neither the guard
 nor the cause. `git log; echo done` and `git status || true` failed the same
 way. A segment containing `<` or `>` is never skipped, since a redirection can
-create or truncate a file even from a builtin. Nor is one that expands a
-variable outside single quotes: `aws --version && echo $AWS_SECRET_ACCESS_KEY`
-would print the variable the `aws` group keeps in the environment, so that
-shape costs the group and strict scrubs it.
+create or truncate a file even from a builtin.
+
+A builtin that expands a variable is judged against the group that resolves.
+`aws --version && echo $AWS_SECRET_ACCESS_KEY` would print the variable the
+`aws` group keeps in the environment, so it costs the group and strict scrubs
+the variable. Every other name is either scrubbed before the command starts or
+was never a credential, so printing it costs nothing and `echo $PWD && git
+status` keeps its group — the shape is too common to spend a relaxation on. The
+names are collected while the segments are scanned and matched against the
+group's `allowEnvironment` once the group is known, because the same `echo` is
+harmless beside `kubectl` and a leak beside `aws`. Only plain forms are
+collected: anything else is an opaque construct, which has already forced
+strict.
 
 `cat`, `head`, `tail`, `wc`, `sort`, `uniq`, `tr`, `nl`, `rev`, `column`,
 `cut`, `paste`, `fold`, `base64`, `xxd` and the checksum tools are skipped
@@ -517,10 +569,13 @@ may already have removed some allowed descendants.
   exfiltrate it.
 - Credentials supplied through a relaxed binary's own extension mechanisms
   remain a deliberate Option B trade-off: for example, a `git` alias can run a
-  shell while the SSH profile is active. The refusal list covers the
-  invocations that print a credential by design, not every path through a
-  trusted binary. Eliminate per-binary relaxations for a strict Option C
-  boundary.
+  shell while the SSH profile is active, and the config files that arm such an
+  alias — `~/.gitconfig`, `~/.terraformrc` — stay writable. That list is
+  open-ended, which is why it is a documented trade-off rather than a rule;
+  `~/.zshenv` is protected because it arms *every* command rather than one
+  binary. The refusal list covers the invocations that print a credential by
+  design, not every path through a trusted binary. Eliminate per-binary
+  relaxations for a strict Option C boundary.
 - Credentials in the macOS keychain are reachable through Security.framework by
   any process the keychain trusts. The `security` CLI's dump commands are
   refused, but a program linking the framework directly is not.
