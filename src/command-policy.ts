@@ -926,11 +926,9 @@ export const REFUSAL_SHELLS = new Set(["sh", "bash", "zsh", "dash", "ksh", "fish
  * written with `git commit -F - <<'EOF'` — parsed as that invocation and was
  * refused. Documenting this guard was impossible from inside it.
  *
- * The body is only dropped when nothing in the command could execute it: a
- * shell reading its script from stdin (`bash <<'EOF'`, `… | sh`), a segment
- * whose binary cannot be seen, or a heredoc `stripHeredocs` cannot understand
- * all keep the raw text. Over-scanning only refuses more, which is the safe
- * direction for a courtesy check on top of the kernel boundary.
+ * Only known text consumers (`cat` and `git commit -F -`) may skip the body.
+ * Other programs can execute or forward stdin, including wrappers and ssh.
+ * Unknown shapes keep the raw text: over-scanning only refuses more.
  */
 export function refusalScanText(command: string): string {
   const stripped = stripHeredocs(command);
@@ -938,8 +936,14 @@ export function refusalScanText(command: string): string {
   const segments = analyzeSegments(stripped);
   if (!segments) return command;
   for (const segment of segments) {
-    const binary = parseCommand(segment.command)?.binary;
-    if (!binary || REFUSAL_SHELLS.has(binary) || binary === "eval") return command;
+    const parsed = parseCommand(segment.command);
+    if (parsed?.binary === "cat") continue;
+    const words = parsed ? shellWords(parsed.args) : null;
+    if (parsed?.binary === "git" && words?.[0] === "commit" && words.some((word, index) =>
+      word === "-F-" || word === "--file=-" ||
+      ((word === "-F" || word === "--file") && words[index + 1] === "-")
+    )) continue;
+    return command;
   }
   return stripped;
 }
@@ -1048,4 +1052,3 @@ export function findSecretPrinting(command: string, rules: SecretPrintingCommand
   }
   return null;
 }
-

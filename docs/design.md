@@ -112,8 +112,8 @@ permitted` from inside whatever attempted it. Unexplained, an agent retries the
 same shape. When the command exits non-zero the wrapper prints one line, if the
 guard is a plausible cause, in this order:
 
-1. the setuid binary the command invokes, with what to use instead — this one
-   fails identically every time, so it is stated as a cause;
+1. a possible invocation of a macOS setuid binary, with what to use instead
+   if executing that binary failed;
 2. the segment that cost the relaxation, why (a path-opening filter, a foreign
    binary, mixed groups, an environment assignment, substitution), and that
    splitting the command is the fix;
@@ -129,15 +129,16 @@ guard is a plausible cause, in this order:
 
 A strict command that never named a credential binary, a command that names no
 protected path and no scrubbed variable, or a relaxed one that succeeds, prints
-nothing. The resolver marks each line as certain (`!`) or conditional (`?`) and
-the wrapper suppresses a conditional one on exit status 127: zsh reports a
+nothing. The resolver marks whether each line survives exit status 127 (`!`)
+or is suppressed on it (`?`). zsh reports a
 binary it cannot find that way, and hinting there would blame the sandbox for a
 typo or an uninstalled tool. The marker is needed because 127 is also how zsh
 reports a binary it may not *execute*, which is exactly how a setuid program
 fails here — the status alone cannot tell the two apart.
 
-The wrapper knows the exit status and nothing else, so every case but the first
-is worded as a condition ("if this failed on a permission error…"). Stating a
+The wrapper knows the exit status and nothing else, so every case
+is worded as a condition ("if this failed on a permission error…"). Even a
+setuid binary named in `false && ps aux` might never execute. Stating a
 cause the wrapper cannot see is worse than saying nothing: `mkdir /root/x &&
 git log` fails on the `mkdir`, and a hint asserting that the credentials were
 unreadable sends the reader after the wrong thing. Reading the command's stderr
@@ -268,8 +269,9 @@ wrapper hands every command to `/bin/zsh -c`, which sources that file first, so
 a function left there named after a credential binary would be handed that
 binary's relaxation by the next command. `.zshrc` and `.zprofile` are read only
 by interactive and login shells, which the wrapper never starts, and stay
-editable. Starting zsh with `-f` instead would also skip `/etc/zshenv`, where a
-nix-darwin host sets `PATH` for non-interactive shells.
+editable. Starting zsh with `-f` still reads `/etc/zshenv`, but disables RCS.
+nix-darwin gates its environment setup there on RCS, so `-f` can skip the
+`PATH` setup commands need. Protecting the user startup file preserves it.
 
 Step 11 denies `file-write*` on all of these, last, after the exemptions — no
 `exemptRoots` entry may reopen them. Literal files (`opencode.json`,
@@ -344,10 +346,11 @@ A heredoc body is the exception that had to be made explicit. It is stdin text
 for the next command, but the scan splits on newlines and backticks, so a line
 of a commit message written with `git commit -F - <<'EOF'` parsed as the
 invocation it described — documenting this guard from inside it was impossible.
-The body is therefore dropped before the scan, unless something in the command
-could execute it: a shell reading its script from stdin (`bash <<'EOF'`,
-`… | sh`), a segment whose binary cannot be seen, or a heredoc `stripHeredocs`
-cannot understand. The body of `bash <<'EOF'` is still scanned.
+The body is dropped only when every segment is a known text consumer: `cat`
+or `git commit` reading its message with `-F -`, `-F-`, `--file -` or
+`--file=-`. Other consumers remain scanned, including shells, wrappers such
+as `env sh`, and remote execution through `ssh`. A heredoc `stripHeredocs`
+cannot understand also keeps its body in the scan.
 
 The scan sees lexical words, and zsh builds words at run time. `gh $'auth'
 $'token'` and `gh ${:-auth} ${:-token}` contain neither `auth` nor `token`
@@ -372,9 +375,10 @@ runs.
 `crontab`, `at` and `traceroute` fail with `operation not permitted`. This is
 the kernel's rule, not the profile's, and there is no allow for it. `pgrep`,
 `pkill`, `lsof` and `netstat` are not setuid and work. The agent-facing
-guidance names the substitutes, and so does the failure hint: this is the one
-denial certain enough to state as a cause, and its error is indistinguishable
-from a denied file.
+guidance and failure hint name substitutes. The hint is conditional because
+the command may have failed before reaching the named binary. It still appears
+on status 127, which zsh uses for a sandbox-denied executable as well as a
+missing one. `ping` is not setuid on current macOS and gets no such hint.
 
 ## Per-binary relaxation
 

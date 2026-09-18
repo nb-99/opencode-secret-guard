@@ -115,10 +115,9 @@ function ancestors(target: string): string[] {
  * `kube` relaxation handed to its own code by the *next* command, and the
  * credential is readable after all.
  *
- * Protecting the file rather than starting zsh with `-f` keeps `/etc/zshenv`,
- * which is where a nix-darwin host sets PATH for non-interactive shells; `-f`
- * would skip it and leave commands unable to find their binaries. `/etc` is
- * root-owned, so it needs no rule of its own.
+ * `zsh -f` still reads /etc/zshenv, but disables RCS. nix-darwin gates its
+ * environment setup there on RCS, so -f can skip the PATH setup commands need.
+ * Protecting the user startup file preserves that setup. /etc is root-owned.
  */
 export function zshStartupFiles(home: string): string[] {
   const directories = new Set([home]);

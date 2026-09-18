@@ -174,8 +174,9 @@ split the command, not to retry it.
 of `secretPrintingCommands` never run, wrapped in `sudo`/`env`/`sh -c`/`$(…)` or
 not: their output *is* the secret. Use the credential through the tool that
 needs it. Output formats that carry no values — `kubectl get secrets -o name`,
-`-o wide` — are not refused, and neither is prose: a heredoc body is stdin text,
-so a commit message or a document may describe a refused invocation. A host
+`-o wide` — are not refused. Heredoc bodies passed to `cat` or
+`git commit -F -` may describe a refused invocation; bodies passed to other
+consumers remain scanned because those programs may execute stdin. A host
 that needs one of the shipped rules gone drops it with
 `removeSecretPrintingCommands` rather than replacing the key.
 
@@ -198,13 +199,13 @@ too. Reads are unaffected; prompts, skills, commands and `~/.zshrc` stay
 editable. Practically: `brew install` and `npm i -g` from the agent shell fail —
 install tools from your own terminal.
 
-**A failed command says which rule it hit.** When a command exits non-zero, the
+**A failed command explains relevant restrictions.** When a command exits non-zero, the
 wrapper adds one line if the guard is a plausible cause: a setuid binary that
 cannot run at all, the segment that cost the relaxation, the protected path a
 write was denied on, the installer that targets a `PATH` directory, or the
 scrubbed variable the command asked for. It knows the exit status and not what
-failed, so every line but the setuid one is worded as a condition. A binary
-that does not exist (status 127) is never the guard's doing and gets no line.
+failed, so every line is worded as a condition. Status 127 suppresses all but
+the setuid hint: zsh uses that status for both missing and denied executables.
 
 **Renaming does not move a secret out from under its rule.** The directory
 nodes that carry a protected name (`~/.kube`, `secrets/`) and the ancestors a

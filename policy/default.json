@@ -213,7 +213,7 @@
     { "binary": "az", "args": ["account", "get-access-token"] },
     { "binary": "az", "args": ["keyvault", "secret", "(show|download)"] },
     { "binary": "kubectl", "args": ["config", "view", "--raw(=true)?"] },
-    { "binary": "kubectl", "args": ["get", "secrets?(/.*)?", "(-o|--output)?=?(yaml|json|jsonpath(-as-json)?=.*|go-template(-file)?=.*|custom-columns(-file)?=.*|template=?.*)"] },
+    { "binary": "kubectl", "args": ["get", "secrets?(/.*)?", "(-o|--output)?=?(yaml|json|jsonpath(-as-json|-file)?(=.*)?|go-template(-file)?(=.*)?|custom-columns(-file)?(=.*)?|template(file)?(=.*)?)"] },
     { "binary": "kubectl", "args": ["create", "token"] },
     { "binary": "argocd", "args": ["account", "generate-token"] },
     { "binary": "argocd", "args": ["admin", "initial-password"] },
