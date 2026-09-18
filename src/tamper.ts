@@ -43,6 +43,12 @@ const CODE_DIRECTORIES = ["plugin", "plugins", "tool", "tools", "node_modules"];
  * stay writable; a project cannot be protected from itself. A relative or
  * empty entry means the working directory, which is the repository, and is
  * excluded for the same reason.
+ *
+ * The entry is returned as PATH spells it. Writability is judged on what it
+ * resolves to, because that is where a planted binary would land, but the
+ * entry itself must carry the rule too: a PATH entry that is a symlink can be
+ * unlinked and re-pointed even when its target is a read-only store path.
+ * `tamperTargets` adds the resolved directory.
  */
 export function writablePathDirectories(pathEnvironment: string | undefined, repoRoot: string | null): string[] {
   const found = new Set<string>();
@@ -57,9 +63,26 @@ export function writablePathDirectories(pathEnvironment: string | undefined, rep
     } catch (error) {
       writable = error instanceof Error && "code" in error && error.code === "ENOENT";
     }
-    if (writable) found.add(canonical);
+    if (writable || canonical !== path.resolve(entry)) found.add(path.resolve(entry));
   }
   return [...found].sort();
+}
+
+/**
+ * A target and, when a symlink leads to it, the path it resolves to.
+ *
+ * A rule matches the path the operation names. Unlinking, renaming or
+ * replacing a symlink operates on the link, not on its target, so a rule that
+ * names only the resolved path leaves the link free — and the link is what
+ * OpenCode opens at its next start. Home Manager installs every file it
+ * manages that way: `~/.config/opencode/secret-guard.json` is a link into the
+ * store, whose resolved path is immutable for an entirely different reason
+ * (nobody can write the store) while the link beside it decides which policy
+ * the next command is judged by.
+ */
+export function bothPaths(target: string): string[] {
+  const resolved = realpath(target);
+  return resolved === target ? [target] : [target, resolved];
 }
 
 /**
@@ -112,19 +135,18 @@ export function tamperTargets(options: {
   policyPath?: string;
   packageDirectory?: string;
 }): TamperTargets {
-  const configDirectory = realpath(opencodeConfigDirectory());
-  const policy = options.policyPath ?? configPath();
+  const configDirectory = opencodeConfigDirectory();
   const literals = new Set<string>([
-    realpath(policy),
+    options.policyPath ?? configPath(),
     configDirectory,
     ...CONFIG_FILES.map((name) => path.join(configDirectory, name)),
     ...zshStartupFiles(options.home),
   ]);
   const subpaths = new Set<string>([
     ...CODE_DIRECTORIES.map((name) => path.join(configDirectory, name)),
-    realpath(opencodeCacheDirectory()),
-    realpath(path.join(opencodeDataDirectory(), "bin")),
-    realpath(options.packageDirectory ?? PACKAGE_DIRECTORY),
+    opencodeCacheDirectory(),
+    path.join(opencodeDataDirectory(), "bin"),
+    options.packageDirectory ?? PACKAGE_DIRECTORY,
     ...writablePathDirectories(options.pathEnvironment, options.repoRoot),
   ]);
 
@@ -137,11 +159,18 @@ export function tamperTargets(options: {
     for (const name of CODE_DIRECTORIES) subpaths.add(path.join(project, name));
   }
 
-  for (const target of [...literals, ...subpaths]) {
-    for (const ancestor of ancestors(target)) literals.add(ancestor);
+  // Every target is protected at the path it is named by and at the path it
+  // resolves to, before the ancestors of either are collected.
+  const resolved = {
+    literals: new Set([...literals].flatMap(bothPaths)),
+    subpaths: new Set([...subpaths].flatMap(bothPaths)),
+  };
+
+  for (const target of [...resolved.literals, ...resolved.subpaths]) {
+    for (const ancestor of ancestors(target)) resolved.literals.add(ancestor);
   }
 
-  return { literals: [...literals].sort(), subpaths: [...subpaths].sort() };
+  return { literals: [...resolved.literals].sort(), subpaths: [...resolved.subpaths].sort() };
 }
 
 export function isTamperProtected(canonical: string, targets: TamperTargets): boolean {
