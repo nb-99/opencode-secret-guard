@@ -154,11 +154,13 @@ describe("the file-tool predicate distinguishes reads from writes", () => {
     expect(classifyPath(path.join(repo, "src", "index.ts"), config, "write")).toBe("allow");
   });
 
-  test("the edit tool is refused on a protected path and the error says why", async () => {
+  test("every write tool is refused on a protected path and the error says why", async () => {
     const hooks = createHooks(config, path.join(fixture, "package", "lib"));
-    await expect(
-      hooks["tool.execute.before"]({ tool: "edit" }, { args: { filePath: path.join(repo, "opencode.json") } }),
-    ).rejects.toThrow(/write access .* guard-protected/);
+    for (const tool of ["edit", "write", "patch"]) {
+      await expect(
+        hooks["tool.execute.before"]({ tool }, { args: { filePath: path.join(repo, "opencode.json") } }),
+      ).rejects.toThrow(/write access .* part of the guard/);
+    }
     await expect(
       hooks["tool.execute.before"]({ tool: "read" }, { args: { filePath: path.join(repo, "opencode.json") } }),
     ).resolves.toBeUndefined();

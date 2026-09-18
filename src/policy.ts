@@ -289,6 +289,23 @@ export function validateConfig(raw: unknown, source: string, home: string): Guar
     }
   }
 
+  const relaxationGroups = requireRelaxationGroups(record.relaxationGroups, source);
+  const denyRoots = requireRoots(record.denyRoots, "denyRoots", source, home);
+  const exemptRoots = requireRoots(record.exemptRoots, "exemptRoots", source, home);
+  // An exempt root allows every write below it and is the last rule, so one
+  // above a credential root would re-enable renaming that root out from under
+  // its pattern. Exempt roots are for a subtree inside a denied one, not around it.
+  const guardedRoots = [
+    ...denyRoots,
+    ...Object.values(relaxationGroups).flatMap((group) => group.allowPaths.map((relative) => path.join(home, relative))),
+  ];
+  for (const exempt of exemptRoots) {
+    const covered = guardedRoots.find((root) => root === exempt || root.startsWith(`${exempt}/`));
+    if (covered) {
+      throw configError(source, `"exemptRoots" entry ${exempt} contains the guarded path ${covered}; an exempt root must lie inside a guarded one, not around it`);
+    }
+  }
+
   return {
     configVersion: SUPPORTED_CONFIG_VERSION,
     mode: mode as GuardMode,
@@ -297,10 +314,10 @@ export function validateConfig(raw: unknown, source: string, home: string): Guar
     secretPatterns: requireRegexArray(record.secretPatterns, "secretPatterns", source),
     secretExceptions: requireRegexArray(record.secretExceptions, "secretExceptions", source),
     artifactAllowlist: requireStringArray(record.artifactAllowlist, "artifactAllowlist", source),
-    relaxationGroups: requireRelaxationGroups(record.relaxationGroups, source),
+    relaxationGroups,
     secretPrintingCommands: requireSecretPrintingCommands(record.secretPrintingCommands, source),
-    denyRoots: requireRoots(record.denyRoots, "denyRoots", source, home),
-    exemptRoots: requireRoots(record.exemptRoots, "exemptRoots", source, home),
+    denyRoots,
+    exemptRoots,
     secretEnvironment: requireEnvironmentNames(
       record.secretEnvironment,
       "secretEnvironment",

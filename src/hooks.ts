@@ -60,9 +60,10 @@ export function createHooks(guardConfig: GuardConfig, moduleDirectory = MODULE_D
         const value = record[key];
         if (typeof value !== "string" || !value) continue;
         if (classifyPath(value, guardConfig, operation) === "deny") {
-          throw new Error(
-            `secret-guard: ${operation} access to ${value} is blocked because it matches a secret, ignored, or guard-protected path.`,
-          );
+          const why = operation === "write"
+            ? "it matches a secret or ignored path, or is part of the guard OpenCode runs"
+            : "it matches a secret or ignored path";
+          throw new Error(`secret-guard: ${operation} access to ${value} is blocked because ${why}.`);
         }
       }
     },
