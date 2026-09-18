@@ -10,10 +10,24 @@
   extraSecretExceptions ? [ ],
   extraArtifactAllowlist ? [ ],
   extraSecretPrintingCommands ? [ ],
+  removeSecretPrintingCommands ? [ ],
   extraRelaxationGroups ? { },
   settings ? { },
 }:
 let
+  # Removals apply to the shipped defaults only, so a consumer can drop a rule
+  # and add a narrower one for the same binary in the same configuration. An
+  # empty `args` removes every default rule for that binary.
+  keptPrintingCommands = builtins.filter (
+    rule:
+    !(lib.any (
+      removal:
+      let
+        args = removal.args or [ ];
+      in
+      removal.binary == rule.binary && (args == [ ] || args == rule.args)
+    ) removeSecretPrintingCommands)
+  ) defaultPolicy.secretPrintingCommands;
   extendedGroups = lib.mapAttrs (
     name: group:
     let
@@ -40,17 +54,20 @@ let
   # would silently disagree with what the module assumed.
   reserved = lib.intersectLists [ "mode" "tools" ] (lib.attrNames settings);
 in
-assert lib.assertMsg (reserved == [ ]) "opencode-secret-guard: set ${lib.concatStringsSep ", " reserved} through the module option, not through settings";
+assert lib.assertMsg (reserved == [ ])
+  "opencode-secret-guard: set ${lib.concatStringsSep ", " reserved} through the module option, not through settings";
 defaultPolicy
 // {
   secretPatterns = defaultPolicy.secretPatterns ++ extraSecretPatterns;
   secretExceptions = defaultPolicy.secretExceptions ++ extraSecretExceptions;
   artifactAllowlist = defaultPolicy.artifactAllowlist ++ extraArtifactAllowlist;
-  secretPrintingCommands = defaultPolicy.secretPrintingCommands ++ extraSecretPrintingCommands;
+  secretPrintingCommands = keptPrintingCommands ++ extraSecretPrintingCommands;
   relaxationGroups = extendedGroups // newGroups;
 }
 // settings
 // {
   inherit mode;
-  tools = defaultPolicy.tools // { git = gitPath; };
+  tools = defaultPolicy.tools // {
+    git = gitPath;
+  };
 }
