@@ -169,6 +169,8 @@ rule:
 2. `allow file-read-data` for allowlisted path components
 3. `allow file-read-data` for the directories inside ignored trees
 4. `deny file-read-data file-write*` for every secret pattern
+   followed by literal read/write allows for tracked Helm secret templates and
+   a repeat deny for the other secret patterns
 5. `deny file-write*` for protected directory nodes and their ancestors
 6. `allow` for the relaxation group, if one applies
 7. `allow` for the exception patterns (`.env.example`, …)
@@ -214,6 +216,16 @@ such as `.opencode/` into one entry. Other files under that parent remain
 denied, and secret patterns are then re-applied, so `node_modules/pkg/.env`
 remains denied. Canonical targets of tracked files are removed from this layer,
 so an ignored symlink cannot make tracked project data unreadable.
+
+Helm templates named `secret.yaml` or `secret.yml` are source files, even
+though the generic filename deny matches them. The guard grants read/write on
+exact regular files in Git's index below a chart's `templates/` directory (the
+chart has a sibling `Chart.yaml`), unless `git check-ignore --no-index` says
+they are ignored. The allow is followed by the remaining secret-pattern denies,
+so a chart inside `secrets/` or a custom guarded subtree stays protected.
+`denyRoots` and tamper rules also remain later in the profile. The file-tool
+predicate uses the same Git and path checks. This is a path convention; the
+guard does not check whether a template contains plaintext credentials.
 
 Profiles are cached under `${XDG_CACHE_HOME:-~/.cache}/opencode-secret-guard/`
 keyed by the shell's actual working-directory repo root, group, home, and config,

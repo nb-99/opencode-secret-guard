@@ -42,6 +42,16 @@ beforeAll(() => {
   put("id_rsa.pub", "PUBLIC\n");
   put("server.pem", "CERT\n");
   put("secrets/token", "s\n");
+  put("secrets/chart/Chart.yaml", "apiVersion: v2\nname: guarded\nversion: 0.1.0\n");
+  put("secrets/chart/templates/secret.yaml", "s\n");
+  put("Chart.yaml", "apiVersion: v2\nname: test\nversion: 0.1.0\n");
+  put("templates/postgresql/secret.yaml", "kind: Secret\n");
+  put("templates/secret.yml", "kind: Secret\n");
+  put("templates/secret.json", "s\n");
+  put("other/secret.yaml", "s\n");
+  put("templates/ignored/secret.yaml", "s\n");
+  put("charts/inner/Chart.yaml", "apiVersion: v2\nname: inner\nversion: 0.1.0\n");
+  put("charts/inner/templates/secret.yaml", "kind: Secret\n");
   put("config/credentials", "c\n");
   put("infra/terraform.tfstate", "{}\n");
   put("infra/prod.tfvars", "x = 1\n");
@@ -63,9 +73,11 @@ beforeAll(() => {
   put("local.conf", "local\n");
   put("docs/secret-rotation.md", "# rotation\n");
   put("lib/secrets.nix", "{}\n");
-  put(".gitignore", "local.conf\nbuild/\nprivate-notes/\nmixed-ignored/\nnode_modules/\ndist/\ncoverage.out\njunit.xml\n.env\n.env.local\n");
+  put(".gitignore", "local.conf\nbuild/\nprivate-notes/\nmixed-ignored/\nnode_modules/\ndist/\ncoverage.out\njunit.xml\n.env\n.env.local\ntemplates/ignored/\n");
 
   fs.symlinkSync(path.join(repo, ".env"), path.join(repo, "link-to-env"));
+  fs.mkdirSync(path.join(repo, "templates", "linked"));
+  fs.symlinkSync(path.join(repo, ".env"), path.join(repo, "templates", "linked", "secret.yaml"));
   fs.symlinkSync(path.join(repo, "local.conf"), path.join(repo, "tracked-link-to-local"));
 
   spawnSync("git", ["init", "-q", repo], { encoding: "utf8" });
@@ -304,6 +316,34 @@ describe("secret patterns", () => {
     ".opencode/node_modules/pkg/.env",
   ])("denies %s", (relative) => {
     expect(verdict(relative)).toBe("deny");
+  });
+});
+
+describe("Helm secret templates", () => {
+  test.each(["templates/postgresql/secret.yaml", "templates/secret.yml", "charts/inner/templates/secret.yaml"])("allows reads and edits of tracked %s", (relative) => {
+    const target = path.join(repo, relative);
+    expect(classifyPath(target, config)).toBe("allow");
+    expect(classifyPath(target, config, "write")).toBe("allow");
+  });
+
+  test.each(["templates/secret.json", "other/secret.yaml", "templates/ignored/secret.yaml", "secrets/chart/templates/secret.yaml"])("keeps %s denied", (relative) => {
+    expect(verdict(relative)).toBe("deny");
+  });
+
+  test("does not allow an untracked template or a symlink to a credential", () => {
+    put("templates/local/secret.yaml", "local\n");
+    expect(verdict("templates/local/secret.yaml")).toBe("deny");
+    expect(verdict("templates/linked/secret.yaml")).toBe("deny");
+  });
+
+  test("deny roots still take precedence", () => {
+    const restricted = { ...config, denyRoots: [path.join(repo, "templates")] };
+    expect(classifyPath(path.join(repo, "templates/secret.yml"), restricted, "write")).toBe("deny");
+  });
+
+  test("a custom secret pattern still denies a tracked template", () => {
+    const restricted = { ...config, secretPatterns: [...config.secretPatterns, "/templates/postgresql/"] };
+    expect(classifyPath(path.join(repo, "templates/postgresql/secret.yaml"), restricted, "write")).toBe("deny");
   });
 });
 
@@ -777,6 +817,7 @@ describe("buildProfile", () => {
         subpaths: [path.join(repo, "private-notes")],
         literals: [path.join(repo, "local.conf")],
         directories: [path.join(repo, "private-notes/nested")],
+        helmSecretTemplates: [path.join(repo, "templates/postgresql/secret.yaml")],
       },
       tamper,
     });
@@ -846,6 +887,15 @@ describe("buildProfile", () => {
     expect(text.indexOf("(deny file-read-data file-write* (regex")).toBeLessThan(
       text.indexOf("(allow file-read-data file-write* (regex"),
     );
+  });
+
+  test("allows only enumerated Helm templates after the secret deny", () => {
+    const text = profile(null);
+    const allow = text.indexOf("tracked Helm secret templates");
+    expect(allow).toBeGreaterThan(text.indexOf(";; 4. secret patterns"));
+    expect(text.slice(allow)).toContain(`(literal "${path.join(repo, "templates/postgresql/secret.yaml")}")`);
+    expect(text.slice(allow)).not.toContain(`(literal "${path.join(repo, "templates/ignored/secret.yaml")}")`);
+    expect(text.slice(allow)).toContain('#"/secrets/"');
   });
 
   test("orders exempt roots last", () => {

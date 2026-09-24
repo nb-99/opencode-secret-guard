@@ -1,6 +1,6 @@
 import * as os from "node:os";
 import * as path from "node:path";
-import { findRepoRoot, isGitIgnored, primeIgnoreCache } from "./gitignore.ts";
+import { findRepoRoot, HELM_SECRET_FILENAME_PATTERN, isGitIgnored, primeIgnoreCache, trackedHelmSecretTemplate } from "./gitignore.ts";
 import { isExistingDirectory, isInside, matchesAny, realpath } from "./paths.ts";
 import type { GuardConfig } from "./policy.ts";
 import { cacheDirectory } from "./profile.ts";
@@ -17,8 +17,9 @@ export type FileOperation = "read" | "write";
 
 /**
  * Mirrors the profile's rule ordering so the two layers agree:
- * guard-protected paths (writes) > exempt roots > deny roots > exceptions >
- * secret patterns > artefact allowlist > gitignore.
+ * guard-protected paths (writes) > exempt roots > deny roots > tracked Helm
+ * templates (unless another secret pattern matches) > exceptions > secret
+ * patterns > artefact allowlist > gitignore.
  */
 export function classifyPath(
   target: string,
@@ -38,6 +39,10 @@ export function classifyPath(
   }
   if (config.exemptRoots.some((root) => isInside(canonical, realpath(root)))) return "allow";
   if (config.denyRoots.some((root) => isInside(canonical, realpath(root)))) return "deny";
+  if (config.secretPatterns.includes(HELM_SECRET_FILENAME_PATTERN) &&
+    matchesAny(canonical, [HELM_SECRET_FILENAME_PATTERN]) &&
+    !matchesAny(canonical, config.secretPatterns.filter((pattern) => pattern !== HELM_SECRET_FILENAME_PATTERN)) &&
+    trackedHelmSecretTemplate(config.tools.git, canonical)) return "allow";
   if (matchesAny(canonical, config.secretExceptions)) return "allow";
   if (matchesAny(canonical, config.secretPatterns)) return "deny";
   // An ignored *directory* stays listable, matching the profile: enumeration
@@ -122,4 +127,3 @@ export function filterSearchOutput(
     })
     .join(isGlob ? "\n" : "\n\n");
 }
-

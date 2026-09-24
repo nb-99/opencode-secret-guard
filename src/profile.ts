@@ -3,13 +3,13 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { createHash } from "node:crypto";
 import type { GitignoreRules } from "./gitignore.ts";
-import { findRepoRoot, gitignoreRules } from "./gitignore.ts";
+import { findRepoRoot, gitignoreRules, HELM_SECRET_FILENAME_PATTERN } from "./gitignore.ts";
 import { realpath } from "./paths.ts";
 import type { GuardConfig } from "./policy.ts";
 import type { TamperTargets } from "./tamper.ts";
 import { protectedNodes, tamperTargets } from "./tamper.ts";
 
-export const PROFILE_VERSION = 8;
+export const PROFILE_VERSION = 9;
 
 /** Quotes a literal path for SBPL. Backslashes are escaped. */
 export function sbplString(value: string): string {
@@ -92,6 +92,16 @@ export function buildProfile(options: {
     // remains unreadable even when Git collapsed an ignored parent directory.
     lines.push("", ";; 4. secret patterns — matched against canonicalized paths");
     lines.push(`(deny file-read-data file-write* (regex ${regexes}))`);
+  }
+
+  if (config.secretPatterns.includes(HELM_SECRET_FILENAME_PATTERN) && gitignore.helmSecretTemplates.length > 0) {
+    lines.push("", ";; tracked Helm secret templates are editable source files");
+    lines.push(`(allow file-read-data file-write* ${gitignore.helmSecretTemplates.map((p) => `(literal ${sbplString(p)})`).join(" ")})`);
+    // This exception only replaces the generic secret.yaml filename rule.
+    const otherSecrets = config.secretPatterns.filter((pattern) => pattern !== HELM_SECRET_FILENAME_PATTERN);
+    if (otherSecrets.length > 0) {
+      lines.push(`(deny file-read-data file-write* (regex ${otherSecrets.map(sbplRegex).join(" ")}))`);
+    }
   }
 
   // A rename is checked against the source path, so a file under a protected
@@ -195,7 +205,7 @@ export function profilePath(options: {
 
   const gitignore = repoRoot
     ? gitignoreRules(config.tools.git, repoRoot, config.artifactAllowlist)
-    : { repoRoot: null, subpaths: [], literals: [], directories: [] };
+    : { repoRoot: null, subpaths: [], literals: [], directories: [], helmSecretTemplates: [] };
   const profile = buildProfile({ config, home, group, gitignore, tamper });
 
   fs.mkdirSync(directory, { recursive: true });
@@ -208,4 +218,3 @@ export function profilePath(options: {
 // ---------------------------------------------------------------------------
 // Plugin
 // ---------------------------------------------------------------------------
-

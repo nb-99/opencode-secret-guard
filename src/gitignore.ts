@@ -34,6 +34,32 @@ export interface GitignoreRules {
   subpaths: string[];
   literals: string[];
   directories: string[];
+  helmSecretTemplates: string[];
+}
+
+// The filename rule in policy/default.json that this chart-specific exception overrides.
+export const HELM_SECRET_FILENAME_PATTERN = "/secret\\.(json|ya?ml|txt|env|toml)$";
+
+/** A tracked, regular Helm template, under the chart that owns templates/. */
+export function isHelmSecretTemplate(repoRoot: string, relative: string): boolean {
+  const parts = relative.split("/");
+  const index = parts.lastIndexOf("templates");
+  if (index < 0 || index === parts.length - 1 || !/^secret\.ya?ml$/.test(parts.at(-1)!)) return false;
+  return fs.existsSync(path.join(repoRoot, ...parts.slice(0, index), "Chart.yaml"));
+}
+
+/** Git's index is the authority for whether a template is source, not a local secret. */
+export function trackedHelmSecretTemplate(git: string, target: string): boolean {
+  const repoRoot = findRepoRoot(target);
+  if (!repoRoot) return false;
+  const relative = path.relative(repoRoot, target);
+  if (!isHelmSecretTemplate(repoRoot, relative)) return false;
+  if (realpath(target) !== target) return false;
+  const result = runGit(git, ["-C", repoRoot, "ls-files", "-s", "-z", "--", relative]);
+  const entry = /^(100[0-9]{3}) [0-9a-f]+ \d+\t([^\0]+)\0/.exec(result.stdout);
+  if (result.status !== 0 || !entry || entry[2] !== relative) return false;
+  const ignored = runGit(git, ["-C", repoRoot, "check-ignore", "--no-index", "-q", "--", relative]);
+  return ignored.status === 1;
 }
 
 /**
@@ -79,21 +105,31 @@ export function gitignoreRules(
   artifactAllowlist: string[],
   directoryLimit: number = IGNORED_DIRECTORY_LIMIT,
 ): GitignoreRules {
-  const rules: GitignoreRules = { repoRoot, subpaths: [], literals: [], directories: [] };
+  const rules: GitignoreRules = { repoRoot, subpaths: [], literals: [], directories: [], helmSecretTemplates: [] };
   const allowed = new Set(artifactAllowlist);
 
   const trackedResult = runGit(git, ["-C", repoRoot, "ls-files", "-s", "-z"]);
   if (trackedResult.status !== 0) return rules;
-  const tracked = new Set(
-    trackedResult.stdout
-      .split("\0")
-      .filter(Boolean)
-      .flatMap((entry) => {
-        const match = /^(\d+) [0-9a-f]+ \d+\t(.*)$/s.exec(entry);
-        if (!match || match[1] === "120000") return [];
-        return [path.join(repoRoot, match[2]!)];
-      }),
-  );
+  const tracked = new Set<string>();
+  for (const entry of trackedResult.stdout.split("\0")) {
+    const match = /^(\d+) [0-9a-f]+ \d+\t(.*)$/s.exec(entry);
+    if (!match || match[1] === "120000") continue;
+    const absolute = path.join(repoRoot, match[2]!);
+    tracked.add(absolute);
+    if (match[1]!.startsWith("100") && isHelmSecretTemplate(repoRoot, match[2]!) && realpath(absolute) === absolute) {
+      rules.helmSecretTemplates.push(absolute);
+    }
+  }
+  if (rules.helmSecretTemplates.length > 0) {
+    const ignored = runGit(git, ["-C", repoRoot, "check-ignore", "--no-index", "-z", "--stdin"], {
+      input: rules.helmSecretTemplates.map((p) => path.relative(repoRoot, p)).join("\0") + "\0",
+    });
+    if (ignored.status !== 0 && ignored.status !== 1) rules.helmSecretTemplates = [];
+    else {
+      const excluded = new Set(ignored.stdout.split("\0"));
+      rules.helmSecretTemplates = rules.helmSecretTemplates.filter((p) => !excluded.has(path.relative(repoRoot, p)));
+    }
+  }
 
   const result = runGit(git, [
     "-C", repoRoot, "ls-files", "-z", "-o", "-i", "--exclude-standard", "--directory",
@@ -220,4 +256,3 @@ export function isGitIgnored(git: string, target: string, artifactAllowlist: str
   ignoreCache.set(target, ignored);
   return ignored;
 }
-

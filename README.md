@@ -151,6 +151,13 @@ not compile all abort startup. Patterns are compiled at load time because the
 matcher treats an uncompilable pattern as "no match" — an unvalidated typo in a
 deny pattern would otherwise silently stop guarding.
 
+Tracked regular `templates/**/secret.yaml` and `secret.yml` files belonging to
+a chart (`Chart.yaml` beside its `templates/` directory) are readable and
+editable, including by `helm lint`. Ignored or untracked lookalikes keep the
+usual secret-file restriction. Other secret patterns and denied roots still
+apply. Chart templates should not contain plaintext credentials; the guard
+checks their path and Git status, not their contents.
+
 The current policy format is version 3. Version-1 and version-2 policies still
 load: `tools.git` defaults to `/usr/bin/git`, and `secretEnvironmentPatterns`,
 `secretPrintingCommands` and `allowEnvironment` default to empty. Home Manager
