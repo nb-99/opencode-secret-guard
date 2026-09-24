@@ -58,7 +58,7 @@ fakehome="$scratch/home"
 export XDG_DATA_HOME="$fakehome/.local/share"
 
 # --- fixture -----------------------------------------------------------------
-mkdir -p "$fixture"/{secrets,node_modules/pkg,dist,build,private-notes/nested,docs,infra,.opencode/node_modules/pkg}
+mkdir -p "$fixture"/{secrets,node_modules/pkg,dist,build,private-notes/nested,docs,infra,templates/postgresql,templates/ignored,templates/untracked,.opencode/node_modules/pkg}
 # The vault lives outside the repo, as it does in production.
 vault="$scratch/vault"
 mkdir -p "$vault"/{memory,private}
@@ -87,6 +87,12 @@ printf '%s\n' "$SECRET"       > "$fixture/private-notes/nested/deep.md"
 printf '%s\n' "$SECRET"       > "$fixture/local.conf"
 printf '%s\n' "$PUBLIC"       > "$fixture/README.md"
 printf '%s\n' "$PUBLIC"       > "$fixture/docs/secret-rotation.md"
+printf 'apiVersion: v2\nname: fixture\nversion: 0.1.0\n' > "$fixture/Chart.yaml"
+printf '%s\n' "$PUBLIC"       > "$fixture/templates/postgresql/secret.yaml"
+printf '%s\n' "$PUBLIC"       > "$fixture/templates/secret.yml"
+printf '%s\n' "$SECRET"       > "$fixture/templates/ignored/secret.yaml"
+printf '%s\n' "$SECRET"       > "$fixture/templates/secret.json"
+printf '%s\n' "$SECRET"       > "$fixture/templates/untracked/secret.yaml"
 printf '%s\n' "$PUBLIC"       > "$vault/memory/index.md"
 printf '%s\n' "$PUBLIC"       > "$vault/memory/.env"
 printf '%s\n' "$SECRET"       > "$vault/private/journal.md"
@@ -135,10 +141,12 @@ dist/
 build/
 coverage.out
 junit.xml
+templates/ignored/
 EOF
 
 git init -q "$fixture"
 git -C "$fixture" add -A >/dev/null 2>&1
+git -C "$fixture" reset -q -- templates/untracked/secret.yaml
 ln -s "$fixture/.gitignore" "$fixture/.ignored-link"
 printf '.ignored-link\n' >> "$fixture/.git/info/exclude"
 mkdir -p "$public_fixture"
@@ -344,10 +352,15 @@ expect_denied "rg targeted"                 'rg --no-messages . .env'
 expect_denied "rg recursive"                'rg --no-messages -uuu TOKEN .'
 expect_denied "grep recursive"              'grep -rn TOKEN . 2>/dev/null'
 expect_denied "find -exec"                  'find . -name ".env" -exec cat {} + 2>/dev/null'
-expect_denied "tar to stdout"               'tar cf - .env 2>/dev/null'
+expect_denied "tar to stdout"               'tar cf - .env 2>/dev/null | tar xOf - .env 2>/dev/null'
 expect_denied "cp then read"                'cp .env "'"$scratch"'/copy" 2>/dev/null; cat "'"$scratch"'/copy" 2>/dev/null'
 expect_denied "symlink indirection"         'cat link-to-env'
 expect_denied "secrets directory"           'cat secrets/token'
+expect_denied "ignored Helm-looking template" 'cat templates/ignored/secret.yaml'
+expect_denied "untracked Helm-looking template" 'cat templates/untracked/secret.yaml'
+expect_denied "untracked Helm-looking template remains unwritable" \
+  'printf "%s" "'"$PUBLIC"'" > templates/untracked/secret.yaml 2>/dev/null; cat templates/untracked/secret.yaml'
+expect_denied "unrelated secret extension"    'cat templates/secret.json'
 expect_denied "ssh private key"             'cat id_rsa'
 expect_denied "tfvars"                      'cat infra/prod.tfvars'
 expect_denied "secret in allowlisted dir"   'cat node_modules/pkg/.env'
@@ -389,6 +402,10 @@ expect_allowed "JUnit report"               'cat junit.xml'
 expect_allowed "nested .gitignore"           'cat .opencode/.gitignore; cat README.md'
 expect_allowed "nested node_modules source"  'cat .opencode/node_modules/pkg/index.js'
 expect_allowed "filename containing secret" 'cat docs/secret-rotation.md'
+expect_allowed "tracked Helm template"       'cat templates/postgresql/secret.yaml'
+expect_allowed "tracked Helm yml template"   'cat templates/secret.yml'
+expect_writable "tracked Helm template is editable" "$fixture/templates/postgresql/secret.yaml" \
+  'printf "%s" "'"$PUBLIC"'" > templates/postgresql/secret.yaml'
 expect_allowed "git works"                  'git status >/dev/null && cat README.md'
 expect_quiet   "git status produces no errors" 'git status --short'
 expect_allowed "writing a normal file"      'echo "'"$PUBLIC"'" > scratch.txt && cat scratch.txt'

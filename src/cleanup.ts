@@ -139,7 +139,7 @@ export function cleanupProfile(config: GuardConfig, plan: CleanupPlan): string {
     group: null,
     gitignore: repoRoot
       ? gitignoreRules(config.tools.git, repoRoot, config.artifactAllowlist)
-      : { repoRoot: null, subpaths: [], literals: [], directories: [] },
+      : { repoRoot: null, subpaths: [], literals: [], directories: [], helmSecretTemplates: [] },
     tamper: tamperTargets({ repoRoot, pathEnvironment: process.env.PATH, home: os.homedir() }),
   });
   const targets = plan.entries.map((target) => `(literal ${sbplString(target)})`).join(" ");
