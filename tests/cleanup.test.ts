@@ -26,7 +26,7 @@ describe("cleanup policy", () => {
     expect(() => validateConfig({ ...base, configVersion: 1, cleanupRoot: root }, "test", fixture))
       .toThrow("requires configVersion 2");
   });
-  test.each([42, "", "relative", "/", "/tmp/.."])("rejects invalid root %j", (cleanupRoot) => {
+  test.each([42, "", "relative", "/", "/tmp/..", "$TMPDIRX/scratch", "$HOME/scratch"])("rejects invalid root %j", (cleanupRoot) => {
     expect(() => validateConfig({ ...base, cleanupRoot }, "test", fixture)).toThrow("cleanupRoot");
   });
   test("refuses files-only cleanup", () => {
@@ -35,6 +35,16 @@ describe("cleanup policy", () => {
   });
   test("expands the configured home without reading files", () => {
     expect(validateConfig({ ...base, cleanupRoot: "~/scratch" }, "test", fixture).cleanupRoot).toBe(root);
+  });
+  test("expands a leading $TMPDIR, including macOS's trailing slash", () => {
+    expect(validateConfig({ ...base, cleanupRoot: "$TMPDIR/scratch" }, "test", "/home", `${fixture}/`).cleanupRoot)
+      .toBe(root);
+    expect(validateConfig({ ...base, cleanupRoot: "$TMPDIR" }, "test", "/home", `${fixture}/`).cleanupRoot)
+      .toBe(fixture);
+  });
+  test("defaults $TMPDIR to the process temporary directory", () => {
+    expect(validateConfig({ ...base, cleanupRoot: "$TMPDIR/opencode" }, "test", fixture).cleanupRoot)
+      .toBe(path.join(os.tmpdir(), "opencode"));
   });
 });
 

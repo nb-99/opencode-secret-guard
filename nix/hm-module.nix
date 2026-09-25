@@ -91,9 +91,9 @@ in
         Policy keys that replace the shipped default wholesale, applied after
         the `extra*` additions are merged (so a key named here discards those
         additions for that key). `mode` and `tools` are rejected here; use
-        their options. Roots may start with `~`, which the plugin expands at
-        runtime. Prefer the `extra*` options for additions, so upstream
-        changes to the default still apply.
+        their options. Roots may start with `~`, and `cleanupRoot` also with
+        `$TMPDIR`; the plugin expands both at runtime. Prefer the `extra*`
+        options for additions, so upstream changes to the default still apply.
       '';
     };
 
