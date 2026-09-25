@@ -132,7 +132,7 @@ with a leading `~`, expanded at runtime, so a policy is portable between hosts.
 | --------------------------- | --------------------------------------------------------------------------------------- |
 | `configVersion`             | File format; rejected if unsupported                                                    |
 | `mode`                      | `shell+files` or `files-only`                                                           |
-| `cleanupRoot`               | Opt-in root for `cleanup_temp`; `null` disables it and files-only mode cannot enable it |
+| `cleanupRoot`               | Opt-in root for `cleanup_temp`, may start with `~` or `$TMPDIR`; `null` disables it and files-only mode cannot enable it |
 | `tools.git`                 | Absolute path of the git the guard spawns; never resolved through `PATH`                |
 | `secretPatterns`            | Regexes denied in both layers                                                           |
 | `secretExceptions`          | Re-allowed after the deny block                                                         |
@@ -219,8 +219,10 @@ from your own terminal.
 
 ## Guarded temporary cleanup
 
-Set `cleanupRoot` to an existing directory such as
-`/tmp/opencode` to expose the `cleanup_temp` tool:
+Set `cleanupRoot` to an existing directory such as `$TMPDIR/opencode`, the
+scratch directory OpenCode itself uses, to expose the `cleanup_temp` tool. A
+leading `$TMPDIR` expands to the OpenCode process's temporary directory, so the
+root follows macOS's randomized per-user `TMPDIR`:
 
 ```json
 {"paths": ["my-task/output", "my-task/download"]}
@@ -235,10 +237,11 @@ than followed.
 The tool inventories descendants and awaits OpenCode's `edit` permission for
 every path before deleting anything. Read-only agents and descendant-specific
 denials remain effective; approval displays a deletion manifest without file
-contents. To avoid prompting for this root, configure
-an OpenCode `permission.edit` allowance for
-`/tmp/opencode/**`. Use the same spelling as `cleanupRoot`;
-the worker independently resolves macOS aliases such as `/private/tmp`.
+contents. To avoid prompting for this root, configure an OpenCode
+`permission.edit` allowance for the expanded path. OpenCode does not expand
+variables in permission patterns, so write it out: `/tmp/opencode/**` for a
+`/tmp` root, or `/var/folders/*/*/T/opencode/**` for `$TMPDIR/opencode` on
+macOS. The worker independently resolves macOS aliases such as `/private/tmp`.
 Keep ordinary bash `rm` rules at `ask`; no command-string exemption is needed.
 
 Deletion runs as fixed `/bin/rm` arguments under `sandbox-exec`, not as shell

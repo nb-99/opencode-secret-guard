@@ -145,6 +145,17 @@ export function expandHome(value: string, home: string): string {
   return value;
 }
 
+/**
+ * Expands a leading "$TMPDIR" to the process's temporary directory. OpenCode
+ * derives its own scratch directory from the same value, so the root follows
+ * macOS's per-user TMPDIR instead of naming one host's randomized path.
+ */
+export function expandTemporary(value: string, temporary: string): string {
+  if (value === "$TMPDIR") return path.resolve(temporary);
+  if (value.startsWith("$TMPDIR/")) return path.join(temporary, value.slice("$TMPDIR/".length));
+  return value;
+}
+
 export function requireRoots(value: unknown, key: string, source: string, home: string): string[] {
   const roots = requireStringArray(value, key, source).map((entry) => expandHome(entry, home));
   for (const root of roots) {
@@ -236,7 +247,12 @@ export function requireEnvironmentNames(value: unknown, key: string, source: str
   return names;
 }
 
-export function validateConfig(raw: unknown, source: string, home: string): GuardConfig {
+export function validateConfig(
+  raw: unknown,
+  source: string,
+  home: string,
+  temporary = os.tmpdir(),
+): GuardConfig {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
     throw configError(source, "policy must be a JSON object");
   }
@@ -275,7 +291,7 @@ export function validateConfig(raw: unknown, source: string, home: string): Guar
     if (typeof record.cleanupRoot !== "string" || !record.cleanupRoot.trim() || /[\0\r\n]/.test(record.cleanupRoot)) {
       throw configError(source, '"cleanupRoot" must be an absolute directory or null');
     }
-    cleanupRoot = expandHome(record.cleanupRoot, home);
+    cleanupRoot = expandTemporary(expandHome(record.cleanupRoot, home), temporary);
   }
   if (cleanupRoot !== null) {
     if (record.configVersion < 2) {

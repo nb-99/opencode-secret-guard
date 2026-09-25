@@ -569,7 +569,10 @@ usual failure mode of string matching. The kernel rule has no such gap.
 ## Structured cleanup
 
 `cleanupRoot` opts into `cleanup_temp` in `src/cleanup.ts`. The root is policy,
-not a model argument. OpenCode validates the public Zod schema, and the tool
+not a model argument. A leading `$TMPDIR` expands to `os.tmpdir()` of the
+plugin process, which runs inside OpenCode, so it names the same directory
+OpenCode derives its own `…/opencode` scratch path from; the randomized macOS
+per-user path never has to appear in the policy. OpenCode validates the public Zod schema, and the tool
 validates it again inside `execute` because preceding hooks can rewrite
 arguments. The package vendors only Zod, not the OpenCode SDK.
 
