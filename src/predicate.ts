@@ -6,14 +6,27 @@ import type { GuardConfig } from "./policy.ts";
 import { cacheDirectory } from "./profile.ts";
 import { isTamperProtected, tamperTargets } from "./tamper.ts";
 
-export const FILE_PATH_ARGS = ["filePath", "path", "file"] as const;
-
-export const FILE_TOOLS = new Set(["read", "write", "edit", "patch", "list", "glob", "grep"]);
-
-/** Tools whose path argument names something they will change. */
-export const WRITE_TOOLS = new Set(["write", "edit", "patch"]);
-
 export type FileOperation = "read" | "write";
+
+/**
+ * Resolves a path argument the way the tools do: `~` expands to the home
+ * directory, and a relative path is relative to the tool's working directory,
+ * not to this process's. OpenCode V2 expands `~` itself, so leaving it literal
+ * here would classify `<cwd>/~/.ssh/id_rsa` and allow the real file.
+ *
+ * Without a working directory a relative path has no meaning, and guessing one
+ * would classify a different file from the one the tool opens, so it throws.
+ */
+export function resolveTarget(value: string, baseDirectory: string | undefined): string {
+  const expanded = value === "~" ? os.homedir() : value.startsWith("~/") ? path.join(os.homedir(), value.slice(2)) : value;
+  if (baseDirectory === undefined) {
+    if (!path.isAbsolute(expanded)) {
+      throw new Error(`secret-guard: cannot resolve the relative path ${value} because OpenCode gave no project directory.`);
+    }
+    return path.resolve(expanded);
+  }
+  return path.resolve(baseDirectory, expanded);
+}
 
 /**
  * Mirrors the profile's rule ordering so the two layers agree:
@@ -56,8 +69,9 @@ export function classifyPath(
 /**
  * Classifies many paths at once. The verdicts are exactly those of calling
  * `classifyPath` on each path; only the number of git subprocesses differs.
- * Anything that cannot be classified keeps the layer's default — allow — rather
- * than silently dropping a result.
+ * A path that is classifiable but outside every rule keeps the layer's default,
+ * allow. A path whose classification *fails* is denied, as the before-call check
+ * refuses the same call: an error must not turn a result into a disclosure.
  */
 export function classifyPaths(
   targets: string[],
@@ -76,7 +90,7 @@ export function classifyPaths(
     try {
       verdicts.set(target, classifyPath(canonical[index]!, config));
     } catch {
-      verdicts.set(target, "allow");
+      verdicts.set(target, "deny");
     }
   });
   return verdicts;
@@ -92,23 +106,33 @@ export function resultPath(raw: string, searchRoot: string): string | null {
   return path.isAbsolute(candidate) ? candidate : path.resolve(searchRoot, candidate);
 }
 
+/** Grep's first line, `Found N matches`, sits directly above the first file group. */
+const GREP_SUMMARY = /^Found \d+ matches[^\n]*\n/;
+
 /**
  * Grep groups hits as `<path>:\nLine …`, often using a relative path. Filtering
  * individual lines cannot work: the secret appears on the `Line …` line while
  * the path sits above it. Filter whole groups instead, resolving relative
  * headers against the requested search root.
+ *
+ * The summary line is set aside first: no blank line separates it from the
+ * first group, so left in place it would be read as that group's path and the
+ * group would never be classified.
  */
 export function filterSearchOutput(
   tool: string,
   output: string,
   args: Record<string, unknown>,
   config: GuardConfig,
+  baseDirectory: string | undefined,
 ): string {
   const requested = typeof args.path === "string" && args.path ? args.path : ".";
-  const searchRoot = path.resolve(requested);
+  const searchRoot = resolveTarget(requested, baseDirectory);
   const isGlob = tool === "glob";
 
-  const chunks = isGlob ? output.split("\n") : output.split(/\n{2,}/);
+  const summary = isGlob ? "" : GREP_SUMMARY.exec(output)?.[0] ?? "";
+  const body = output.slice(summary.length);
+  const chunks = isGlob ? body.split("\n") : body.split(/\n{2,}/);
   const targets = chunks.map((chunk) => {
     const header = isGlob ? chunk : (chunk.split("\n", 1)[0]?.replace(/:$/, "") ?? "");
     return resultPath(header, searchRoot);
@@ -119,7 +143,7 @@ export function filterSearchOutput(
     config,
   );
 
-  return chunks
+  return summary + chunks
     .filter((_, index) => {
       const target = targets[index];
       if (!target) return true;

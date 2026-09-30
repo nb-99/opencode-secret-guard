@@ -3,7 +3,7 @@ import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { createHooks } from "../src/hooks.ts";
+import { createV1Hooks } from "../src/v1.ts";
 import { loadConfig } from "../src/policy.ts";
 import type { GuardConfig } from "../src/policy.ts";
 import { classifyPath } from "../src/predicate.ts";
@@ -16,6 +16,9 @@ let fixture: string;
 let repo: string;
 let config: GuardConfig;
 let previousXdg: string | undefined;
+
+/** The V1 hooks for a project at `repo`, installed under the fixture. */
+const v1 = (guardConfig: GuardConfig, moduleDirectory: string) => createV1Hooks(guardConfig, moduleDirectory, repo);
 
 beforeAll(() => {
   fixture = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "secret-guard-tamper-")));
@@ -182,7 +185,7 @@ describe("the file-tool predicate distinguishes reads from writes", () => {
   });
 
   test("every write tool is refused on a protected path and the error says why", async () => {
-    const hooks = createHooks(config, path.join(fixture, "package", "lib"));
+    const hooks = v1(config, path.join(fixture, "package", "lib"));
     for (const tool of ["edit", "write", "patch"]) {
       await expect(
         hooks["tool.execute.before"]({ tool }, { args: { filePath: path.join(repo, "opencode.json") } }),

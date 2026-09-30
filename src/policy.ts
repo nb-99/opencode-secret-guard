@@ -67,7 +67,7 @@ export interface GuardConfig {
  * It needs sandbox-exec and therefore macOS.
  *
  * "files-only" drops the shell layer and keeps the path predicate, which is
- * portable. It is genuinely weaker — the bash tool becomes unguarded, and any
+ * portable. It is genuinely weaker — the shell tool becomes unguarded, and any
  * command can read anything the user can — so it must be asked for explicitly
  * and is announced at startup. Falling back to it automatically would be the
  * worst option available: the guard would look installed while guarding much

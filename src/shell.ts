@@ -29,7 +29,22 @@ export function validateShell(shell: unknown, moduleDirectory: string): void {
   if (!configured || realpath(configured) !== realpath(expected)) {
     throw new Error(
       `secret-guard: opencode's shell must be ${expected}, but it is ${configured || "unset"}. ` +
-        "The bash tool is unguarded until it is.",
+        "Shell commands are unguarded until it is.",
+    );
+  }
+  requireWrapperFile(moduleDirectory);
+}
+
+/**
+ * Both OpenCode versions replace a configured shell that is not a file with the
+ * platform shell, so naming the wrapper is not enough: it must exist.
+ */
+export function requireWrapperFile(moduleDirectory: string): void {
+  const expected = expectedShell(moduleDirectory);
+  if (!fs.statSync(expected, { throwIfNoEntry: false })?.isFile()) {
+    throw new Error(
+      `secret-guard: the shell wrapper ${expected} does not exist, so OpenCode runs its platform shell. ` +
+        "Shell commands are unguarded until it does.",
     );
   }
 }

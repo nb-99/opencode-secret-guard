@@ -4,7 +4,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { findRepoRoot, gitignoreRules } from "../src/gitignore.ts";
-import { createHooks } from "../src/hooks.ts";
+import { createV1Hooks } from "../src/v1.ts";
 import type { CommandAnalysis } from "../src/command-policy.ts";
 import { configPath, loadConfig, opencodeConfigDirectory } from "../src/policy.ts";
 import type { GuardConfig } from "../src/policy.ts";
@@ -103,6 +103,10 @@ afterAll(() => {
 });
 
 const verdict = (relative: string) => classifyPath(path.join(repo, relative), config);
+
+/** The V1 hooks, as OpenCode V1 builds them for a project at `repo`. */
+const v1 = (guardConfig: GuardConfig, moduleDirectory = path.join(repo, "package", "lib")) =>
+  createV1Hooks(guardConfig, moduleDirectory, repo);
 
 describe("configuration loading", () => {
   /** Writes a candidate policy and returns its path. */
@@ -252,7 +256,7 @@ describe("guard modes", () => {
       return true;
     };
     try {
-      const hooks = createHooks({ ...config, mode: "files-only" }, path.join(repo, "package", "lib"));
+      const hooks = v1({ ...config, mode: "files-only" }, path.join(repo, "package", "lib"));
       // A shell that would be rejected in shell+files mode is not consulted.
       await expect(hooks.config({ shell: "/bin/zsh" })).resolves.toBeUndefined();
     } finally {
@@ -260,11 +264,11 @@ describe("guard modes", () => {
     }
 
     expect(written.join("")).toMatch(/files-only/);
-    expect(written.join("")).toMatch(/bash tool is NOT/);
+    expect(written.join("")).toMatch(/shell commands are NOT/);
   });
 
   test("files-only still guards the file tools", async () => {
-    const hooks = createHooks({ ...config, mode: "files-only" }, path.join(repo, "package", "lib"));
+    const hooks = v1({ ...config, mode: "files-only" }, path.join(repo, "package", "lib"));
 
     await expect(
       hooks["tool.execute.before"]({ tool: "read" }, { args: { filePath: path.join(repo, ".env") } }),
@@ -283,7 +287,7 @@ describe("guard modes", () => {
     const original = process.platform;
     Object.defineProperty(process, "platform", { value: "linux", configurable: true });
     try {
-      expect(() => createHooks(config, path.join(repo, "package", "lib"))).toThrow(/needs macOS/);
+      expect(() => v1(config, path.join(repo, "package", "lib"))).toThrow(/needs macOS/);
     } finally {
       Object.defineProperty(process, "platform", { value: original, configurable: true });
     }
@@ -294,7 +298,7 @@ describe("guard modes", () => {
     Object.defineProperty(process, "platform", { value: "linux", configurable: true });
     try {
       expect(() =>
-        createHooks({ ...config, mode: "files-only" }, path.join(repo, "package", "lib")),
+        v1({ ...config, mode: "files-only" }, path.join(repo, "package", "lib")),
       ).not.toThrow();
     } finally {
       Object.defineProperty(process, "platform", { value: original, configurable: true });
@@ -484,6 +488,14 @@ describe("gitignoreRules", () => {
 });
 
 describe("classifyPaths", () => {
+  test("denies a path it fails to classify, as the before-call check refuses the same call", () => {
+    const target = path.join(repo, "never-classified-before.txt");
+    const broken = { ...config, tools: { ...config.tools, git: "/nonexistent/git" } };
+
+    expect(() => classifyPath(target, broken)).toThrow();
+    expect(classifyPaths([target], broken).get(target)).toBe("deny");
+  });
+
   // The batch path exists purely for speed: one `git check-ignore` per
   // repository instead of one per result. Any divergence from the audited
   // single-path predicate would be a silent hole, so assert equality directly.
@@ -954,21 +966,62 @@ describe("filterSearchOutput", () => {
       "  Line 1: TOKEN is documented here",
     ].join("\n");
 
-    const filtered = filterSearchOutput("grep", output, { path: repo }, config);
+    const filtered = filterSearchOutput("grep", output, { path: repo }, config, repo);
     expect(filtered).not.toContain("TOKEN=live");
     expect(filtered).toContain("README.md");
     expect(filtered).toContain("TOKEN is documented here");
   });
 
+  test("classifies the first group, which follows grep's summary line directly", () => {
+    // `Found N matches` has no blank line after it, so it used to be read as
+    // the first group's path and that group was never classified.
+    const output = [
+      "Found 2 matches",
+      ".env:",
+      "  Line 1: TOKEN=live",
+      "",
+      "README.md:",
+      "  Line 1: public",
+    ].join("\n");
+
+    const filtered = filterSearchOutput("grep", output, { path: repo }, config, repo);
+    expect(filtered).not.toContain("TOKEN=live");
+    expect(filtered.startsWith("Found 2 matches\nREADME.md:")).toBe(true);
+  });
+
+  test("resolves a relative search path against the tool's directory, not the process's", () => {
+    const output = ["Found 1 matches", "id_rsa:", "  Line 1: PRIVATE"].join("\n");
+
+    expect(filterSearchOutput("grep", output, { path: "." }, config, repo)).not.toContain("PRIVATE");
+    expect(filterSearchOutput("grep", output, {}, config, repo)).not.toContain("PRIVATE");
+  });
+
   test("keeps unclassifiable output rather than silently losing external results", () => {
-    expect(filterSearchOutput("grep", "summary only", { path: repo }, config)).toBe("summary only");
+    expect(filterSearchOutput("grep", "summary only", { path: repo }, config, repo)).toBe("summary only");
+  });
+
+  test("keeps grep's truncation trailer after the last group", () => {
+    const trailer = "(Results are truncated: showing first 1 results. Consider using a more specific path or pattern.)";
+    const output = ["Found 2 matches", ".env:", "  Line 1: TOKEN=live", "", "README.md:", "  Line 1: public", "", trailer].join("\n");
+
+    const filtered = filterSearchOutput("grep", output, { path: repo }, config, repo);
+    expect(filtered).not.toContain("TOKEN=live");
+    expect(filtered.endsWith(`public\n\n${trailer}`)).toBe(true);
+  });
+
+  test("a gitignored file is dropped only when its relative name resolves inside the repository", () => {
+    // local.conf is denied by the fixture's .gitignore alone.
+    const output = ["Found 1 matches", "local.conf:", "  Line 1: PRIVATE"].join("\n");
+
+    expect(filterSearchOutput("grep", output, { path: "." }, config, repo)).not.toContain("PRIVATE");
+    expect(filterSearchOutput("grep", output, { path: "." }, config, os.tmpdir())).toContain("PRIVATE");
   });
 });
 
 describe("plugin hooks", () => {
   test("leave bash commands unchanged for the configured shell to enforce", async () => {
     const args = { command: "cat .env" };
-    const hooks = createHooks(config);
+    const hooks = v1(config);
 
     await hooks["tool.execute.before"]({ tool: "bash" }, { args });
 
@@ -976,7 +1029,7 @@ describe("plugin hooks", () => {
   });
 
   test("reject a credential-printing command before it runs", async () => {
-    const hooks = createHooks(config);
+    const hooks = v1(config);
 
     await expect(
       hooks["tool.execute.before"]({ tool: "bash" }, { args: { command: "gh pr list && gh auth token" } }),
@@ -987,7 +1040,7 @@ describe("plugin hooks", () => {
   });
 
   test("reject it in files-only mode too, where no shell wrapper backs the plugin", async () => {
-    const hooks = createHooks({ ...config, mode: "files-only" }, path.join(repo, "package", "lib"));
+    const hooks = v1({ ...config, mode: "files-only" }, path.join(repo, "package", "lib"));
 
     await expect(
       hooks["tool.execute.before"]({ tool: "bash" }, { args: { command: "aws eks get-token" } }),
@@ -995,24 +1048,34 @@ describe("plugin hooks", () => {
   });
 
   test("rejects a shell that is not this package's wrapper", async () => {
-    const hooks = createHooks(config, path.join(repo, "package", "lib"));
+    const hooks = v1(config, path.join(repo, "package", "lib"));
 
     await expect(hooks.config({ shell: "/bin/zsh" })).rejects.toThrow("must be");
   });
 
   test("rejects an unset shell rather than running unguarded", async () => {
-    const hooks = createHooks(config, path.join(repo, "package", "lib"));
+    const hooks = v1(config, path.join(repo, "package", "lib"));
 
     await expect(hooks.config({})).rejects.toThrow("unset");
   });
 
   test("accepts this package's own wrapper", async () => {
     const packageRoot = path.join(repo, "package");
-    const hooks = createHooks(config, path.join(packageRoot, "lib"));
+    const wrapper = path.join(packageRoot, "bin", "opencode-secret-guard");
+    fs.mkdirSync(path.dirname(wrapper), { recursive: true });
+    fs.writeFileSync(wrapper, "#!/bin/sh\n");
+    const hooks = v1(config, path.join(packageRoot, "lib"));
+
+    await expect(hooks.config({ shell: wrapper })).resolves.toBeUndefined();
+  });
+
+  test("rejects the right path when nothing is there, because OpenCode would run its own shell", async () => {
+    const packageRoot = path.join(repo, "absent-package");
+    const hooks = v1(config, path.join(packageRoot, "lib"));
 
     await expect(
       hooks.config({ shell: path.join(packageRoot, "bin", "opencode-secret-guard") }),
-    ).resolves.toBeUndefined();
+    ).rejects.toThrow(/does not exist/);
   });
 
   test("accepts a symlink to this package's wrapper", async () => {
@@ -1024,21 +1087,126 @@ describe("plugin hooks", () => {
     fs.writeFileSync(wrapper, "#!/bin/sh\n");
     const link = path.join(repo, "profile-opencode-secret-guard");
     fs.symlinkSync(wrapper, link);
-    const hooks = createHooks(config, path.join(packageRoot, "lib"));
+    const hooks = v1(config, path.join(packageRoot, "lib"));
 
     await expect(hooks.config({ shell: link })).resolves.toBeUndefined();
   });
 
   test("rejects an identically named wrapper from another installation", async () => {
-    const hooks = createHooks(config, path.join(repo, "package", "lib"));
+    const hooks = v1(config, path.join(repo, "package", "lib"));
 
     await expect(
       hooks.config({ shell: path.join(repo, "other", "bin", "opencode-secret-guard") }),
     ).rejects.toThrow("must be");
   });
 
+  test("guard a patch tool against every path its headers name", async () => {
+    const hooks = v1(config);
+    const patch = (header: string) => ({ patchText: `*** Begin Patch\n${header}\n*** End Patch` });
+
+    for (const header of ["*** Update File: .env", "*** Add File: a\u2028/../.env", "*** Update File: x\n*** Move to: id_rsa"]) {
+      await expect(hooks["tool.execute.before"]({ tool: "apply_patch" }, { args: patch(header) })).rejects.toThrow(/blocked/);
+    }
+    await expect(
+      hooks["tool.execute.before"]({ tool: "apply_patch" }, { args: patch("*** Update File: README.md") }),
+    ).resolves.toBeUndefined();
+  });
+
+  test("resolve a relative file path against the project directory", async () => {
+    const hooks = v1(config);
+
+    await expect(hooks["tool.execute.before"]({ tool: "read" }, { args: { filePath: "local.conf" } })).rejects.toThrow(
+      /blocked/,
+    );
+    await expect(
+      createV1Hooks(config, path.join(repo, "package", "lib"), os.tmpdir())["tool.execute.before"](
+        { tool: "read" },
+        { args: { filePath: "local.conf" } },
+      ),
+    ).resolves.toBeUndefined();
+  });
+
+  test("filter a glob against the project directory", async () => {
+    const hooks = v1(config);
+    const output = { output: ["local.conf", "README.md"].join("\n") };
+
+    await hooks["tool.execute.before"]({ tool: "glob", callID: "glob-1" }, { args: { pattern: "*" } });
+    await hooks["tool.execute.after"]({ tool: "glob", callID: "glob-1" }, output);
+
+    expect(output.output).toBe("README.md");
+  });
+
+  test("filter a grep whose first group follows the summary line", async () => {
+    const hooks = v1(config);
+    const output = { output: ["Found 2 matches", ".env:", "  Line 1: TOKEN=live", "", "README.md:", "  Line 1: public"].join("\n") };
+
+    await hooks["tool.execute.before"]({ tool: "grep", callID: "grep-1" }, { args: { pattern: "T" } });
+    await hooks["tool.execute.after"]({ tool: "grep", callID: "grep-1" }, output);
+
+    expect(output.output).not.toContain("TOKEN=live");
+    expect(output.output).toContain("README.md");
+  });
+
+  test("use the recorded search arguments once, then forget them", async () => {
+    // private-notes/ is ignored (dist/ would not do: the artifact allowlist
+    // re-allows it), so note.md is denied under root <repo>/private-notes and
+    // allowed under <repo>: the two roots give different verdicts.
+    const hooks = v1(config);
+    const first = { output: "note.md" };
+    const second = { output: "note.md" };
+
+    await hooks["tool.execute.before"]({ tool: "glob", callID: "glob-2" }, { args: { pattern: "*", path: "private-notes" } });
+    await hooks["tool.execute.after"]({ tool: "glob", callID: "glob-2" }, first);
+    // The same id again has nothing recorded, so the search root is the project.
+    await hooks["tool.execute.after"]({ tool: "glob", callID: "glob-2" }, second);
+
+    expect(first.output).toBe("");
+    expect(second.output).toBe("note.md");
+  });
+
+  test("filter a glob for a symlink to a secret", async () => {
+    const hooks = v1(config);
+    const output = { output: ["link-to-env", "README.md"].join("\n") };
+
+    await hooks["tool.execute.before"]({ tool: "glob", callID: "glob-3" }, { args: { pattern: "*" } });
+    await hooks["tool.execute.after"]({ tool: "glob", callID: "glob-3" }, output);
+
+    expect(output.output).toBe("README.md");
+  });
+
+  test("stop a command when the wrapper has gone since the shell was validated", async () => {
+    // V1 picks its shell afresh for every command and falls back to the
+    // platform shell when the file is missing, so the startup check is not enough.
+    const packageRoot = path.join(repo, "vanishing-package");
+    const wrapper = path.join(packageRoot, "bin", "opencode-secret-guard");
+    fs.mkdirSync(path.dirname(wrapper), { recursive: true });
+    fs.writeFileSync(wrapper, "#!/bin/sh\n");
+    const hooks = v1(config, path.join(packageRoot, "lib"));
+    const run = () => hooks["tool.execute.before"]({ tool: "bash" }, { args: { command: "git status" } });
+
+    await hooks.config({ shell: wrapper });
+    await expect(run()).resolves.toBeUndefined();
+
+    fs.rmSync(wrapper);
+    await expect(run()).rejects.toThrow(/does not exist/);
+  });
+
+  test("start without a project directory, refusing relative paths and searches", async () => {
+    const hooks = createV1Hooks(config, path.join(repo, "package", "lib"), undefined);
+
+    await expect(hooks["tool.execute.before"]({ tool: "read" }, { args: { filePath: "README.md" } })).rejects.toThrow(
+      /no project directory/,
+    );
+    await expect(
+      hooks["tool.execute.before"]({ tool: "read" }, { args: { filePath: path.join(repo, "README.md") } }),
+    ).resolves.toBeUndefined();
+    await expect(
+      hooks["tool.execute.after"]({ tool: "glob" }, { output: "README.md" }),
+    ).rejects.toThrow(/no project directory/);
+  });
+
   test("filters search output against the requested path", async () => {
-    const hooks = createHooks(config);
+    const hooks = v1(config);
     const output = {
       output: [".env:", "  Line 1: TOKEN=live", "", "README.md:", "  Line 1: public"].join(
         "\n",

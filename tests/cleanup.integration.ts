@@ -10,7 +10,7 @@ const base = loadConfig(process.env.OPENCODE_SECRET_GUARD_CONFIG);
 const shell = process.env.SECRET_GUARD_SHELL;
 if (!shell) throw new Error("Use nix run .#integration to exercise the installed cleanup tool");
 const moduleDirectory = path.join(path.dirname(path.dirname(shell)), "lib");
-const { createHooks } = await import(path.join(moduleDirectory, "hooks.ts"));
+const { createV1Hooks } = await import(path.join(moduleDirectory, "v1.ts"));
 let fixture: string;
 let root: string;
 
@@ -28,7 +28,7 @@ beforeEach(() => {
 afterEach(() => fs.rmSync(fixture, { recursive: true, force: true }));
 
 async function tool(cleanupRoot = root) {
-  const hooks = createHooks({ ...base, cleanupRoot }, moduleDirectory);
+  const hooks = createV1Hooks({ ...base, cleanupRoot }, moduleDirectory, fixture);
   await hooks.config({ shell });
   return hooks.tool.cleanup_temp;
 }
