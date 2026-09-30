@@ -328,7 +328,10 @@ the minimum, as well as a current release.
   `plugin` key is rewritten to `plugins` as the normaliser suggests.
 - A broken policy (invalid JSON, wrong `configVersion`) makes `setup` throw. Note
   whether V2 logs it visibly, and confirm it then runs without the plugin; the
-  README says it does.
+  README says it does. *2.0.20: only a `WARN failed to load plugin` log line,
+  and the file tools ran unguarded while the wrapper refused commands. The
+  plugin now catches the failure and refuses shell and file tools instead;
+  re-check that the refusal reaches the model.*
 - A stale `lib/plugin.ts` path from 1.x logs an error and loads nothing.
 - Whether the `files-only` warning and the `cleanup_temp` notice on stderr
   reach the user in the TUI. If not, move them to a channel that does.

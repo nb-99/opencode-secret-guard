@@ -7,7 +7,7 @@
  * must not throw; it withholds the result instead.
  */
 import * as path from "node:path";
-import { checkToolCall, FILES_ONLY_WARNING, hostDirectory, isRecord } from "./guard.ts";
+import { checkToolCall, FILES_ONLY_WARNING, guardsTool, hostDirectory, isRecord } from "./guard.ts";
 import type { GuardConfig } from "./policy.ts";
 import { classifyPaths } from "./predicate.ts";
 import { validatePlatform, validateShell } from "./shell.ts";
@@ -161,5 +161,23 @@ export async function setupV2(ctx: V2Context, guardConfig: GuardConfig, moduleDi
 
   if (guardConfig.cleanupRoot) {
     process.stderr.write(`secret-guard: cleanup_temp is not available on OpenCode V2 (${CLEANUP_ISSUE}).\n`);
+  }
+}
+
+/**
+ * Refuses every shell and guarded tool call with `message`. The tools come
+ * first, so a failure to register the shell hook cannot leave them unguarded.
+ */
+export async function setupRefusingV2(ctx: V2Context, message: string): Promise<void> {
+  const refuse = () => {
+    throw new Error(message);
+  };
+  await ctx.tool.hook("execute.before", (event) => {
+    if (guardsTool(event.tool)) refuse();
+  });
+  try {
+    await ctx.shell.hook("create.before", refuse);
+  } catch (error) {
+    process.stderr.write(`secret-guard: could not refuse shells: ${error instanceof Error ? error.message : error}\n`);
   }
 }

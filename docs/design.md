@@ -618,8 +618,12 @@ a group from the filter. V1's result is one string and is parsed; the
 
 Both hosts catch a failure while loading a plugin and continue without it, so a
 startup check cannot stop OpenCode, and a plugin that fails to load guards no
-file tool. What still holds is the configured shell wrapper. Both hosts replace
-a configured shell that is not a file with the platform shell, so
+file tool. The entry point therefore catches its own startup failure (an
+invalid policy, `shell+files` off macOS) and refuses every shell and file tool
+call with the reason, so the failure shows at the first call instead of in a
+log line. A plugin path that does not resolve is still skipped by the host.
+What still holds then is the configured shell wrapper. Both hosts replace a
+configured shell that is not a file with the platform shell, so
 `validateShell` also requires the wrapper to exist. V2 runs it on every shell
 it creates. V1 runs it once from the `config` hook, and its before-call hook
 repeats the existence check on every `bash` call, since V1 also picks its shell

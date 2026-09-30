@@ -1,8 +1,20 @@
 import { createCleanupTool } from "./cleanup.ts";
-import { checkToolCall, FILES_ONLY_WARNING } from "./guard.ts";
+import { checkToolCall, FILES_ONLY_WARNING, guardsTool } from "./guard.ts";
 import type { GuardConfig } from "./policy.ts";
 import { filterSearchOutput } from "./predicate.ts";
 import { requireWrapperFile, validatePlatform, validateShell } from "./shell.ts";
+
+/**
+ * The hooks OpenCode V1 gets when the guard could not start: every guarded
+ * tool call, `bash` included, is refused with `message`.
+ */
+export function createRefusingV1Hooks(message: string) {
+  return {
+    "tool.execute.before": async (input: { tool: unknown }) => {
+      if (guardsTool(input?.tool)) throw new Error(message);
+    },
+  };
+}
 
 /**
  * The hooks OpenCode V1 calls, for the plugin's `server()` entry point.

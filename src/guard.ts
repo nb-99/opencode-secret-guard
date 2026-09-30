@@ -57,6 +57,25 @@ const BROWSER_FILE_TOOLS = new Set(["browser_files_upload", "browser_files_drop"
 
 const FILE_TOOLS = new Set(["read", "write", "edit", ...OPTIONAL_PATH_TOOLS, ...PATCH_TOOLS, ...BROWSER_FILE_TOOLS]);
 
+/** Whether `checkToolCall` inspects this tool's arguments at all. */
+export function guardsTool(tool: unknown): boolean {
+  const name = String(tool ?? "").toLowerCase();
+  return name === "bash" || name === "shell" || FILE_TOOLS.has(name);
+}
+
+/**
+ * The refusal every guarded tool gets when the plugin could not start. Both
+ * hosts load past a plugin that throws during startup, so rethrowing would
+ * leave the file tools unguarded; refusing them instead makes a broken policy
+ * visible at the first tool call.
+ */
+export function startupFailure(error: unknown): string {
+  const reason = (error instanceof Error ? error.message : String(error)).replace(/^secret-guard: /, "");
+  const message = `secret-guard: file and shell tools are refused because the guard could not start: ${reason}`;
+  process.stderr.write(`${message}\n`);
+  return message;
+}
+
 /** Tools whose path argument names something they will change. */
 const WRITE_TOOLS = new Set(["write", "edit", ...PATCH_TOOLS]);
 

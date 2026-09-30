@@ -315,10 +315,12 @@ explanation rather than failing later as an unexplained `EPERM`.
   whose hook runs later can still change a tool's input or the shell.
 - The interactive terminal (V2's PTY service) is not a model tool and is not
   guarded, on V1 or V2.
-- If OpenCode cannot load the plugin (a bad path, an invalid policy) it starts
-  without it, and the file tools are unguarded. The configured shell wrapper
-  still applies its sandbox profile to commands. Confirm in OpenCode's plugin
-  list that the plugin is active.
+- If OpenCode cannot load the plugin (a bad path) it starts without it, and the
+  file tools are unguarded. The configured shell wrapper still applies its
+  sandbox profile to commands. Confirm in OpenCode's plugin list that the
+  plugin is active. If the plugin loads but cannot start (an invalid policy,
+  `shell+files` off macOS), it refuses every shell and file tool call with the
+  reason instead.
 - If OpenCode gives no project directory, the plugin still starts but refuses
   every relative path and every search result.
 - A file tool call whose arguments the guard cannot read is refused, and so is a
