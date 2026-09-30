@@ -143,6 +143,12 @@ quickly; recheck anything marked unverified before relying on it.
 | Grep                 | `grep`, `pattern`, `path`, `include` | `grep`, `pattern`, `path`, `include`, others |
 
 - Neither version has a `list` tool; `read` on a directory lists it.
+- V2's browser plugin reads local files in `browser_files_upload` and
+  `browser_files_drop` (`paths`, an array) and `browser_preview` (`path`). It
+  opens them with plain `fs.open` in the unsandboxed server, and its `browser`
+  permission only hides the tools when wholly denied, so `external_directory`
+  rules do not apply. An upload followed by `browser.evaluate` returns the
+  file's bytes to the model, so the guard checks all three tools as reads.
 - Patch headers are `*** Add File: <path>`, `*** Update File: <path>`,
   `*** Delete File: <path>` and `*** Move to: <path>`, inside
   `*** Begin Patch` and `*** End Patch` ([parser][v2-patch]).
