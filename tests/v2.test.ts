@@ -62,7 +62,15 @@ function host(directory: string | undefined = repo) {
     for (const callback of registered.get(key) ?? []) await callback(event);
     return event;
   };
-  return { ctx, registered, emit };
+  /**
+   * A tool call as V2 runs it: every `execute.before` hook, then the tool the
+   * event names with the event's input. Returns what V2 would run.
+   */
+  const call = async (event: { tool: string; input: unknown }) => {
+    await emit("tool.execute.before", event);
+    return { tool: event.tool, input: event.input as any };
+  };
+  return { ctx, registered, emit, call };
 }
 
 async function started(guardConfig: GuardConfig = portable, directory: string | undefined = repo) {
@@ -108,7 +116,7 @@ describe("registration", () => {
 
     expect(stderr).toMatch(/files-only/);
     expect(fake.registered.has("shell.create.before")).toBe(false);
-    await expect(fake.emit("tool.execute.before", before("read", { path: ".env" }))).rejects.toThrow("blocked");
+    await expect(fake.call(before("read", { path: ".env" }))).rejects.toThrow("blocked");
   });
 
   test("shell+files refuses to start off macOS rather than pretending", async () => {
@@ -131,15 +139,15 @@ describe("registration", () => {
       });
       expect(stderr).toMatch(/did not provide an absolute project directory/);
 
-      await expect(fake.emit("tool.execute.before", before("read", { path: "README.md" }))).rejects.toThrow(
+      await expect(fake.call(before("read", { path: "README.md" }))).rejects.toThrow(
         /no project directory/,
       );
-      await expect(fake.emit("tool.execute.before", before("read", { path: ".env" }))).rejects.toThrow(/no project directory/);
+      await expect(fake.call(before("read", { path: ".env" }))).rejects.toThrow(/no project directory/);
       // An absolute path needs no directory to be classified.
-      await expect(fake.emit("tool.execute.before", before("read", { path: path.join(repo, ".env") }))).rejects.toThrow(
+      await expect(fake.call(before("read", { path: path.join(repo, ".env") }))).rejects.toThrow(
         "blocked",
       );
-      await expect(fake.emit("tool.execute.before", before("read", { path: path.join(repo, "README.md") }))).resolves
+      await expect(fake.call(before("read", { path: path.join(repo, "README.md") }))).resolves
         .toBeDefined();
 
       const after = await fake.emit("tool.execute.after", {
@@ -155,8 +163,8 @@ describe("registration", () => {
     const inRepo = await started(portable, repo);
     const elsewhere = await started(portable, fixture);
 
-    await expect(inRepo.emit("tool.execute.before", before("read", { path: "private.txt" }))).rejects.toThrow("blocked");
-    await expect(elsewhere.emit("tool.execute.before", before("read", { path: "private.txt" }))).resolves.toBeDefined();
+    await expect(inRepo.call(before("read", { path: "private.txt" }))).rejects.toThrow("blocked");
+    await expect(elsewhere.call(before("read", { path: "private.txt" }))).resolves.toBeDefined();
   });
 
   test("says that cleanup_temp is unavailable when a cleanup root is configured", async () => {
@@ -198,30 +206,30 @@ describe.skipIf(!darwin)("shell check", () => {
   });
 });
 
-describe("execute.before", () => {
+describe("tool calls", () => {
   test("refuses reads and writes of secrets, resolved against the plugin's directory", async () => {
-    const { emit } = await started();
+    const { call } = await started();
     expect(process.cwd()).not.toBe(repo);
 
-    await expect(emit("tool.execute.before", before("read", { path: ".env" }))).rejects.toThrow("blocked");
-    await expect(emit("tool.execute.before", before("write", { path: "id_rsa", content: "" }))).rejects.toThrow("blocked");
-    await expect(emit("tool.execute.before", before("edit", { path: "src/../.env" }))).rejects.toThrow("blocked");
-    await expect(emit("tool.execute.before", before("read", { path: "README.md" }))).resolves.toBeDefined();
+    await expect(call(before("read", { path: ".env" }))).rejects.toThrow("blocked");
+    await expect(call(before("write", { path: "id_rsa", content: "" }))).rejects.toThrow("blocked");
+    await expect(call(before("edit", { path: "src/../.env" }))).rejects.toThrow("blocked");
+    await expect(call(before("read", { path: "README.md" }))).resolves.toBeDefined();
   });
 
   test("refuses a patch that names a secret", async () => {
-    const { emit } = await started();
+    const { call } = await started();
     const patchText = ["*** Begin Patch", "*** Update File: .env", "@@", "-x", "+y", "*** End Patch"].join("\n");
 
-    await expect(emit("tool.execute.before", before("patch", { patchText }))).rejects.toThrow("write access to .env");
+    await expect(call(before("patch", { patchText }))).rejects.toThrow("write access to .env");
   });
 
   test("refuses a misspelled name that V2's read would resolve to an ignored file", async () => {
-    const { emit } = await started();
+    const { call } = await started();
     fs.writeFileSync(path.join(repo, "private note.txt"), "x\n");
     fs.appendFileSync(path.join(repo, ".gitignore"), "private note.txt\n");
     try {
-      await expect(emit("tool.execute.before", before("read", { path: "private\u00a0note.txt" }))).rejects.toThrow("blocked");
+      await expect(call(before("read", { path: "private\u00a0note.txt" }))).rejects.toThrow("blocked");
     } finally {
       fs.rmSync(path.join(repo, "private note.txt"));
       fs.writeFileSync(path.join(repo, ".gitignore"), "private.txt\n");
@@ -229,19 +237,156 @@ describe("execute.before", () => {
   });
 
   test("refuses a credential-printing command on the shell tool", async () => {
-    const { emit } = await started();
+    const { call } = await started();
 
-    await expect(emit("tool.execute.before", before("shell", { command: "aws eks get-token" }))).rejects.toThrow(/refusing/);
-    await expect(emit("tool.execute.before", before("shell", { command: "git status" }))).resolves.toBeDefined();
+    await expect(call(before("shell", { command: "aws eks get-token" }))).rejects.toThrow(/refusing/);
+    await expect(call(before("shell", { command: "git status" }))).resolves.toBeDefined();
   });
 
   test("refuses a file tool call it cannot read rather than letting it through", async () => {
-    const { emit } = await started();
+    const { call } = await started();
 
-    await expect(emit("tool.execute.before", before("read", undefined))).rejects.toThrow(/cannot read/);
-    await expect(emit("tool.execute.before", before("read", { path: 3 }))).rejects.toThrow(/named no path/);
-    await expect(emit("tool.execute.before", before("read", { location: ".env" }))).rejects.toThrow(/named no path/);
-    await expect(emit("tool.execute.before", before("webfetch", undefined))).resolves.toBeDefined();
+    await expect(call(before("read", undefined))).rejects.toThrow(/cannot read/);
+    await expect(call(before("read", { path: 3 }))).rejects.toThrow(/named no path/);
+    await expect(call(before("read", { location: ".env" }))).rejects.toThrow(/named no path/);
+    await expect(call(before("webfetch", undefined))).resolves.toBeDefined();
+  });
+});
+
+describe("a hook that runs after the guard", () => {
+  /** Registers `callback` after the guard's own hooks, as a plugin loaded later would be. */
+  const later = (fake: Awaited<ReturnType<typeof started>>, key: string, callback: (event: any) => unknown) => {
+    fake.registered.set(key, [...(fake.registered.get(key) ?? []), callback]);
+  };
+
+  test("cannot replace a checked path with a secret", async () => {
+    const fake = await started();
+    later(fake, "tool.execute.before", (event) => {
+      event.input = { path: ".env" };
+    });
+
+    await expect(fake.call(before("read", { path: "README.md" }))).rejects.toThrow("blocked");
+  });
+
+  test("can replace the input with one the guard allows", async () => {
+    const fake = await started();
+    later(fake, "tool.execute.before", (event) => {
+      event.input = { ...event.input, path: "src/index.ts" };
+    });
+
+    const result = await fake.call(before("read", { path: "README.md" }));
+    expect(result.input).toEqual({ path: "src/index.ts" });
+  });
+
+  test("cannot change the checked input in place", async () => {
+    const fake = await started();
+    later(fake, "tool.execute.before", (event) => {
+      if (event.tool === "read") event.input.path = ".env";
+      else event.input.paths.push(".env");
+    });
+
+    await expect(fake.call(before("read", { path: "README.md" }))).rejects.toThrow(TypeError);
+    await expect(fake.call(before("browser_files_upload", { paths: ["README.md"] }))).rejects.toThrow(TypeError);
+  });
+
+  test("cannot change the input in place after renaming the call to a guarded tool", async () => {
+    const fake = await started();
+    later(fake, "tool.execute.before", (event) => {
+      event.tool = "read";
+      event.input.path = ".env";
+    });
+
+    await expect(fake.call(before("webfetch", { path: "README.md" }))).rejects.toThrow(TypeError);
+  });
+
+  test("runs the value that was checked, even when a getter answers differently later", async () => {
+    const fake = await started();
+    let reads = 0;
+    const input = {
+      get path() {
+        return reads++ === 0 ? "README.md" : ".env";
+      },
+    };
+
+    const { input: ran } = await fake.call(before("read", input));
+    expect(ran.path).toBe("README.md");
+    expect(ran.path).toBe("README.md");
+  });
+
+  test("cannot turn an unguarded call into a read of a secret, in either order", async () => {
+    for (const renameFirst of [true, false]) {
+      const fake = await started();
+      later(fake, "tool.execute.before", (event) => {
+        if (renameFirst) event.tool = "read";
+        event.input = { path: ".env" };
+        event.tool = "read";
+      });
+
+      await expect(fake.call(before("webfetch", { url: "https://example.com/" }))).rejects.toThrow(/secret-guard/);
+    }
+  });
+
+  test("cannot turn a read into a write the guard refuses", async () => {
+    const fake = await started();
+    later(fake, "tool.execute.before", (event) => {
+      event.tool = "write";
+      event.input = { path: "opencode.json", content: "{}" };
+    });
+
+    await expect(fake.call(before("read", { path: "opencode.json" }))).rejects.toThrow(/part of the guard/);
+  });
+
+  test("leaves the input of a tool the guard does not inspect alone", async () => {
+    const fake = await started();
+    later(fake, "tool.execute.before", (event) => {
+      event.input.url = "https://example.org/";
+    });
+
+    const result = await fake.call(before("webfetch", { url: "https://example.com/" }));
+    expect(result.input).toEqual({ url: "https://example.org/" });
+  });
+
+  test.skipIf(!darwin)("cannot replace the checked shell", async () => {
+    const fake = await started();
+    const wrapper = path.join(fixture, "package", "bin", "opencode-secret-guard");
+    later(fake, "shell.create.before", (event) => {
+      event.shell = "/bin/sh";
+    });
+
+    await expect(
+      fake.emit("shell.create.before", { command: "echo hi", cwd: repo, timeout: 0, shell: wrapper, env: {} }),
+    ).rejects.toThrow("must be");
+  });
+
+  test.skipIf(!darwin)("leaves the shell environment writable, which V2 sets after the hooks", async () => {
+    const { emit } = await started();
+    const wrapper = path.join(fixture, "package", "bin", "opencode-secret-guard");
+
+    const event = await emit("shell.create.before", { command: "echo hi", cwd: repo, timeout: 0, shell: wrapper, env: {} });
+    (event.env as Record<string, string>).AGENT = "1";
+    expect(event.env).toEqual({ AGENT: "1" });
+    expect(event.shell).toBe(wrapper);
+  });
+
+  test.skipIf(!darwin)("keeps checking the shell when a second guard instance is loaded", async () => {
+    const fake = host();
+    await setupV2(fake.ctx, config, packageLib);
+    await setupV2(fake.ctx, config, packageLib);
+    const wrapper = path.join(fixture, "package", "bin", "opencode-secret-guard");
+
+    const event = await fake.emit("shell.create.before", { command: "echo hi", cwd: repo, timeout: 0, shell: wrapper, env: {} });
+    expect(() => {
+      event.shell = "/bin/sh";
+    }).toThrow("must be");
+  });
+
+  test.skipIf(!darwin)("refuses a shell event another plugin locked, since the check could not hold", async () => {
+    const { emit } = await started();
+    const wrapper = path.join(fixture, "package", "bin", "opencode-secret-guard");
+
+    await expect(
+      emit("shell.create.before", Object.seal({ command: "echo hi", cwd: repo, timeout: 0, shell: wrapper, env: {} })),
+    ).rejects.toThrow(/locked the shell/);
   });
 });
 

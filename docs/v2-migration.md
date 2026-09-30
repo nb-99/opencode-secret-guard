@@ -217,7 +217,9 @@ leaves the checks passing.
    - Registers `ctx.shell.hook("create.before")`. In `shell+files` mode it
      throws unless `event.shell` resolves to this package's wrapper.
    - Registers `ctx.tool.hook("execute.before")` with the file and refusal
-     checks, and records glob/grep inputs by `event.id`.
+     checks, and records glob/grep inputs by `event.id`. *The hook later pins
+     `event.tool` and `event.input`, because a hook that runs later can change
+     both.*
    - Registers `ctx.tool.hook("execute.after")` for glob and grep. On
      `status: "completed"` it filters `result.output`, rebuilds
      `result.content` in the format above and updates `result.metadata`
@@ -262,9 +264,10 @@ leaves the checks passing.
 
 ## Risks
 
-- **Hook order.** A plugin whose hook runs after this one can still change
-  `event.input` or `event.shell`. V1 has the same exposure; neither version
-  offers ordering control.
+- **Hook order.** A plugin whose hook runs after this one could change
+  `event.tool`, `event.input` or `event.shell`; neither version offers ordering
+  control. The live check confirmed it on V2 2.0.20, so the V2 adapter now pins
+  all three (see `docs/design.md`). V1 keeps the exposure.
 - **Error display.** How V2 shows an error thrown from `execute.before` or
   `create.before` is unverified. The smoke test covers it.
 - **API drift.** The V2 findings come from 2.0.16 and the `v2` branch head.
@@ -345,6 +348,8 @@ the minimum, as well as a current release.
   source.
 - Hook order: register a second plugin whose hook changes `event.input` or
   `event.shell` after this one, and confirm the exposure the README documents.
+  *2.0.20: both changes took effect. The adapter now pins the tool, its input
+  and the shell; re-check that the same probe is refused.*
 
 **Directory and paths**
 - `ctx.location.directory` equals the directory the tools resolve relative paths
