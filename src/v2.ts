@@ -25,11 +25,7 @@ interface ToolAfter {
   result?: { output?: unknown; content?: unknown; metadata?: unknown };
 }
 
-/**
- * The slice of V2's plugin context this adapter uses. Typed structurally for
- * the reason src/index.ts gives; the shapes were read from `@opencode/plugin`
- * 2.0.16 and every field is checked where it enters.
- */
+/** V2's context subset; see index.ts for the structural typing rationale. */
 export interface V2Context {
   readonly location: { readonly directory: string };
   readonly shell: {
@@ -160,18 +156,10 @@ function frozenCopy(value: unknown): unknown {
 }
 
 /**
- * Checks a tool call and keeps it checked until V2 runs it. V2 picks the tool
- * by `event.tool` and runs it with `event.input` after every hook, so a later
- * hook that renames the tool or assigns an input gets the new pair checked.
- * A guarded tool's input is a frozen copy: changing it in place throws, which
- * rejects the call, and a getter cannot answer differently after the check.
- * V2's own input hooks and rtk run before user plugins and assign rather than
- * mutate. An unguarded tool's input stays as it is until a rename makes the
- * tool guarded.
- *
- * Checking inside the tool's executor instead would also see renames that
- * happen in a session's tool definitions, but a promise plugin cannot wrap an
- * executor without V2 turning the tool's own failures into defects.
+ * Recheck the tool/input pair on assignment; freeze a copy of guarded inputs
+ * so in-place mutations and changing getters cannot bypass the check.
+ * Unguarded inputs stay mutable until a rename makes the call guarded.
+ * See docs/design.md for hook ordering and the rejected executor wrapper.
  */
 function pinToolCall(event: ToolBefore, check: (tool: string, input: unknown) => void): void {
   const verified = (tool: string, input: unknown) => {

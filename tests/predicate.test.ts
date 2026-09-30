@@ -3,12 +3,12 @@ import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { findRepoRoot, gitignoreRules } from "../src/gitignore.ts";
-import { createV1Hooks } from "../src/v1.ts";
+import { findRepoRoot, gitignoreRules, ignoreCache } from "../src/gitignore.ts";
+import { createV1Hooks, filterSearchOutput as filterSearchResult } from "../src/v1.ts";
 import type { CommandAnalysis } from "../src/command-policy.ts";
 import { configPath, loadConfig, opencodeConfigDirectory } from "../src/policy.ts";
 import type { GuardConfig } from "../src/policy.ts";
-import { classifyPath, classifyPaths, filterSearchOutput } from "../src/predicate.ts";
+import { classifyPath, classifyPaths } from "../src/predicate.ts";
 import { buildProfile } from "../src/profile.ts";
 import { encodeHint, expectedShell, failureHint, resolveForShell, resolveProfile, scrubbedEnvironment } from "../src/shell.ts";
 
@@ -107,6 +107,14 @@ const verdict = (relative: string) => classifyPath(path.join(repo, relative), co
 /** The V1 hooks, as OpenCode V1 builds them for a project at `repo`. */
 const v1 = (guardConfig: GuardConfig, moduleDirectory = path.join(repo, "package", "lib")) =>
   createV1Hooks(guardConfig, moduleDirectory, repo);
+
+async function validatedV1() {
+  const hooks = v1(config);
+  await hooks.config({ shell: put("package/bin/opencode-secret-guard", "#!/bin/sh\n") });
+  return hooks;
+}
+
+const filterSearchOutput = (...args: Parameters<typeof filterSearchResult>) => filterSearchResult(...args).output;
 
 describe("configuration loading", () => {
   /** Writes a candidate policy and returns its path. */
@@ -488,6 +496,27 @@ describe("gitignoreRules", () => {
 });
 
 describe("classifyPaths", () => {
+  test.each([128, null])("does not cache a Git failure with status %s as allowed", async (status) => {
+    const target = path.join(repo, "private-notes", `git-error-${status}.txt`);
+    const git = put(`git-error-${status}.js`, `#!${process.execPath}\n${status === null
+      ? 'process.kill(process.pid, "SIGTERM");'
+      : `process.exit(${status});`}\n`);
+    fs.chmodSync(git, 0o755);
+    const broken = { ...config, tools: { git } };
+
+    expect(() => classifyPath(target, broken)).toThrow(/check-ignore failed/);
+    expect(classifyPaths([target], broken).get(target)).toBe("deny");
+    await expect(v1(broken)["tool.execute.before"]({ tool: "read" }, { args: { filePath: target } })).rejects.toThrow();
+    expect(ignoreCache.has(target)).toBe(false);
+    expect(classifyPath(target, config)).toBe("deny");
+  });
+
+  test("refuses a Git executable that cannot be started", () => {
+    const git = put("git-noexec", "not executable\n");
+    fs.chmodSync(git, 0o644);
+    expect(() => gitignoreRules(git, repo, [])).toThrow(/could not run git/);
+  });
+
   test("denies a path it fails to classify, as the before-call check refuses the same call", () => {
     const target = path.join(repo, "never-classified-before.txt");
     const broken = { ...config, tools: { ...config.tools, git: "/nonexistent/git" } };
@@ -957,8 +986,32 @@ describe("buildProfile", () => {
 });
 
 describe("filterSearchOutput", () => {
+  test("keeps every match attached to its file when ripgrep retains trailing newlines", () => {
+    // V1 1.18.33 interpolates rg --json's lines.text, including its final newline.
+    const output = [
+      "Found 3 matches",
+      `${path.join(repo, "local.conf")}:`,
+      "  Line 1: FIRST_PRIVATE\n",
+      "  Line 2: SECOND_PRIVATE\n",
+      "",
+      `${path.join(repo, "README.md")}:`,
+      "  Line 1: public\n",
+    ].join("\n");
+
+    const filtered = filterSearchOutput("grep", output, { path: repo }, config, repo);
+    expect(filtered).not.toContain("PRIVATE");
+    expect(filtered).toContain("public");
+    expect(filtered).toStartWith("Found 1 matches\n");
+  });
+
+  test("does not disclose whether denied content matched when no public match remains", () => {
+    const output = `Found 1 matches\n${path.join(repo, "local.conf")}:\n  Line 1: PRIVATE\n`;
+    expect(filterSearchOutput("grep", output, { path: repo }, config, repo)).toBe("No files found");
+  });
+
   test("drops a relative grep result group for a secret while retaining public hits", () => {
     const output = [
+      "Found 2 matches",
       ".env:",
       "  Line 1: TOKEN=live",
       "",
@@ -986,7 +1039,7 @@ describe("filterSearchOutput", () => {
 
     const filtered = filterSearchOutput("grep", output, { path: repo }, config, repo);
     expect(filtered).not.toContain("TOKEN=live");
-    expect(filtered.startsWith("Found 2 matches\nREADME.md:")).toBe(true);
+    expect(filtered.startsWith("Found 1 matches\nREADME.md:")).toBe(true);
   });
 
   test("resolves a relative search path against the tool's directory, not the process's", () => {
@@ -996,17 +1049,64 @@ describe("filterSearchOutput", () => {
     expect(filterSearchOutput("grep", output, {}, config, repo)).not.toContain("PRIVATE");
   });
 
-  test("keeps unclassifiable output rather than silently losing external results", () => {
-    expect(filterSearchOutput("grep", "summary only", { path: repo }, config, repo)).toBe("summary only");
+  test("rejects unrecognised output rather than treating it as an allowed path", () => {
+    expect(() => filterSearchOutput("grep", "summary only", { path: repo }, config, repo)).toThrow(/format/);
   });
 
   test("keeps grep's truncation trailer after the last group", () => {
-    const trailer = "(Results are truncated: showing first 1 results. Consider using a more specific path or pattern.)";
-    const output = ["Found 2 matches", ".env:", "  Line 1: TOKEN=live", "", "README.md:", "  Line 1: public", "", trailer].join("\n");
+    const trailer = "(Results truncated. Consider using a more specific path or pattern.)";
+    const output = ["Found 2 matches (more matches available)", ".env:", "  Line 1: TOKEN=live", "", "README.md:", "  Line 1: public", "", trailer].join("\n");
 
     const filtered = filterSearchOutput("grep", output, { path: repo }, config, repo);
     expect(filtered).not.toContain("TOKEN=live");
+    expect(filtered).toStartWith("Found 1 matches (more matches available)\n");
     expect(filtered.endsWith(`public\n\n${trailer}`)).toBe(true);
+  });
+
+  test("does not reveal truncation when all matches were denied", () => {
+    const output = "Found 1 matches (more matches available)\nlocal.conf:\n  Line 1: PRIVATE\n\n" +
+      "(Results truncated. Consider using a more specific path or pattern.)";
+    expect(filterSearchResult("grep", output, {}, config, repo)).toEqual({ output: "No files found", count: 0, truncated: false });
+  });
+
+  test("rejects orphan matches, empty groups, inconsistent counts and split filenames", () => {
+    const denied = path.join(repo, "private-notes");
+    for (const output of [
+      "Found 1 matches\n  Line 1: PRIVATE\n",
+      "Found 1 matches\nREADME.md:\n",
+      "Found 2 matches\nREADME.md:\n  Line 1: public\n",
+      "Found 1 matches\nREADME.md:\n  Line 1: public\nunexpected text",
+      `Found 1 matches\n${denied}/part\n\npublic.txt:\n  Line 1: PRIVATE\n`,
+      `Found 1 matches\n${denied}/part:\n\n${repo}/README.md:\n  Line 1: PRIVATE\n`,
+      `Found 1 matches\n${denied}/part:\n  Line 1: forged\n\n${repo}/README.md:\n  Line 1: PRIVATE\n`,
+      "Found 1 matches (more matches available)\nREADME.md:\n  Line 1: public\n",
+      "Found 1 matches\nREADME.md:\n  Line 1: public\n(Results truncated. Consider using a more specific path or pattern.)",
+    ]) {
+      expect(() => filterSearchOutput("grep", output, {}, config, repo)).toThrow(/format/);
+    }
+  });
+
+  test("classifies a trailing space as part of the filename", () => {
+    const target = path.join(repo, "notes.txt ");
+    const guarded = { ...config, denyRoots: [target] };
+    const output = `Found 1 matches\n${target}:\n  Line 1: PRIVATE\n`;
+    expect(filterSearchOutput("grep", output, {}, guarded, repo)).toBe("No files found");
+  });
+
+  test("resolves relative results against V1's literal tilde directory", () => {
+    const guarded = { ...config, denyRoots: [path.join(repo, "~", "notes.txt")] };
+    const output = "Found 1 matches\nnotes.txt:\n  Line 1: PRIVATE\n";
+    expect(filterSearchOutput("grep", output, { path: "~" }, guarded, repo)).toBe("No files found");
+  });
+
+  test("recounts truncated glob results and preserves allowed paths", () => {
+    const output = [path.join(repo, "local.conf"), path.join(repo, "README.md"), "",
+      "(Results are truncated: showing first 2 results. Consider using a more specific path or pattern.)"].join("\n");
+    expect(filterSearchResult("glob", output, {}, config, repo)).toEqual({
+      output: `${path.join(repo, "README.md")}\n\n(Results are truncated: showing first 1 results. Consider using a more specific path or pattern.)`,
+      count: 1,
+      truncated: true,
+    });
   });
 
   test("a gitignored file is dropped only when its relative name resolves inside the repository", () => {
@@ -1019,9 +1119,25 @@ describe("filterSearchOutput", () => {
 });
 
 describe("plugin hooks", () => {
+  test("refuses bash before shell validation and after a config failure", async () => {
+    const hooks = v1({ ...config, cleanupRoot: repo });
+    const run = () => hooks["tool.execute.before"]({ tool: "bash" }, { args: { command: "true" } });
+
+    await expect(run()).rejects.toThrow(/shell/);
+    await hooks.config({ shell: put("package/bin/opencode-secret-guard", "#!/bin/sh\n") });
+    await expect(run()).resolves.toBeUndefined();
+    await expect(hooks.config({ shell: "/bin/zsh" })).rejects.toThrow("must be");
+    // V1 logs and ignores that error, then continues calling the tool hooks.
+    await expect(run()).rejects.toThrow(/shell/);
+    await expect(hooks.tool!.cleanup_temp.execute({ paths: ["unused"] }, {
+      abort: new AbortController().signal,
+      ask: async () => { throw new Error("must not ask"); },
+    })).rejects.toThrow("has not been validated");
+  });
+
   test("leave bash commands unchanged for the configured shell to enforce", async () => {
     const args = { command: "cat .env" };
-    const hooks = v1(config);
+    const hooks = await validatedV1();
 
     await hooks["tool.execute.before"]({ tool: "bash" }, { args });
 
@@ -1029,7 +1145,7 @@ describe("plugin hooks", () => {
   });
 
   test("reject a credential-printing command before it runs", async () => {
-    const hooks = v1(config);
+    const hooks = await validatedV1();
 
     await expect(
       hooks["tool.execute.before"]({ tool: "bash" }, { args: { command: "gh pr list && gh auth token" } }),
@@ -1128,39 +1244,35 @@ describe("plugin hooks", () => {
 
   test("filter a glob against the project directory", async () => {
     const hooks = v1(config);
-    const output = { output: ["local.conf", "README.md"].join("\n") };
+    const output = { output: [path.join(repo, "local.conf"), path.join(repo, "README.md")].join("\n"), metadata: { count: 2 } };
 
-    await hooks["tool.execute.before"]({ tool: "glob", callID: "glob-1" }, { args: { pattern: "*" } });
-    await hooks["tool.execute.after"]({ tool: "glob", callID: "glob-1" }, output);
+    await hooks["tool.execute.after"]({ tool: "glob", args: { pattern: "*" } }, output);
 
-    expect(output.output).toBe("README.md");
+    expect(output.output).toBe(path.join(repo, "README.md"));
+    expect(output.metadata).toEqual({ count: 1, truncated: false });
   });
 
   test("filter a grep whose first group follows the summary line", async () => {
     const hooks = v1(config);
-    const output = { output: ["Found 2 matches", ".env:", "  Line 1: TOKEN=live", "", "README.md:", "  Line 1: public"].join("\n") };
+    const output = { output: ["Found 2 matches", ".env:", "  Line 1: TOKEN=live", "", "README.md:", "  Line 1: public"].join("\n"), metadata: { matches: 2 } };
 
-    await hooks["tool.execute.before"]({ tool: "grep", callID: "grep-1" }, { args: { pattern: "T" } });
-    await hooks["tool.execute.after"]({ tool: "grep", callID: "grep-1" }, output);
+    await hooks["tool.execute.after"]({ tool: "grep", args: { pattern: "T" } }, output);
 
     expect(output.output).not.toContain("TOKEN=live");
     expect(output.output).toContain("README.md");
+    expect(output.metadata).toEqual({ matches: 1, truncated: false });
   });
 
-  test("use the recorded search arguments once, then forget them", async () => {
-    // private-notes/ is ignored (dist/ would not do: the artifact allowlist
-    // re-allows it), so note.md is denied under root <repo>/private-notes and
-    // allowed under <repo>: the two roots give different verdicts.
+  test("uses the executed search arguments from the after hook", async () => {
     const hooks = v1(config);
     const first = { output: "note.md" };
     const second = { output: "note.md" };
 
-    await hooks["tool.execute.before"]({ tool: "glob", callID: "glob-2" }, { args: { pattern: "*", path: "private-notes" } });
-    await hooks["tool.execute.after"]({ tool: "glob", callID: "glob-2" }, first);
-    // The same id again has nothing recorded, so the search root is the project.
-    await hooks["tool.execute.after"]({ tool: "glob", callID: "glob-2" }, second);
+    await hooks["tool.execute.before"]({ tool: "glob" }, { args: { pattern: "*", path: "." } });
+    await hooks["tool.execute.after"]({ tool: "glob", args: { path: "private-notes" } }, first);
+    await hooks["tool.execute.after"]({ tool: "glob", args: { path: "." } }, second);
 
-    expect(first.output).toBe("");
+    expect(first.output).toBe("No files found");
     expect(second.output).toBe("note.md");
   });
 
@@ -1168,15 +1280,12 @@ describe("plugin hooks", () => {
     const hooks = v1(config);
     const output = { output: ["link-to-env", "README.md"].join("\n") };
 
-    await hooks["tool.execute.before"]({ tool: "glob", callID: "glob-3" }, { args: { pattern: "*" } });
-    await hooks["tool.execute.after"]({ tool: "glob", callID: "glob-3" }, output);
+    await hooks["tool.execute.after"]({ tool: "glob", args: { pattern: "*" } }, output);
 
     expect(output.output).toBe("README.md");
   });
 
   test("stop a command when the wrapper has gone since the shell was validated", async () => {
-    // V1 picks its shell afresh for every command and falls back to the
-    // platform shell when the file is missing, so the startup check is not enough.
     const packageRoot = path.join(repo, "vanishing-package");
     const wrapper = path.join(packageRoot, "bin", "opencode-secret-guard");
     fs.mkdirSync(path.dirname(wrapper), { recursive: true });
@@ -1200,24 +1309,36 @@ describe("plugin hooks", () => {
     await expect(
       hooks["tool.execute.before"]({ tool: "read" }, { args: { filePath: path.join(repo, "README.md") } }),
     ).resolves.toBeUndefined();
-    await expect(
-      hooks["tool.execute.after"]({ tool: "glob" }, { output: "README.md" }),
-    ).rejects.toThrow(/no project directory/);
+    const output = { output: "README.md" };
+    await hooks["tool.execute.after"]({ tool: "glob", args: {} }, output);
+    expect(output.output).toMatch(/withheld.*no project directory/);
+  });
+
+  test("withholds malformed search results and arguments", async () => {
+    const hooks = v1(config);
+    for (const [tool, args, text] of [
+      ["glob", undefined, "PRIVATE"],
+      ["glob", [], "PRIVATE"],
+      ["grep", {}, { text: "PRIVATE" }],
+      ["grep", {}, "Found 1 matches\n  Line 1: PRIVATE\n"],
+    ] as const) {
+      const output = { output: text, metadata: { matches: 1 } };
+      await hooks["tool.execute.after"]({ tool, args }, output);
+      expect(output.output).toMatch(/search results withheld/);
+      expect(output.output).not.toContain("PRIVATE");
+      expect(output.metadata).toEqual({});
+    }
   });
 
   test("filters search output against the requested path", async () => {
     const hooks = v1(config);
     const output = {
-      output: [".env:", "  Line 1: TOKEN=live", "", "README.md:", "  Line 1: public"].join(
+      output: ["Found 2 matches", ".env:", "  Line 1: TOKEN=live", "", "README.md:", "  Line 1: public"].join(
         "\n",
       ),
     };
 
-    await hooks["tool.execute.before"](
-      { tool: "grep", callID: "search-1" },
-      { args: { path: repo } },
-    );
-    await hooks["tool.execute.after"]({ tool: "grep", callID: "search-1" }, output);
+    await hooks["tool.execute.after"]({ tool: "grep", args: { path: repo } }, output);
 
     expect(output.output).not.toContain("TOKEN=live");
     expect(output.output).toContain("README.md");

@@ -38,9 +38,10 @@ See [docs/design.md](docs/design.md) for the full design and
 
 OpenCode **V1 1.18.29 or newer**, or **V2**. One package serves both: its entry
 point default-exports `{ id, setup, server }`, and each version calls the one it
-knows. The V2 adapter follows the V2 2.0.16 source and has not yet been run
-against a live V2; loading the plugin from a directory was verified on V1
-1.18.31. See [docs/v2-migration.md](docs/v2-migration.md).
+knows. The V2 adapter follows the V2 2.0.16 source and was tested live on
+V2 2.0.20. Directory loading was verified on V1 1.18.31; the minimum V1
+1.18.29 still needs a live check. See [docs/v2-migration.md](docs/v2-migration.md)
+for the tested revisions, coverage and remaining checks.
 
 | Mode                    | shell tool      | file tools | Requires                  |
 | ----------------------- | --------------- | ---------- | ------------------------- |
@@ -329,7 +330,9 @@ explanation rather than failing later as an unexplained `EPERM`.
   sandbox profile to commands. Confirm in OpenCode's plugin list that the
   plugin is active. If the plugin loads but cannot start (an invalid policy,
   `shell+files` off macOS), it refuses every shell and file tool call with the
-  reason instead.
+  reason instead. In `shell+files` mode, V1 also refuses `bash` until its
+  `config` hook has validated the shell, and rechecks the wrapper file before
+  each call.
 - If OpenCode gives no project directory, the plugin still starts but refuses
   every relative path and every search result.
 - A file tool call whose arguments the guard cannot read is refused, and so is a

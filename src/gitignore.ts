@@ -26,6 +26,7 @@ export function runGit(
   if (result.error && "code" in result.error && result.error.code === "ENOENT") {
     throw new Error(`secret-guard: "tools.git" names ${git}, which does not exist.`);
   }
+  if (result.error) throw new Error(`secret-guard: could not run git: ${result.error.message}`);
   return { status: result.status, stdout: result.stdout ?? "" };
 }
 
@@ -252,6 +253,9 @@ export function isGitIgnored(git: string, target: string, artifactAllowlist: str
   if (typeof verdict === "boolean") return verdict;
 
   const result = runGit(git, ["-C", verdict.root, "check-ignore", "-q", "--", target]);
+  if (result.status !== 0 && result.status !== 1) {
+    throw new Error(`secret-guard: git check-ignore failed with ${result.status === null ? "no exit status" : `exit status ${result.status}`}.`);
+  }
   const ignored = result.status === 0;
   ignoreCache.set(target, ignored);
   return ignored;
