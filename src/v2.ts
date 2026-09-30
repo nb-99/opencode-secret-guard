@@ -118,6 +118,110 @@ function filterSearchResult(
       };
 }
 
+/** Marks the accessors `pin` installs, so a second guard instance recognises them. */
+const PINNED = Symbol.for("opencode-secret-guard.pinned");
+
+/**
+ * Makes `event[key]` an accessor that V2 and later hooks go through, because V2
+ * passes one event through every plugin's hook in registration order and only
+ * then uses it. Returns false when a second guard instance pinned it already;
+ * its setter checks new values.
+ */
+function pin(event: object, key: string, get: () => unknown, set: (value: unknown) => void): boolean {
+  const descriptor = Object.getOwnPropertyDescriptor(event, key);
+  if (descriptor?.get && PINNED in descriptor.get) return false;
+  if (descriptor?.configurable === false) {
+    throw new Error(`secret-guard: another plugin locked the ${key}, so the guard cannot keep it checked.`);
+  }
+  Object.defineProperty(event, key, {
+    enumerable: true,
+    configurable: false,
+    get: Object.assign(get, { [PINNED]: true }),
+    set,
+  });
+  return true;
+}
+
+/** A structured copy of `value` with every object in it frozen. */
+function frozenCopy(value: unknown): unknown {
+  let copy: unknown;
+  try {
+    copy = structuredClone(value);
+  } catch {
+    throw new Error("secret-guard: a tool call carries arguments the guard cannot copy.");
+  }
+  const freeze = (item: unknown) => {
+    if (typeof item !== "object" || item === null) return;
+    Object.values(item).forEach(freeze);
+    Object.freeze(item);
+  };
+  freeze(copy);
+  return copy;
+}
+
+/**
+ * Checks a tool call and keeps it checked until V2 runs it. V2 picks the tool
+ * by `event.tool` and runs it with `event.input` after every hook, so a later
+ * hook that renames the tool or assigns an input gets the new pair checked.
+ * A guarded tool's input is a frozen copy: changing it in place throws, which
+ * rejects the call, and a getter cannot answer differently after the check.
+ * V2's own input hooks and rtk run before user plugins and assign rather than
+ * mutate. An unguarded tool's input stays as it is until a rename makes the
+ * tool guarded.
+ *
+ * Checking inside the tool's executor instead would also see renames that
+ * happen in a session's tool definitions, but a promise plugin cannot wrap an
+ * executor without V2 turning the tool's own failures into defects.
+ */
+function pinToolCall(event: ToolBefore, check: (tool: string, input: unknown) => void): void {
+  const verified = (tool: string, input: unknown) => {
+    if (!guardsTool(tool)) return input;
+    const copy = frozenCopy(input);
+    check(tool, copy);
+    return copy;
+  };
+  let tool = event.tool;
+  let input = verified(tool, event.input);
+  const pinned = pin(
+    event,
+    "tool",
+    () => tool,
+    (name) => {
+      input = verified(String(name), input);
+      tool = String(name);
+    },
+  );
+  if (!pinned) return;
+  pin(
+    event,
+    "input",
+    () => input,
+    (value) => {
+      input = verified(tool, value);
+    },
+  );
+}
+
+/**
+ * Checks `event.shell` and keeps it at the checked value, because a
+ * `create.before` hook of a plugin loaded later could otherwise replace it.
+ * Assigning a new shell checks that one too. `env` stays writable: V2 sets it
+ * after the hooks.
+ */
+function pinShell(event: { shell?: unknown }, check: (shell: unknown) => void): void {
+  let current = event.shell;
+  check(current);
+  pin(
+    event,
+    "shell",
+    () => current,
+    (shell) => {
+      check(shell);
+      current = shell;
+    },
+  );
+}
+
 /**
  * Registers the guard on OpenCode V2. The shell check runs on every shell the
  * host creates, because V2 resolves the configured shell afresh and falls back
@@ -130,10 +234,14 @@ export async function setupV2(ctx: V2Context, guardConfig: GuardConfig, moduleDi
   if (guardConfig.mode === "files-only") {
     process.stderr.write(FILES_ONLY_WARNING);
   } else {
-    await ctx.shell.hook("create.before", (event) => validateShell(event.shell, moduleDirectory));
+    await ctx.shell.hook("create.before", (event) =>
+      pinShell(event, (shell) => validateShell(shell, moduleDirectory)),
+    );
   }
 
-  await ctx.tool.hook("execute.before", (event) => checkToolCall(event.tool, event.input, guardConfig, base));
+  await ctx.tool.hook("execute.before", (event) =>
+    pinToolCall(event, (tool, input) => checkToolCall(tool, input, guardConfig, base)),
+  );
 
   await ctx.tool.hook("execute.after", (event) => {
     const tool = String(event.tool ?? "").toLowerCase();
@@ -172,9 +280,7 @@ export async function setupRefusingV2(ctx: V2Context, message: string): Promise<
   const refuse = () => {
     throw new Error(message);
   };
-  await ctx.tool.hook("execute.before", (event) => {
-    if (guardsTool(event.tool)) refuse();
-  });
+  await ctx.tool.hook("execute.before", (event) => pinToolCall(event, refuse));
   try {
     await ctx.shell.hook("create.before", refuse);
   } catch (error) {

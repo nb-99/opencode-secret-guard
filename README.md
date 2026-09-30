@@ -311,10 +311,19 @@ explanation rather than failing later as an unexplained `EPERM`.
 
 - MCP servers and the LSP run outside the sandbox.
 - The guard's hooks and other plugins' hooks run in the order OpenCode
-  registers them, and neither version lets a plugin choose its place. A plugin
-  whose hook runs later can still change a tool's input or the shell.
+  registers them, and neither version lets a plugin choose its place. On V2 the
+  guard pins what it checked: a hook that runs later and assigns a new tool
+  name, input or shell gets it checked again, and one that changes a checked
+  input in place fails and rejects the call. On V1 a hook that runs later can
+  still change a tool's arguments. A plugin runs unsandboxed in OpenCode's
+  process either way, so this protects against plugins that rewrite calls, not
+  against a plugin that renames a tool for the model, replaces a tool or reads
+  files itself. The shell environment is not checked, so a plugin that sets a
+  variable the wrapper reads (`OPENCODE_SECRET_GUARD_CONFIG`,
+  `SECRET_GUARD_BUN`) can redirect it.
 - The interactive terminal (V2's PTY service) is not a model tool and is not
-  guarded, on V1 or V2.
+  guarded, on V1 or V2. On V2, commands the user runs with `!` in the prompt go
+  through the configured shell and are guarded.
 - If OpenCode cannot load the plugin (a bad path) it starts without it, and the
   file tools are unguarded. The configured shell wrapper still applies its
   sandbox profile to commands. Confirm in OpenCode's plugin list that the

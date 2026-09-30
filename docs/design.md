@@ -629,6 +629,32 @@ it creates. V1 runs it once from the `config` hook, and its before-call hook
 repeats the existence check on every `bash` call, since V1 also picks its shell
 afresh per command.
 
+Neither host lets a plugin choose where its hooks run. V2 passes one
+`execute.before` event through every plugin's hook in turn, then picks the tool
+by `event.tool` and runs it with `event.input`, so a plugin loaded after the
+guard (a project's own, for example) could change either after the check. The
+V2 adapter therefore pins what it checked: `event.tool`, `event.input` and the
+shell event's `shell` become accessors that return the checked value and check
+any value assigned later, a renamed tool against the current input and a new
+input against the current tool. A guarded tool's input is a frozen copy, so a
+hook that changes it in place throws, which rejects the call, and a getter
+cannot answer differently after the check. V2's own input hooks and rtk run
+before user plugins and assign rather than mutate. An unguarded tool's input
+stays mutable, and the shell event's `env` stays writable because V2 sets it
+after the hooks.
+
+Checking inside each tool's executor, through `tool.transform`, would also see
+tools a request-shaping hook renames for the model, since V2 maps such an alias
+back to the real tool after the hooks. It is not done because V2's promise
+plugin adapter runs a wrapped executor through `Effect.promise`, which turns
+every failure of the tool itself (a missing file, an edit that does not apply)
+into a defect: `execute.after` no longer sees the error and the Plan agent's
+rewrite of refused edits stops working. No built-in shaping hook renames a
+tool. A plugin that renames one, replaces a tool with its own implementation,
+or reads files itself is out of reach; the guard protects against plugins that
+rewrite calls. V1 keeps the hook-order exposure, because it could not be tested
+against a live V1.
+
 ## Roots
 
 `denyRoots` (for example `~/.config/secrets`, or a notes vault) are opaque:
