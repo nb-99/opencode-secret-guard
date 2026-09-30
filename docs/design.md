@@ -65,7 +65,9 @@ The wrapper and the plugin ship as one package:
 ```text
 opencode-secret-guard/
 ├── bin/opencode-secret-guard             # the configured shell
-├── lib/plugin.ts                         # plugin entry point (hooks)
+├── lib/index.ts                          # plugin entry point: { id, setup, server }
+├── lib/v1.ts, lib/v2.ts                  # host adapters
+├── lib/guard.ts                          # version-independent tool-call policy
 ├── lib/cli.ts                            # profile resolver the shell calls
 └── share/opencode-secret-guard/default-policy.json
 ```
@@ -157,7 +159,7 @@ The shell receives whatever command `rtk.ts` has produced. It **fails closed**:
 a missing `sandbox-exec`, an invalid shell invocation, a missing resolver or
 `bun`, or a profile that cannot be generated aborts the command.
 
-This is safe only because OpenCode's bash tool is not a persistent shell — `cd`
+This is safe only because OpenCode's shell tool (`bash` on V1, `shell` on V2) is not a persistent shell — `cd`
 and exported variables never survived between calls anyway.
 
 ## Profile structure
@@ -376,10 +378,10 @@ one exception is `$_`, the previous segment's last word, which an inert
 is denied and the variable scrubbed, so the refusal scan is a courtesy on top
 of a boundary rather than the boundary itself.
 
-Both the configured shell and the plugin's `tool.execute.before` hook refuse,
-with one message naming the invocation. The hook covers `files-only` mode,
-where no wrapper backs the plugin, and gives a clear error before anything
-runs.
+Both the configured shell and the plugin's before-call hook (`tool.execute.before`
+on V1, `execute.before` on V2) refuse, with one message naming the invocation.
+The hook covers `files-only` mode, where no wrapper backs the plugin, and gives
+a clear error before anything runs.
 
 ## Setuid binaries
 
@@ -541,12 +543,17 @@ command carrying `2>&1` silently ran strict.
 ## Layer 2 — file tools
 
 `read`, `write`, `edit`, `patch`, `list`, `glob`, and `grep` run the same
-predicate. `glob` results are filtered per line and `grep` results per hit
-group. The predicate mirrors the
+predicate. On V1, `glob` results are filtered per line and `grep` results per hit
+group; on V2 the structured entries are filtered (see "Two hosts, one policy").
+A patch tool (`apply_patch` on V1, `patch` on V2) is classified against
+every path named by an `Add File`, `Update File`, `Delete File` or `Move to`
+header, so a patch cannot write a file its own path argument would refuse. The
+predicate mirrors the
 profile's ordering, resolves each target's _own_ repository root, and defaults
-to **allow** whenever it cannot classify a result — the opposite of the
-`opencode-ignore` plugin it replaces, which defaulted to dropping and silently
-lost every hit outside the current project.
+to **allow** for a path that falls under no rule, such as a hit outside the
+current project — the opposite of the `opencode-ignore` plugin it replaces,
+which defaulted to dropping and silently lost every one of those. A path whose
+classification *fails* is denied.
 
 The predicate takes the operation: `write`, `edit` and `patch` additionally
 consult the tamper-protected set, so the model cannot edit `opencode.json` or
@@ -564,6 +571,59 @@ result; at ~11 ms a spawn, a hundred hits took over a second before. Repository
 roots are found by walking up for a `.git` entry rather than spawning
 `git rev-parse`. A unit test asserts the batch and single-path predicates return
 identical verdicts, so the fast path cannot drift from the audited one.
+
+### Two hosts, one policy
+
+OpenCode V1 and V2 have different plugin APIs but the same tools, so the policy
+lives in `src/guard.ts` and each host has a thin adapter that translates its
+events into `checkToolCall`:
+
+| Concern        | V1 (`src/v1.ts`)                         | V2 (`src/v2.ts`)                               |
+| -------------- | ---------------------------------------- | ---------------------------------------------- |
+| Entry          | `server(input)`                          | `setup(ctx)`                                   |
+| Shell check    | `config` hook, once                      | `shell` `create.before`, on every shell        |
+| Before a call  | `tool.execute.before(input, output)`     | `tool` `execute.before(event)`                 |
+| Filter results | rewrite the `output` string              | rewrite the structured `output`, rebuild text  |
+| Base directory | `directory` passed to `server`           | `ctx.location.directory`                       |
+| `cleanup_temp` | registered                               | not registered (issue #16)                     |
+
+Relative tool paths resolve against the host's directory, never the process's,
+and a leading `~` expands the way V2's own tools expand it. V1 leaves `~`
+literal, and the guard cannot tell which host it runs under, so a path starting
+with `~` is classified both ways.
+
+When the host gives no absolute directory, both adapters still start, because a
+plugin that fails to load guards no file tool. They refuse every relative path
+and every search result, which cannot be placed, and still classify absolute
+paths. V1 used to fall back to the process's directory, which would silently
+resolve relative paths against the wrong place.
+
+A file tool call whose arguments carry no readable path is refused, not allowed,
+and so is a search result the adapter cannot check, whatever its `status` says.
+This is about the shape of the call or result, not about path classification: a
+well-formed path that falls under no rule is allowed, as described in Layer 2.
+A path whose classification itself fails (git missing, say) is denied, in search
+results as in the before-call check. The compiler cannot see a host renaming a field, so the failure has to be a
+visible refusal rather than an unguarded tool. V2's `read` also opens a sibling
+whose name is canonically equal to a missing one (NFC, no-break spaces, curly
+quotes) and authorizes only that sibling, so the guard classifies those siblings
+as well.
+
+V2's `execute.after` cannot fail, so a search result the adapter does not
+recognise is replaced by a notice rather than passed through. V2 filters the
+structured entries and rebuilds the text from what survives, instead of parsing
+paths back out of text, so a directory name containing a blank line cannot hide
+a group from the filter. V1's result is one string and is parsed; the
+`Found N matches` summary grep prints above its first group is set aside first.
+
+Both hosts catch a failure while loading a plugin and continue without it, so a
+startup check cannot stop OpenCode, and a plugin that fails to load guards no
+file tool. What still holds is the configured shell wrapper. Both hosts replace
+a configured shell that is not a file with the platform shell, so
+`validateShell` also requires the wrapper to exist. V2 runs it on every shell
+it creates. V1 runs it once from the `config` hook, and its before-call hook
+repeats the existence check on every `bash` call, since V1 also picks its shell
+afresh per command.
 
 ## Roots
 
@@ -587,6 +647,12 @@ OpenCode derives its own `…/opencode` scratch path from; the randomized macOS
 per-user path never has to appear in the policy. OpenCode validates the public Zod schema, and the tool
 validates it again inside `execute` because preceding hooks can rewrite
 arguments. The package vendors only Zod, not the OpenCode SDK.
+
+The tool exists on OpenCode V1 only. V2 gives a plugin tool no way to request
+permission for paths the tool computes (its context has no `ask`, and
+`ctx.permission` can list and answer requests but not open one), and the tool
+must not delete anything without that prompt. The V2 adapter therefore does not
+register it and says so at startup. Tracked in issue #16.
 
 The tool resolves every target beneath an existing root, rejects symlink
 operands and traversal, inventories descendants without following symlinks,

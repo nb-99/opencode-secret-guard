@@ -73,7 +73,7 @@ in
       description = ''
         `shell+files` enforces the boundary in the kernel and requires macOS
         with `sandbox-exec`. `files-only` keeps the portable file-tool layer and
-        leaves the bash tool unguarded, so it must be chosen deliberately.
+        leaves the shell tool unguarded, so it must be chosen deliberately.
       '';
     };
 
@@ -238,9 +238,13 @@ in
     pluginPath = mkOption {
       type = types.nullOr types.str;
       readOnly = true;
-      default = if cfg.enable then "file://${cfg.package}/lib/plugin.ts" else null;
-      defaultText = literalExpression ''"file://''${package}/lib/plugin.ts", or null'';
-      description = "Add this to `programs.opencode.settings.plugin`.";
+      default = if cfg.enable then "file://${cfg.package}/lib" else null;
+      defaultText = literalExpression ''"file://''${package}/lib", or null'';
+      description = ''
+        Add this to `programs.opencode.settings.plugin`. It names a directory:
+        OpenCode V1 (1.18.29 or newer) and V2 both load the `index.ts` in it,
+        and V2 accepts the `plugin` key and rewrites it to `plugins`.
+      '';
     };
 
     policyFile = mkOption {

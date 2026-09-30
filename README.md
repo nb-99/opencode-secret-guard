@@ -14,9 +14,10 @@ This enforces the boundary where expansion cannot reach it:
   macOS `sandbox-exec` profile, without rewriting the command shown in the TUI.
   Enforcement is in the kernel, so it covers variable expansion, globs,
   redirections, `find -exec`, interpreters, archivers and recursive greps alike.
-- **file tools** — `read`, `write`, `edit`, `patch`, `list`, `glob` and `grep`
-  run the same policy as a path predicate, and `glob`/`grep` results are
-  filtered.
+- **file tools** — `read`, `write`, `edit`, `patch` (`apply_patch` on V1),
+  `list`, `glob`, `grep` and V1's `lsp` run the same policy as a path predicate, and
+  `glob`/`grep` results are filtered. A patch is checked against every file
+  its headers name.
 
 Both layers are derived from one policy file, and a test compares their verdicts
 against each other on every run.
@@ -34,7 +35,13 @@ See [docs/design.md](docs/design.md) for the full design and
 
 ## Requirements
 
-| Mode                    | bash tool       | file tools | Requires                  |
+OpenCode **V1 1.18.29 or newer**, or **V2**. One package serves both: its entry
+point default-exports `{ id, setup, server }`, and each version calls the one it
+knows. The V2 adapter follows the V2 2.0.16 source and has not yet been run
+against a live V2; loading the plugin from a directory was verified on V1
+1.18.31. See [docs/v2-migration.md](docs/v2-migration.md).
+
+| Mode                    | shell tool      | file tools | Requires                  |
 | ----------------------- | --------------- | ---------- | ------------------------- |
 | `shell+files` (default) | kernel-enforced | guarded    | macOS with `sandbox-exec` |
 | `files-only`            | **unguarded**   | guarded    | anything                  |
@@ -44,6 +51,15 @@ be requested explicitly, it announces itself at startup, and the shell wrapper
 refuses to run under it. `shell+files` never degrades to it automatically: a
 guard that looks installed while guarding far less than the reader assumes is
 worse than one that refuses to start.
+
+### Upgrading from 1.x
+
+- `lib/plugin.ts` no longer exists. Point the plugin entry at the `lib`
+  directory (`file:///…/lib`); Home Manager users get this from `pluginPath`.
+  A stale path makes OpenCode start without the plugin, so the file tools are
+  unguarded until it is fixed.
+- OpenCode V1 older than 1.18.29 is not supported.
+- Confirm in OpenCode's plugin list that the plugin is active.
 
 ## Install with Home Manager
 
@@ -73,6 +89,7 @@ in
   };
 
   programs.opencode.settings = {
+    # V1's key. V2 rewrites `plugin` to its own `plugins` when it loads the config.
     plugin = lib.optional (guard.pluginPath != null) guard.pluginPath;
   }
   // lib.optionalAttrs (guard.shellPath != null) { shell = guard.shellPath; };
@@ -108,10 +125,13 @@ cp result/share/opencode-secret-guard/default-policy.json \
 
 Then point OpenCode at the package:
 
-```json
+```jsonc
 {
+  // The same key on V1 and V2.
   "shell": "/path/to/opencode-secret-guard/bin/opencode-secret-guard",
-  "plugin": ["file:///path/to/opencode-secret-guard/lib/plugin.ts"]
+  // The plugin is a directory; both versions load its index.ts. V2's own name
+  // for this key is "plugins", and it accepts "plugin" too.
+  "plugin": ["file:///path/to/opencode-secret-guard/lib"]
 }
 ```
 
@@ -226,6 +246,13 @@ from your own terminal.
 
 ## Guarded temporary cleanup
 
+> **OpenCode V1 only.** `cleanup_temp` is not registered on V2, and the plugin
+> says so at startup when `cleanupRoot` is set. It asks OpenCode for `edit`
+> permission on every path it will delete, and V2 gives plugin tools no way to
+> ask. Tracked in [#16](https://github.com/nb-99/opencode-secret-guard/issues/16).
+> On V2, leave `cleanupRoot` unset and delete with ordinary `rm`, which the shell
+> guard already confines.
+
 Set `cleanupRoot` to an existing directory such as `$TMPDIR/opencode`, the
 scratch directory OpenCode itself uses, to expose the `cleanup_temp` tool. A
 leading `$TMPDIR` expands to the OpenCode process's temporary directory, so the
@@ -282,6 +309,23 @@ explanation rather than failing later as an unexplained `EPERM`.
 ## Limitations
 
 - MCP servers and the LSP run outside the sandbox.
+- The guard's hooks and other plugins' hooks run in the order OpenCode
+  registers them, and neither version lets a plugin choose its place. A plugin
+  whose hook runs later can still change a tool's input or the shell.
+- The interactive terminal (V2's PTY service) is not a model tool and is not
+  guarded, on V1 or V2.
+- If OpenCode cannot load the plugin (a bad path, an invalid policy) it starts
+  without it, and the file tools are unguarded. The configured shell wrapper
+  still applies its sandbox profile to commands. Confirm in OpenCode's plugin
+  list that the plugin is active.
+- If OpenCode gives no project directory, the plugin still starts but refuses
+  every relative path and every search result.
+- A file tool call whose arguments the guard cannot read is refused, and so is a
+  search result it cannot check, so an OpenCode update that renames a field
+  shows up as an error instead of an unguarded tool.
+- OpenCode V2's `read` lists sibling names in its "file not found" message and
+  in directory listings, and the guard does not filter those. File names are not
+  treated as secret; file contents are.
 - Network access is unrestricted; the mitigation is that a process which cannot
   read a secret cannot exfiltrate it.
 - A relaxed binary's own extension mechanisms are in scope for that binary. This

@@ -10,7 +10,7 @@ let
   typesNodeLock = packageLock.packages."node_modules/@types/node";
   typesNodeUrl = "https://registry.npmjs.org/@types/node/-/node-${typesNodeVersion}.tgz";
 
-  # @opencode-ai/plugin is deliberately absent — see the comment in src/plugin.ts.
+  # @opencode-ai/plugin is deliberately absent — see the comment in src/index.ts.
   typesNode =
     assert pkgs.lib.assertMsg (
       typesNodeLock.version == typesNodeVersion
@@ -76,7 +76,7 @@ in
         export OPENCODE_SECRET_GUARD_CONFIG=${testPolicy}
         git config --global user.email test@example.com
         git config --global user.name test
-        bun test pkg/tests/group.test.ts pkg/tests/predicate.test.ts pkg/tests/tamper.test.ts pkg/tests/cleanup.test.ts
+        bun test pkg/tests/group.test.ts pkg/tests/predicate.test.ts pkg/tests/tamper.test.ts pkg/tests/cleanup.test.ts pkg/tests/guard.test.ts pkg/tests/v2.test.ts pkg/tests/index.test.ts
         touch $out
       '';
 
@@ -210,7 +210,7 @@ in
   # <package>/bin/opencode-secret-guard beside <package>/lib.
   layout = pkgs.runCommand "secret-guard-layout" { nativeBuildInputs = [ pkgs.bun ]; } ''
     test -x ${package}/bin/opencode-secret-guard
-    test -f ${package}/lib/plugin.ts
+    test -f ${package}/lib/index.ts
     test -f ${package}/lib/cli.ts
     test -f ${package}/lib/cleanup.ts
     test -f ${package}/lib/node_modules/zod/package.json
@@ -218,6 +218,11 @@ in
     head -1 ${package}/bin/.opencode-secret-guard-wrapped | grep -q '^#!/nix/store/'
     export OPENCODE_SECRET_GUARD_CONFIG=${testPolicy}
     bun -e '
+      // Both hosts read the default export: V2 needs an id and setup, V1 server.
+      const { default: plugin } = await import("${package}/lib/index.ts");
+      if (typeof plugin.id !== "string" || typeof plugin.setup !== "function" || typeof plugin.server !== "function") {
+        throw new Error("lib/index.ts must default-export { id, setup, server }");
+      }
       const { expectedShell } = await import("${package}/lib/shell.ts");
       const expected = expectedShell("${package}/lib");
       if (expected !== "${package}/bin/opencode-secret-guard") {
