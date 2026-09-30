@@ -16,6 +16,6 @@ try {
   process.stdout.write(resolveForShell(command, loadConfig()));
 } catch (error) {
   const message = error instanceof Error ? error.message : String(error);
-  process.stderr.write(`secret-guard: ${message}\n`);
+  process.stderr.write(`secret-guard: ${message.replace(/^secret-guard: /, "")}\n`);
   process.exit(1);
 }
