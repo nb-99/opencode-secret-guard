@@ -76,7 +76,7 @@ in
         export OPENCODE_SECRET_GUARD_CONFIG=${testPolicy}
         git config --global user.email test@example.com
         git config --global user.name test
-        bun test pkg/tests/group.test.ts pkg/tests/predicate.test.ts pkg/tests/tamper.test.ts pkg/tests/cleanup.test.ts pkg/tests/guard.test.ts pkg/tests/v2.test.ts pkg/tests/index.test.ts
+        bun test pkg/tests/*.test.ts
         touch $out
       '';
 

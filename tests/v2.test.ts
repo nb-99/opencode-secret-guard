@@ -6,7 +6,7 @@ import * as path from "node:path";
 import { loadConfig } from "../src/policy.ts";
 import type { GuardConfig } from "../src/policy.ts";
 import { setupV2 } from "../src/v2.ts";
-import type { V2Context } from "../src/v2.ts";
+import { host } from "./support.ts";
 
 const policyPath = process.env.OPENCODE_SECRET_GUARD_CONFIG;
 if (!policyPath) throw new Error("OPENCODE_SECRET_GUARD_CONFIG must be set");
@@ -45,33 +45,6 @@ beforeAll(() => {
 afterAll(() => {
   fs.rmSync(fixture, { recursive: true, force: true });
 });
-
-/** A V2 context that records hook registrations and replays events through them. */
-function host(directory: string | undefined = repo) {
-  const registered = new Map<string, Array<(event: any) => unknown>>();
-  const register = (domain: string) => async (name: string, callback: (event: any) => unknown) => {
-    const key = `${domain}.${name}`;
-    registered.set(key, [...(registered.get(key) ?? []), callback]);
-  };
-  const ctx = {
-    location: { directory },
-    shell: { hook: register("shell") },
-    tool: { hook: register("tool") },
-  } as unknown as V2Context;
-  const emit = async <E>(key: string, event: E): Promise<E> => {
-    for (const callback of registered.get(key) ?? []) await callback(event);
-    return event;
-  };
-  /**
-   * A tool call as V2 runs it: every `execute.before` hook, then the tool the
-   * event names with the event's input. Returns what V2 would run.
-   */
-  const call = async (event: { tool: string; input: unknown }) => {
-    await emit("tool.execute.before", event);
-    return { tool: event.tool, input: event.input as any };
-  };
-  return { ctx, registered, emit, call };
-}
 
 async function started(guardConfig: GuardConfig = portable, directory: string | undefined = repo) {
   const fake = host(directory);
@@ -123,7 +96,7 @@ describe("registration", () => {
     const original = process.platform;
     Object.defineProperty(process, "platform", { value: "linux", configurable: true });
     try {
-      await expect(setupV2(host().ctx, config, packageLib)).rejects.toThrow(/needs macOS/);
+      await expect(setupV2(host(repo).ctx, config, packageLib)).rejects.toThrow(/needs macOS/);
     } finally {
       Object.defineProperty(process, "platform", { value: original, configurable: true });
     }
@@ -190,7 +163,7 @@ describe.skipIf(!darwin)("shell check", () => {
   });
 
   test("rejects the right path when the wrapper file is missing, because V2 would run its platform shell", async () => {
-    const fake = host();
+    const fake = host(repo);
     await setupV2(fake.ctx, config, path.join(fixture, "absent", "lib"));
 
     await expect(
@@ -207,21 +180,24 @@ describe.skipIf(!darwin)("shell check", () => {
 });
 
 describe("tool calls", () => {
-  test("refuses reads and writes of secrets, resolved against the plugin's directory", async () => {
+  test.each<[string, unknown, RegExp | null]>([
+    ["read", { path: ".env" }, /blocked/],
+    ["write", { path: "id_rsa", content: "" }, /blocked/],
+    ["edit", { path: "src/../.env" }, /blocked/],
+    ["read", { path: "README.md" }, null],
+    ["patch", { patchText: "*** Begin Patch\n*** Update File: .env\n@@\n-x\n+y\n*** End Patch" }, /write access to \.env/],
+    ["shell", { command: "aws eks get-token" }, /refusing/],
+    ["shell", { command: "git status" }, null],
+    ["read", undefined, /cannot read/],
+    ["read", { path: 3 }, /named no path/],
+    ["read", { location: ".env" }, /named no path/],
+    ["webfetch", undefined, null],
+  ])("checks %s with input %j against the policy", async (tool, input, refusal) => {
     const { call } = await started();
     expect(process.cwd()).not.toBe(repo);
 
-    await expect(call(before("read", { path: ".env" }))).rejects.toThrow("blocked");
-    await expect(call(before("write", { path: "id_rsa", content: "" }))).rejects.toThrow("blocked");
-    await expect(call(before("edit", { path: "src/../.env" }))).rejects.toThrow("blocked");
-    await expect(call(before("read", { path: "README.md" }))).resolves.toBeDefined();
-  });
-
-  test("refuses a patch that names a secret", async () => {
-    const { call } = await started();
-    const patchText = ["*** Begin Patch", "*** Update File: .env", "@@", "-x", "+y", "*** End Patch"].join("\n");
-
-    await expect(call(before("patch", { patchText }))).rejects.toThrow("write access to .env");
+    if (refusal) await expect(call(before(tool, input))).rejects.toThrow(refusal);
+    else await expect(call(before(tool, input))).resolves.toBeDefined();
   });
 
   test("refuses a misspelled name that V2's read would resolve to an ignored file", async () => {
@@ -234,22 +210,6 @@ describe("tool calls", () => {
       fs.rmSync(path.join(repo, "private note.txt"));
       fs.writeFileSync(path.join(repo, ".gitignore"), "private.txt\n");
     }
-  });
-
-  test("refuses a credential-printing command on the shell tool", async () => {
-    const { call } = await started();
-
-    await expect(call(before("shell", { command: "aws eks get-token" }))).rejects.toThrow(/refusing/);
-    await expect(call(before("shell", { command: "git status" }))).resolves.toBeDefined();
-  });
-
-  test("refuses a file tool call it cannot read rather than letting it through", async () => {
-    const { call } = await started();
-
-    await expect(call(before("read", undefined))).rejects.toThrow(/cannot read/);
-    await expect(call(before("read", { path: 3 }))).rejects.toThrow(/named no path/);
-    await expect(call(before("read", { location: ".env" }))).rejects.toThrow(/named no path/);
-    await expect(call(before("webfetch", undefined))).resolves.toBeDefined();
   });
 });
 
@@ -369,7 +329,7 @@ describe("a hook that runs after the guard", () => {
   });
 
   test.skipIf(!darwin)("keeps checking the shell when a second guard instance is loaded", async () => {
-    const fake = host();
+    const fake = host(repo);
     await setupV2(fake.ctx, config, packageLib);
     await setupV2(fake.ctx, config, packageLib);
     const wrapper = path.join(fixture, "package", "bin", "opencode-secret-guard");

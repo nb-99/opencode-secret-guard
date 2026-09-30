@@ -1,11 +1,11 @@
-# Secret Guard
+# Secret guard
 
 Keeps secrets out of the agent's context. Configured by the policy file;
 implemented by the modules in `src/`.
 
 ## Configuration
 
-the policy file is serialized to JSON, tagged with the `configVersion` of
+The policy file is serialized to JSON, tagged with the `configVersion` of
 the file format, and written to `~/.config/opencode/secret-guard.json`. The
 plugin reads and validates it at runtime — `OPENCODE_SECRET_GUARD_CONFIG`
 overrides the location for tests.
@@ -50,7 +50,7 @@ OpenCode's `permission.bash` rules match the command _string_. That is fine for
 file without ever containing a matchable pattern. Anything built on string
 inspection is defeated by shell expansion.
 
-## Layer 1 — kernel sandbox (bash)
+## Layer 1: kernel sandbox
 
 OpenCode uses the packaged `opencode-secret-guard` executable as its configured
 shell. OpenCode passes it the command produced by earlier hooks as
@@ -84,12 +84,13 @@ still rejecting a wrapper from a different installation.
 Two things the guard runs itself are pinned rather than found: the wrapper's
 interpreter is `#!/bin/bash`, rewritten to the store bash by the Nix build,
 and the git that enumerates ignored files is `tools.git` from the policy.
-Both used to resolve through `PATH`, and `PATH` commonly starts with
-user-writable directories (`/opt/homebrew/bin`, `~/.local/bin`): a sandboxed
-command that planted a `bash` or `git` there would have been run unsandboxed by
-the very next invocation. A missing `tools.git` fails by name — the gitignore
-layer treats "git said nothing" as "nothing is ignored", so a silent spawn
-failure would quietly shrink the boundary.
+`PATH` commonly starts with user-writable directories such as
+`/opt/homebrew/bin` and `~/.local/bin`. Resolving these programs through `PATH`
+would let a sandboxed command plant a replacement that the next invocation runs
+unsandboxed. A missing `tools.git` fails by name. `isGitIgnored` accepts only
+Git's normal exit statuses, 0 for ignored and 1 for not ignored. It rejects
+other statuses without caching a verdict, so a Git failure cannot become an
+allow decision.
 
 One resolver invocation returns the profile path on its first line, a hint on
 the second — prefixed with `!` or `?` for whether it survives a 127 exit — and
@@ -322,10 +323,9 @@ untouched. The kernel suite writes `TAMPER` at each target through the
 generated profile and asserts the file did not change.
 
 The cost is that `brew install`, `npm i -g` and anything else that writes into
-a `PATH` directory fails from the agent shell. On a Nix-managed host that is
-correct; elsewhere it is the price of the boundary. The denial reaches the
-command as a bare `operation not permitted`, so the wrapper names the rule when
-such a command fails — see "Explaining a failure" below.
+a `PATH` directory fails from the agent shell. The denial reaches the command
+as a bare `operation not permitted`, so the wrapper names the relevant rule
+when such a command fails.
 
 ## Refused invocations
 
@@ -540,11 +540,12 @@ Redirection operators are **not** segment boundaries even though they contain
 to invent a segment named `1`, which belongs to no group, so every git or ssh
 command carrying `2>&1` silently ran strict.
 
-## Layer 2 — file tools
+## Layer 2: file tools
 
 `read`, `write`, `edit`, `patch`, `list`, `glob`, and `grep` run the same
-predicate. On V1, `glob` results are filtered per line and `grep` results per hit
-group; on V2 the structured entries are filtered (see "Two hosts, one policy").
+predicate. V1's `lsp` and V2's browser file upload, drop and preview tools also
+use it for reads. V1 filters search text; V2 filters structured entries and
+rebuilds the text. The adapters are described below.
 A patch tool (`apply_patch` on V1, `patch` on V2) is classified against
 every path named by an `Add File`, `Update File`, `Delete File` or `Move to`
 header, so a patch cannot write a file its own path argument would refuse. The
@@ -574,86 +575,73 @@ identical verdicts, so the fast path cannot drift from the audited one.
 
 ### Two hosts, one policy
 
-OpenCode V1 and V2 have different plugin APIs but the same tools, so the policy
-lives in `src/guard.ts` and each host has a thin adapter that translates its
-events into `checkToolCall`:
+`src/guard.ts` checks tool calls for both hosts. `src/v1.ts` and `src/v2.ts`
+translate host events and filter their different search formats.
 
 | Concern        | V1 (`src/v1.ts`)                         | V2 (`src/v2.ts`)                               |
 | -------------- | ---------------------------------------- | ---------------------------------------------- |
 | Entry          | `server(input)`                          | `setup(ctx)`                                   |
-| Shell check    | `config` hook, once                      | `shell` `create.before`, on every shell        |
+| Shell check    | `config` validation, then a `bash` gate  | `shell` `create.before`, on every shell        |
 | Before a call  | `tool.execute.before(input, output)`     | `tool` `execute.before(event)`                 |
-| Filter results | rewrite the `output` string              | rewrite the structured `output`, rebuild text  |
+| Filter results | parse and rebuild the `output` string    | filter structured `output`, rebuild text       |
 | Base directory | `directory` passed to `server`           | `ctx.location.directory`                       |
-| `cleanup_temp` | registered                               | not registered (issue #16)                     |
+| `cleanup_temp` | registered when configured              | not registered (issue #16)                     |
 
-Relative tool paths resolve against the host's directory, never the process's,
-and a leading `~` expands the way V2's own tools expand it. V1 leaves `~`
-literal, and the guard cannot tell which host it runs under, so a path starting
-with `~` is classified both ways.
+Relative tool paths resolve against the host's directory, never the process's.
+The shared call check classifies a leading `~` both literally and expanded,
+because V1 leaves it literal and V2 expands it. Without an absolute host
+directory, the adapters still start but refuse relative paths and all search
+results. Absolute paths can still be checked.
 
-When the host gives no absolute directory, both adapters still start, because a
-plugin that fails to load guards no file tool. They refuse every relative path
-and every search result, which cannot be placed, and still classify absolute
-paths. V1 used to fall back to the process's directory, which would silently
-resolve relative paths against the wrong place.
+The guard refuses file calls with unreadable arguments and withholds search
+results it cannot check. Classification failures deny the affected paths.
+V2's `read` may substitute a canonically equal sibling for a missing name,
+normalizing NFC, no-break spaces and curly quotes. The guard checks those
+siblings too.
 
-A file tool call whose arguments carry no readable path is refused, not allowed,
-and so is a search result the adapter cannot check, whatever its `status` says.
-This is about the shape of the call or result, not about path classification: a
-well-formed path that falls under no rule is allowed, as described in Layer 2.
-A path whose classification itself fails (git missing, say) is denied, in search
-results as in the before-call check. The compiler cannot see a host renaming a field, so the failure has to be a
-visible refusal rather than an unguarded tool. V2's `read` also opens a sibling
-whose name is canonically equal to a missing one (NFC, no-break spaces, curly
-quotes) and authorizes only that sibling, so the guard classifies those siblings
-as well.
+V1's text parser lives in `src/v1.ts`. It reads the actual after-hook arguments
+rather than retaining before-hook arguments in a map. Supported V1 hosts emit
+absolute search paths; the relative-path fallback resolves against the search
+root with literal `~` semantics. Grep parsing keeps the current file across
+blank lines because ripgrep match text retains its trailing newline. It checks
+file groups and match counts, withholds malformed or uncheckable output, and
+rebuilds summaries and counts from the surviving results.
 
-V2's `execute.after` cannot fail, so a search result the adapter does not
-recognise is replaced by a notice rather than passed through. V2 filters the
-structured entries and rebuilds the text from what survives, instead of parsing
-paths back out of text, so a directory name containing a blank line cannot hide
-a group from the filter. V1's result is one string and is parsed; the
-`Found N matches` summary grep prints above its first group is set aside first.
+V2 filters structured entries, then rebuilds text and counts from the survivors.
+It does not parse paths out of text, so a newline in a directory name cannot
+hide a file group. Its `execute.after` hook has no failure channel; it replaces
+unrecognized or uncheckable results with a notice, regardless of status.
 
-Both hosts catch a failure while loading a plugin and continue without it, so a
-startup check cannot stop OpenCode, and a plugin that fails to load guards no
-file tool. The entry point therefore catches its own startup failure (an
-invalid policy, `shell+files` off macOS) and refuses every shell and file tool
-call with the reason, so the failure shows at the first call instead of in a
-log line. A plugin path that does not resolve is still skipped by the host.
-What still holds then is the configured shell wrapper. Both hosts replace a
-configured shell that is not a file with the platform shell, so
-`validateShell` also requires the wrapper to exist. V2 runs it on every shell
-it creates. V1 runs it once from the `config` hook, and its before-call hook
-repeats the existence check on every `bash` call, since V1 also picks its shell
-afresh per command.
+Both hosts log plugin startup failures and continue. The entry point therefore
+catches its own startup errors and installs refusing hooks. A plugin path that
+does not load still leaves file tools unguarded; only the configured shell
+wrapper remains in effect.
 
-Neither host lets a plugin choose where its hooks run. V2 passes one
-`execute.before` event through every plugin's hook in turn, then picks the tool
-by `event.tool` and runs it with `event.input`, so a plugin loaded after the
-guard (a project's own, for example) could change either after the check. The
-V2 adapter therefore pins what it checked: `event.tool`, `event.input` and the
-shell event's `shell` become accessors that return the checked value and check
-any value assigned later, a renamed tool against the current input and a new
-input against the current tool. A guarded tool's input is a frozen copy, so a
-hook that changes it in place throws, which rejects the call, and a getter
-cannot answer differently after the check. V2's own input hooks and rtk run
-before user plugins and assign rather than mutate. An unguarded tool's input
-stays mutable, and the shell event's `env` stays writable because V2 sets it
-after the hooks.
+In `shell+files` mode, V1 refuses `bash` until the `config` hook successfully
+validates the shell. A failed revalidation clears that state. The before-hook
+also requires the wrapper file to remain present as defense in depth. V1
+resolves its shell during `Tool.init`, not on every command. V2 validates the
+resolved shell on every `create.before` event, before a fallback shell can run.
 
-Checking inside each tool's executor, through `tool.transform`, would also see
-tools a request-shaping hook renames for the model, since V2 maps such an alias
-back to the real tool after the hooks. It is not done because V2's promise
-plugin adapter runs a wrapped executor through `Effect.promise`, which turns
-every failure of the tool itself (a missing file, an edit that does not apply)
-into a defect: `execute.after` no longer sees the error and the Plan agent's
-rewrite of refused edits stops working. No built-in shaping hook renames a
-tool. A plugin that renames one, replaces a tool with its own implementation,
-or reads files itself is out of reach; the guard protects against plugins that
-rewrite calls. V1 keeps the hook-order exposure, because it could not be tested
-against a live V1.
+Neither host gives plugins control over hook order. V2 pins `event.tool`,
+`event.input` and the shell event's `shell` with accessors that recheck later
+assignments. Guarded inputs are frozen copies, so in-place changes throw and
+getters cannot change the checked value. Unguarded inputs remain mutable.
+V2's built-in input hooks and rtk run before user plugins and assign new inputs
+rather than mutating checked inputs in place.
+The shell environment stays writable because V2 sets it after the hooks.
+V1 does not pin calls; later hooks can change their arguments.
+
+Wrapping executors with `tool.transform` would also catch request-shaping
+aliases, but V2's Promise adapter runs wrapped executors through `Effect.promise`.
+That turns ordinary tool failures into defects, breaking `execute.after` error
+events and the Plan agent's rewrite of refused edits. The guard therefore uses
+hooks. Plugins that rename tools through request shaping, replace executors or
+read files themselves remain outside this protection. Plugins run unsandboxed
+and can also redirect wrapper inputs through its environment.
+
+See [V2 migration](v2-migration.md) for source versions, compatibility details
+and live verification evidence.
 
 ## Roots
 
@@ -714,14 +702,14 @@ may already have removed some allowed descendants.
 - Network access is unrestricted, but a process that cannot read a secret cannot
   exfiltrate it.
 - Credentials supplied through a relaxed binary's own extension mechanisms
-  remain a deliberate Option B trade-off: for example, a `git` alias can run a
+  remain a deliberate trade-off: for example, a `git` alias can run a
   shell while the SSH profile is active, and the config files that arm such an
   alias — `~/.gitconfig`, `~/.terraformrc` — stay writable. That list is
   open-ended, which is why it is a documented trade-off rather than a rule;
   `~/.zshenv` is protected because it arms *every* command rather than one
   binary. The refusal list covers the invocations that print a credential by
-  design, not every path through a trusted binary. Eliminate per-binary
-  relaxations for a strict Option C boundary.
+  design, not every path through a trusted binary. Removing per-binary
+  relaxations would also remove the credential access those tools need.
 - Credentials in the macOS keychain are reachable through Security.framework by
   any process the keychain trusts. The `security` CLI's dump commands are
   refused, but a program linking the framework directly is not.

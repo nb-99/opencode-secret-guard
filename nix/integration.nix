@@ -37,7 +37,7 @@ pkgs.writeShellApplication {
     export OPENCODE_SECRET_GUARD_CONFIG="''${OPENCODE_SECRET_GUARD_CONFIG:-${testPolicy}}"
     export SECRET_GUARD_SHELL=${package}/bin/opencode-secret-guard
 
-    bun test "$REPO_ROOT/tests/group.test.ts" "$REPO_ROOT/tests/predicate.test.ts" "$REPO_ROOT/tests/tamper.test.ts" "$REPO_ROOT/tests/cleanup.test.ts" "$REPO_ROOT/tests/guard.test.ts" "$REPO_ROOT/tests/v2.test.ts" "$REPO_ROOT/tests/index.test.ts" "$REPO_ROOT/tests/cleanup.integration.ts"
+    bun test "$REPO_ROOT"/tests/*.test.ts "$REPO_ROOT/tests/cleanup.integration.ts"
     bash "$REPO_ROOT/tests/sandbox.test.sh"
   '';
 }

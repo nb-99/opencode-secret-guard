@@ -1,19 +1,8 @@
 /**
- * OpenCode plugin entry point, for both major versions.
- *
- * The default export carries `setup` for V2 and `server` for V1; each host reads
- * the key it knows and ignores the other (V1 object entry points need OpenCode
- * 1.18.29). V2 loads a configured plugin from a directory and resolves
- * `index.ts` in it, which is why this file is called index.ts. Everything else
- * lives beside it, where tests import it normally.
- *
- * The host types are a small structural slice, not imports from
- * @opencode-ai/plugin or @opencode/plugin: those pull in zod, effect and the
- * OpenCode SDK, which a hermetic typecheck would have to vendor. The cost is
- * that a host renaming a field is invisible to the compiler, so the adapters
- * check every event field at runtime and refuse or withhold what they cannot
- * read. The V2 shapes were read from @opencode/plugin 2.0.16 and are pinned by
- * tests/v2.test.ts against a fake host, not yet against a running V2.
+ * Directory entry point: V2 calls `setup`, V1 >=1.18.29 calls `server`.
+ * Local structural types avoid vendoring the host SDK dependencies for the
+ * hermetic typecheck. Adapters validate tool payloads at runtime instead.
+ * See docs/v2-migration.md for versioned contracts and verification evidence.
  */
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
