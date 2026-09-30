@@ -216,6 +216,18 @@ describe("file tools", () => {
     expect(() => check("lsp", { operation: "workspaceSymbol" })).not.toThrow();
   });
 
+  test("guards V2's browser tools that open a local file", () => {
+    for (const tool of ["browser_files_upload", "browser_files_drop"]) {
+      expect(() => check(tool, { tabID: "t", ref: "e1", paths: [".env"] })).toThrow("blocked");
+      expect(() => check(tool, { tabID: "t", ref: "e1", paths: ["README.md", "link-to-env"] })).toThrow("blocked");
+      expect(() => check(tool, { tabID: "t", ref: "e1", paths: ["README.md"] })).not.toThrow();
+      expect(() => check(tool, { tabID: "t", ref: "e1", paths: [] })).toThrow(/named no path/);
+      expect(() => check(tool, { tabID: "t", ref: "e1", paths: ".env" })).toThrow(/named no path/);
+    }
+    expect(() => check("browser_preview", { path: "private.txt" })).toThrow("blocked");
+    expect(() => check("browser_preview", { path: "README.md" })).not.toThrow();
+  });
+
   test("allows ordinary reads and writes", () => {
     expect(() => check("read", { path: "README.md" })).not.toThrow();
     expect(() => check("write", { path: "src/index.ts" })).not.toThrow();

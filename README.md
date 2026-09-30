@@ -17,7 +17,8 @@ This enforces the boundary where expansion cannot reach it:
 - **file tools** — `read`, `write`, `edit`, `patch` (`apply_patch` on V1),
   `list`, `glob`, `grep` and V1's `lsp` run the same policy as a path predicate, and
   `glob`/`grep` results are filtered. A patch is checked against every file
-  its headers name.
+  its headers name. V2's browser tools that open a local file (`files.upload`,
+  `files.drop`, `preview`) are checked as reads.
 
 Both layers are derived from one policy file, and a test compares their verdicts
 against each other on every run.

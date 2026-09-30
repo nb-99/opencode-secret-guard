@@ -47,7 +47,15 @@ const PATCH_TOOLS = new Set(["patch", "apply_patch"]);
  */
 const OPTIONAL_PATH_TOOLS = new Set(["list", "glob", "grep", "lsp"]);
 
-const FILE_TOOLS = new Set(["read", "write", "edit", ...OPTIONAL_PATH_TOOLS, ...PATCH_TOOLS]);
+/**
+ * V2's browser tools that open a server-local file outside the sandbox:
+ * `files.upload` and `files.drop` hand the bytes of every entry in `paths` to a
+ * web page, where `browser.evaluate` can read them back, and `preview` shows
+ * `path` to the user. V2 names a namespaced tool with its dots replaced by `_`.
+ */
+const BROWSER_FILE_TOOLS = new Set(["browser_files_upload", "browser_files_drop", "browser_preview"]);
+
+const FILE_TOOLS = new Set(["read", "write", "edit", ...OPTIONAL_PATH_TOOLS, ...PATCH_TOOLS, ...BROWSER_FILE_TOOLS]);
 
 /** Tools whose path argument names something they will change. */
 const WRITE_TOOLS = new Set(["write", "edit", ...PATCH_TOOLS]);
@@ -144,7 +152,8 @@ export function checkToolCall(
 
   const operation: FileOperation = WRITE_TOOLS.has(name) ? "write" : "read";
   const patched = PATCH_TOOLS.has(name) && typeof args.patchText === "string" ? patchPaths(args.patchText) : [];
-  const named = [...FILE_PATH_ARGS.map((key) => args[key]), ...patched].filter(
+  const listed = Array.isArray(args.paths) ? args.paths : [];
+  const named = [...FILE_PATH_ARGS.map((key) => args[key]), ...patched, ...listed].filter(
     (value): value is string => typeof value === "string" && value !== "",
   );
   if (named.length === 0 && !OPTIONAL_PATH_TOOLS.has(name)) {
