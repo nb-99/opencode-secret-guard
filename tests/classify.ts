@@ -1,11 +1,11 @@
 /**
- * Prints "<allow|deny> <path>" for each path on stdin, using the same predicate
+ * Prints "<allow|deny> <sensitive|alias> <path>" for each path on stdin, using the same predicate
  * the file tools use.
  *
  * classifyPath and buildProfile are two implementations of one policy: the file
  * tools consult the first, the kernel enforces the second. sandbox.test.sh
- * compares the two, which is the only thing standing between them and a silent
- * drift that leaves a secret guarded in one layer and exposed in the other.
+ * compares the two. Sensitive paths must agree; alias-bearing paths may be
+ * refused more conservatively by file tools, never granted more widely.
  *
  * Usage: bun classify.ts <config.json> <home> < paths
  * Env:   SG_EXEMPT_ROOTS, SG_DENY_ROOTS — colon-separated overrides, matching
@@ -14,6 +14,7 @@
 import * as fs from "node:fs";
 import { loadConfig } from "../src/policy.ts";
 import { classifyPath } from "../src/predicate.ts";
+import { hasAliasLookup, inspectPath } from "../src/paths.ts";
 
 
 const [policyPath, home] = process.argv.slice(2);
@@ -36,5 +37,6 @@ const targets = fs
   .split("\n")
   .filter((line) => line.length > 0);
 
-process.stdout.write(targets.map((target) => `${classifyPath(target, config)} ${target}`).join("\n"));
+process.stdout.write(targets.map((target) =>
+  `${classifyPath(target, config)} ${hasAliasLookup(inspectPath(target)) ? "alias" : "sensitive"} ${target}`).join("\n"));
 process.stdout.write("\n");

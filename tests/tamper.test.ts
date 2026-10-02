@@ -169,7 +169,7 @@ describe("protectedNodes", () => {
   test("names a deny root outside home without walking its ancestors", () => {
     const outside = path.join(os.tmpdir(), "elsewhere", "vault");
     const nodes = protectedNodes({ ...config, denyRoots: [outside], relaxationGroups: {} }, fixture);
-    expect(nodes.literals).toEqual([outside]);
+    expect(nodes.literals).toEqual([path.join(fs.realpathSync(os.tmpdir()), "elsewhere", "vault")]);
   });
 });
 

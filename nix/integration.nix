@@ -5,6 +5,9 @@ let
     mkdir -p "$out/node_modules"
     cp -r ${../src} "$out/src"
     cp -r ${../tests} "$out/tests"
+    cp -r ${../policy} "$out/policy"
+    mkdir -p "$out/bin"
+    ln -s ${package}/bin/path-lookup "$out/bin/path-lookup"
     ln -s ${package}/lib/node_modules/zod "$out/node_modules/zod"
   '';
   testPolicy = import ./test-policy.nix { inherit pkgs; };

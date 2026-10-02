@@ -11,7 +11,7 @@ import * as lookup from "../src/lookup.ts";
 
 let root: string;
 beforeAll(() => {
-  root = fs.mkdtempSync(path.join(os.tmpdir(), "guard-ignore-case-"));
+  root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "guard-ignore-case-")));
   expect(spawnSync("git", ["init", "-q", root]).status).toBe(0);
   // The legacy-sensitive assertions must not depend on Git's filesystem probe.
   expect(spawnSync("git", ["-C", root, "config", "core.ignorecase", "false"]).status).toBe(0);
