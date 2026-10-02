@@ -90,6 +90,20 @@ describe("lookup-aware path patterns", () => {
     }
   });
 
+  test("case-insensitive JavaScript evaluation is not a denial overapproximation", () => {
+    const pattern = "^/x/(?!SECRET$)[^/]+$";
+    expect(new RegExp(pattern).test("/x/secret")).toBe(true);
+    expect(new RegExp(pattern, "i").test("/x/secret")).toBe(false);
+    expect(matchPathPattern(pattern, evidence("/x/secret", 3)).mayMatch).toBe(true);
+    expect(new RegExp("/secrets/", "i").test("/x/ſecrets/key")).toBe(false);
+    expect(matchPathPattern("/secrets/", evidence("/x/ſecrets/key", 3, true)).mayMatch).toBe(true);
+  });
+
+  test("wildcards can prove exceptions over known-insensitive descendants", () => {
+    expect(matchPathPattern("^/x/[^/]*$", evidence("/x/Name", 3)))
+      .toEqual({ mayMatch: true, mustMatch: true });
+  });
+
   test("uncertainty, Unicode, newlines, and resource limits never grant exceptions", () => {
     for (const target of [evidence("/x/A", 3, true), evidence("/x/Ä", 3), evidence("/x/a\n", 3),
       evidence("/x/" + "a".repeat(5000), 3)]) {

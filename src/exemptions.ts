@@ -96,29 +96,35 @@ export function exemptRootContaining(config: ExemptConfig, guardedRoot: string):
   const pins = snapshots.get(config)!.roots;
   if (pins.length === 0) return;
   const declared = path.resolve(guardedRoot);
-  const origins = [declared];
-  let canonical: string | undefined;
-  // The first existing lexical ancestor resolves missing suffixes strictly.
-  // Append its resolved path to also check body ancestry outside the namespace.
-  for (const origin of origins) {
+  const inspectAncestors = (origin: string): { canonical: string; containing?: string } => {
+    let canonical: string | undefined;
     for (let current = origin; ; current = path.dirname(current)) {
       try {
         const stats = fs.statSync(current, { bigint: true });
-        if (canonical === undefined) {
-          canonical = path.join(fs.realpathSync(current), path.relative(current, declared));
-          if (canonical !== declared) origins.push(canonical);
-        }
+        canonical ??= path.join(fs.realpathSync(current), path.relative(current, origin));
         const containing = stats.isDirectory() && pins.find((pin) =>
           pin.directoryIdentity && sameIdentity(stats, pin.directoryIdentity));
-        if (containing) return containing.declared;
+        if (containing) return { canonical, containing: containing.declared };
       } catch (error) {
         if (!(error instanceof Error && "code" in error && (error.code === "ENOENT" || error.code === "ENOTDIR"))) throw error;
       }
       if (path.dirname(current) === current) break;
     }
+    if (canonical === undefined) {
+      throw new Error(`secret-guard: cannot establish filesystem ancestry for guarded path ${origin}.`);
+    }
+    return { canonical };
+  };
+  // Check the declared namespace first, then its resolved body, without
+  // extending an array while traversing it. Missing suffixes resolve strictly.
+  const lexical = inspectAncestors(declared);
+  if (lexical.containing) return lexical.containing;
+  if (lexical.canonical !== declared) {
+    const body = inspectAncestors(lexical.canonical);
+    if (body.containing) return body.containing;
   }
   // Missing exemptions grant nothing to file tools, but the unchanged kernel
   // profile names future paths. Only these unpinned roots use conservative case.
-  const evidence = { canonical: canonical!, insensitive: canonical!.split("").map((c) => /[a-z]/i.test(c)), knownPrefixLength: 0 };
+  const evidence = { canonical: lexical.canonical, insensitive: lexical.canonical.split("").map((c) => /[a-z]/i.test(c)), knownPrefixLength: 0 };
   return pins.find((pin) => !pin.directoryIdentity && mayBeInside(evidence, pin.canonical))?.declared;
 }

@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { exemptRootContaining, pinExemptRoots } from "./exemptions.ts";
+import { supportsAliasPattern } from "./path-pattern.ts";
 
 /**
  * Policy file format understood by this build. The writer declares it and the
@@ -366,4 +367,20 @@ export function loadConfig(source = configPath(), home = os.homedir()): GuardCon
   }
 
   return validateConfig(raw, source, home);
+}
+
+/** Valid JavaScript syntax need not fit the bounded filesystem-alias grammar. */
+export function aliasPatternDiagnostics(config: Pick<GuardConfig, "secretPatterns" | "secretExceptions">): string[] {
+  const messages: string[] = [];
+  for (const key of ["secretPatterns", "secretExceptions"] as const) {
+    for (const pattern of new Set(config[key])) {
+      if (supportsAliasPattern(pattern)) continue;
+      const consequence = key === "secretPatterns"
+        ? "it is treated as a possible denial for every path and may deny all non-exempt workspace files"
+        : "it cannot grant a naming exception";
+      messages.push(`"${key}" pattern ${JSON.stringify(pattern)} is unsupported by the bounded alias matcher; ` +
+        `on case-insensitive or unknown filesystem paths ${consequence}. Known-sensitive paths retain JavaScript regex behavior.`);
+    }
+  }
+  return messages;
 }

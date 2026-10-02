@@ -6,7 +6,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { checkToolCall } from "../src/guard.ts";
 import { ignoreCache, repoRootCache } from "../src/gitignore.ts";
-import { hasUnknownLookup, inspectPath, realpath } from "../src/paths.ts";
+import { hasUnknownLookup, inspectPath, inspectPaths, realpath } from "../src/paths.ts";
 import * as pathLookup from "../src/lookup.ts";
 import { fileURLToPath } from "node:url";
 import { loadConfig, validateConfig } from "../src/policy.ts";
@@ -23,6 +23,7 @@ const native = {
   stat: fs.statSync,
   exists: fs.existsSync,
   readDirectoryModes: pathLookup.readDirectoryModes,
+  readDirectoryModesBatch: pathLookup.readDirectoryModesBatch,
 };
 
 beforeEach(() => {
@@ -31,6 +32,8 @@ beforeEach(() => {
   // from case probes or the host that happens to run the fixtures.
   const modes = spyOn(pathLookup, "readDirectoryModes").mockImplementation((target) => directoryModes(target, () => "sensitive"));
   restore.push(() => modes.mockRestore());
+  const batch = spyOn(pathLookup, "readDirectoryModesBatch").mockImplementation((targets) => targets.map(pathLookup.readDirectoryModes));
+  restore.push(() => batch.mockRestore());
 });
 
 afterEach(() => {
@@ -354,6 +357,91 @@ describe("filesystem evidence", () => {
 });
 
 describe("case-insensitive filesystem with spelling-preserving realpath", () => {
+  test("a 100-path classification launches one native metadata process", () => {
+    const targets = Array.from({ length: 100 }, (_, index) => put(`batch/file-${index}.txt`));
+    const batch = spyOn(pathLookup, "readDirectoryModesBatch").mockImplementation(native.readDirectoryModesBatch);
+    restore.push(() => batch.mockRestore());
+    const calls: unknown[] = [];
+    const spawn = spyOn(childProcess, "spawnSync").mockImplementation((command: any, args: any, options: any) => {
+      calls.push([command, args]);
+      expect(String(command)).toEndWith("/bin/path-lookup");
+      expect(args).toEqual(["--batch"]);
+      const paths = String(options.input).split("\0").filter(Boolean);
+      return { status: 0, stdout: JSON.stringify(paths.map((target) => directoryModes(target, () => "sensitive"))) } as any;
+    });
+    restore.push(() => spawn.mockRestore());
+    const config = { ...baseConfig, exemptRoots: [], denyRoots: [], secretPatterns: [], secretExceptions: [] };
+    expect([...classifyPaths(targets, config).values()]).toEqual(targets.map(() => "allow"));
+    expect(calls).toHaveLength(1);
+  });
+
+  test("batch path failures preserve result order and cannot shift metadata onto another path", () => {
+    const first = put("first.txt");
+    const bad = put("inaccessible.txt");
+    const last = put("last.txt");
+    const resolve = spyOn(fs, "realpathSync").mockImplementation((target: any, ...args: any[]) => {
+      if (target === bad) throw Object.assign(new Error("synthetic permission error"), { code: "EACCES" });
+      return (native.realpath as any)(target, ...args);
+    });
+    restore.push(() => resolve.mockRestore());
+    const batch = inspectPaths([first, bad, last], (targets) => {
+      expect(targets).toEqual([first, last]);
+      return targets.map((target, index) => directoryModes(target, () => index === 0 ? "sensitive" : "unknown"));
+    });
+    expect(batch[0]?.canonical).toBe(first);
+    expect(hasUnknownLookup(batch[0]!)).toBe(false);
+    expect(batch[1]).toBeNull();
+    expect(batch[2]?.canonical).toBe(last);
+    expect(hasUnknownLookup(batch[2]!)).toBe(true);
+  });
+
+  test("a throwing batch metadata reader cannot produce an access grant", () => {
+    const target = put("batch-failure.txt");
+    expect(inspectPaths([target], () => { throw new Error("synthetic helper failure"); })).toEqual([null]);
+  });
+
+  test("artifact allowances survive insensitive ancestors when the artifact component is sensitive", () => {
+    const artifact = put("prefix/node_modules/ordinary.js");
+    const secret = put("prefix/node_modules/.env");
+    fs.writeFileSync(path.join(root, ".gitignore"), "prefix/node_modules/\n");
+    expect(spawnSync(baseConfig.tools.git, ["init", "-q", root]).status).toBe(0);
+    insensitive([path.join(root, "prefix")]);
+    expect(classifyPath(artifact, baseConfig)).toBe("allow");
+    expect(classifyPath(secret, baseConfig)).toBe("deny");
+    expect([...classifyPaths([artifact, secret], baseConfig).values()]).toEqual(["allow", "deny"]);
+  });
+
+  test("insensitive artifact component names cannot grant an ignored-file allowance", () => {
+    const artifact = put("node_modules/ordinary.js");
+    fs.writeFileSync(path.join(root, ".gitignore"), "node_modules/\n");
+    expect(spawnSync(baseConfig.tools.git, ["init", "-q", root]).status).toBe(0);
+    insensitive();
+    expect(classifyPath(artifact, baseConfig)).toBe("deny");
+    expect(classifyPath(path.dirname(artifact), baseConfig)).toBe("allow");
+  });
+
+  test("an allowlisted ancestor outside the repository does not grant ignored files", () => {
+    const repo = path.join(root, "node_modules/repo");
+    const ignored = put("node_modules/repo/private.txt");
+    fs.writeFileSync(path.join(repo, ".gitignore"), "private.txt\n");
+    expect(spawnSync(baseConfig.tools.git, ["init", "-q", repo]).status).toBe(0);
+    insensitive([root]);
+    expect(classifyPath(ignored, baseConfig)).toBe("deny");
+  });
+
+  test("a tracked Helm allowance depends on its filename rather than unrelated ancestor aliases", () => {
+    const chart = path.join(root, "chart");
+    const templates = path.join(chart, "templates");
+    put("chart/Chart.yaml");
+    const target = put("chart/templates/secret.yaml");
+    expect(spawnSync(baseConfig.tools.git, ["init", "-q", root]).status).toBe(0);
+    expect(spawnSync(baseConfig.tools.git, ["-C", root, "add", "chart"]).status).toBe(0);
+    insensitive([templates]);
+    expect(classifyPath(target, baseConfig)).toBe("allow");
+    const privateTarget = put("chart/templates/secret.env");
+    expect(classifyPath(privateTarget, baseConfig)).toBe("deny");
+  });
+
   test("unknown metadata preserves exemption object boundaries", () => {
     const allowed = put("Vault/memory/file.txt");
     const denied = put("Vault/Memory/file.txt");

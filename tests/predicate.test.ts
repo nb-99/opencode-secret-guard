@@ -39,7 +39,8 @@ beforeAll(() => {
   // have explicit coverage rather than depending on the CI host's filesystem.
   const modes = spyOn(lookup, "readDirectoryModes").mockImplementation((target) =>
     Array(target.split(path.sep).filter(Boolean).length + 1).fill("sensitive"));
-  restoreModes = () => modes.mockRestore();
+  const batchModes = spyOn(lookup, "readDirectoryModesBatch").mockImplementation((targets) => targets.map(lookup.readDirectoryModes));
+  restoreModes = () => { batchModes.mockRestore(); modes.mockRestore(); };
   setMode = (mode) => modes.mockImplementation((target) =>
     Array(target.split(path.sep).filter(Boolean).length + 1).fill(mode));
   repo = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "secret-guard-")));

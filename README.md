@@ -160,7 +160,7 @@ with a leading `~`, expanded at runtime, so a policy is portable between hosts.
 | `tools.git`                 | Absolute path of the git the guard spawns; never resolved through `PATH`                |
 | `secretPatterns`            | JavaScript regexes; alias paths use the bounded grammar described below                  |
 | `secretExceptions`          | Naming allowances; alias paths require a proved universal match                         |
-| `artifactAllowlist`         | Sensitive-path components re-allowed against the gitignore layer                         |
+| `artifactAllowlist`         | Proved component-name allowances against Git ignore rules, not secret patterns           |
 | `relaxationGroups`          | Per-binary credential access, e.g. `git` → `~/.ssh`, plus `allowEnvironment`            |
 | `secretPrintingCommands`    | Invocations refused outright because their output is the credential                    |
 | `denyRoots`                 | Never relaxed, never excepted                                                           |
@@ -194,16 +194,34 @@ An unsupported custom deny pattern conservatively refuses every alias-bearing
 path unless an explicit root exemption applies. Unsupported custom naming
 exceptions never grant access there. Policy loading retains arbitrary valid
 JavaScript regexes for known-sensitive paths rather than rejecting them globally.
+Plugin startup writes a diagnostic to stderr for each unsupported path
+pattern, naming its field, expression, and consequence. A warning does not
+change the policy or make unsupported syntax safe on alias-bearing paths.
+The per-command shell resolver loads policy silently.
+
+The helper queries per-directory casefold flags on ext4 and tmpfs. Linux 6.13
+added tmpfs casefold support, so filesystem type alone cannot prove sensitivity.
+Unsupported or failed metadata queries remain unknown, including on currently
+unrecognized Btrfs, XFS, and OverlayFS mounts. Darwin uses volume capabilities.
+Search-result classification sends up to 256 paths per helper invocation,
+bounded by 64 KiB input. Malformed output or helper failure cannot grant access.
+There is no filesystem metadata cache between calls.
 
 The tested WSL mount exposes no usable directory case attribute. Its mode is
 unknown. Naming exceptions, ignored artifacts, and Helm-template allowances can
 be refused on both unknown and known-insensitive filesystems, including default
-macOS APFS. The guard does not automatically widen their allowances. Explicit
-existing-directory exemptions remain available, but a missing exemption root
+macOS APFS. An artifact allowance can still apply when the artifact component
+has a proved universal match, despite case aliases in other components. It only
+overrides Git ignore rules; secret patterns still apply within the artifact.
+A tracked Helm allowance similarly requires a universal filename match and
+the existing Git and chart checks. Fully insensitive names remain restricted.
+Explicit existing-directory exemptions remain available, but a missing exemption root
 grants no file-tool access until it exists and the policy is reloaded. Loaded
 file-tool policies pin each exempt directory's identity and drop its grant if
 the root is replaced or retargeted. The shell profile does not have this lasting
 identity binding; inode reuse and filesystem check/use races also remain.
+Root exemptions are broader than artifact allowances: they precede secret
+patterns. Do not use them as an equivalent replacement for an artifact allowance.
 
 See [the supported grammar and decision](docs/adr/0001-case-alias-policy.md)
 and [the WSL verification and limits](docs/wsl-case-matching.md). This does not

@@ -48,6 +48,22 @@ function denied(target: string, config: GuardConfig): void {
 }
 
 describe("pinned root exemptions", () => {
+  test("an unresolved ancestor fails descriptively instead of dereferencing undefined", () => {
+    const config = { exemptRoots: [path.join(fixture, "missing-exemption")] };
+    pinExemptRoots(config);
+    const stat = spyOn(fs, "statSync").mockImplementation(() => {
+      throw Object.assign(new Error("synthetic missing volume"), { code: "ENOENT" });
+    });
+    try {
+      expect(() => exemptRootContaining(config, "/missing-volume/guarded"))
+        .toThrow("cannot establish filesystem ancestry for guarded path /missing-volume/guarded");
+      stat.mockImplementation(() => { throw Object.assign(new Error("synthetic permission error"), { code: "EACCES" }); });
+      expect(() => exemptRootContaining(config, "/missing-volume/guarded")).toThrow("synthetic permission error");
+    } finally {
+      stat.mockRestore();
+    }
+  });
+
   test("retargeting a loaded root before its first call cannot grant credential access", () => {
     const root = path.join(fixture, "vault/memory");
     put(path.join(root, "id_rsa"));

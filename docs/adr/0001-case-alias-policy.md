@@ -1,6 +1,6 @@
 # Case-alias policy matching
 
-Status: locally implemented and reviewed; not activated or published.
+Status: implemented on PR #18; not activated.
 
 ## Problem
 
@@ -32,6 +32,10 @@ case-variable ASCII positions prevent exceptions from relying on incomplete
 Unicode casing tables. It deliberately excludes
 lookaround, backreferences, arbitrary classes, general repetition, and Unicode
 case rules. Environment and command regexes keep their existing semantics.
+Plugin startup reports unsupported path expressions on stderr, including whether
+they cause possible denials or unusable exceptions. It does not reject valid
+JavaScript expressions globally or silently change their meaning.
+The per-command shell resolver does not repeat file-tool diagnostics.
 
 Root exemptions remain explicit directory capabilities. They require an
 existing directory and exact canonical containment, not a folded string prefix.
@@ -42,9 +46,11 @@ conservative lookup matching.
 
 Git remains responsible for ignore-pattern syntax. For alias-bearing paths,
 every case-folded rule hit, including a negation, is protected.
-Name-based artifact allowances and tracked
-Helm-template exceptions do not grant alias-wide access. Sensitive paths retain
-their existing behavior.
+Name-based artifact allowances require a proved universal component match
+within the repository. They follow secret denials, unlike broad root exemptions.
+Tracked Helm-template exceptions require a universal filename match and the
+existing chart and Git evidence. Neither allowance grants access through
+unstable names; case-sensitive names beneath insensitive ancestors can still qualify.
 
 ## Consequences
 
@@ -65,6 +71,15 @@ target once, verifies pinned exemptions once per batch, and asks Git once per
 repository. No filesystem grant is cached between calls. Simple supported
 patterns use a negative regex prefilter; complex patterns use only the bounded
 state machine.
+
+Native metadata uses a bounded NUL-separated batch protocol, with at most 256
+paths and 64 KiB input, with a 1 MiB output limit and a 5-second timeout per
+invocation. Each result is validated independently;
+protocol errors produce unknown metadata. The helper checks tmpfs casefold flags
+as well as ext4. Failed ioctls and unrecognized filesystem types stay unknown.
+Tmpfs cannot be presumed sensitive by type because Linux 6.13 added casefold:
+[flag getter](https://github.com/torvalds/linux/blob/v6.13/mm/shmem.c#L4015-L4023)
+and [visible flag mask](https://github.com/torvalds/linux/blob/v6.13/include/linux/shmem_fs.h#L45-L48).
 
 ## Required evidence
 

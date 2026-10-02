@@ -1,6 +1,6 @@
 # File-tool exemption directory identities
 
-Status: locally implemented and reviewed; not activated or published.
+Status: implemented on PR #18; not activated.
 
 ## Problem
 
@@ -24,6 +24,10 @@ at load; trusted programmatic configs bind on first use.
 This immutable authority record is not a cached filesystem allow verdict. Every
 grant still requires fresh filesystem checks. There are no watchers, retained
 file descriptors, new dependencies, or policy-format fields.
+Validation checks declared ancestry and resolved-body ancestry explicitly.
+If neither a target nor any ancestor can be resolved, validation aborts with a
+named ancestry error. It must not accept unverified containment or dereference
+an absent canonical path.
 
 ## Scope
 

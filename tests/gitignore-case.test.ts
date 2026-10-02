@@ -59,11 +59,13 @@ test("a Git failure never becomes an allowed alias verdict", () => {
   expect(() => possibleIgnoreVerdicts(stub, [path.join(root, "PRIVATE.TXT")])).toThrow("cannot establish case-alias gitignore protection");
   const modes = spyOn(lookup, "readDirectoryModes").mockImplementation((target) =>
     Array(target.split(path.sep).filter(Boolean).length + 1).fill("unknown"));
+  const batchModes = spyOn(lookup, "readDirectoryModesBatch").mockImplementation((targets) => targets.map(lookup.readDirectoryModes));
   try {
     const config = loadConfig(fileURLToPath(new URL("../policy/default.json", import.meta.url)));
     config.tools.git = stub;
     expect(classifyPaths([path.join(root, "PRIVATE.TXT")], config).get(path.join(root, "PRIVATE.TXT"))).toBe("deny");
   } finally {
+    batchModes.mockRestore();
     modes.mockRestore();
   }
 });
