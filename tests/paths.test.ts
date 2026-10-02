@@ -354,14 +354,16 @@ describe("filesystem evidence", () => {
 });
 
 describe("case-insensitive filesystem with spelling-preserving realpath", () => {
-  test("unknown metadata cannot widen an exemption into a case-distinct sibling", () => {
+  test("unknown metadata preserves exemption object boundaries", () => {
     const allowed = put("Vault/memory/file.txt");
     const denied = put("Vault/Memory/file.txt");
     const modes = spyOn(pathLookup, "readDirectoryModes").mockImplementation((target) => directoryModes(target, () => "unknown"));
     restore.push(() => modes.mockRestore());
     const config = { ...baseConfig, denyRoots: [path.join(root, "Vault")], exemptRoots: [path.join(root, "Vault/memory")] };
     expect(classifyPath(allowed, config)).toBe("allow");
-    expect(classifyPath(denied, config)).toBe("deny");
+    const lower = native.stat(path.dirname(allowed), { bigint: true });
+    const upper = native.stat(path.dirname(denied), { bigint: true });
+    expect(classifyPath(denied, config)).toBe(lower.dev === upper.dev && lower.ino === upper.ino ? "allow" : "deny");
   });
 
   test("cache protection survives a differently spelled cache configuration", () => {
@@ -397,6 +399,9 @@ describe("case-insensitive filesystem with spelling-preserving realpath", () => 
   test("respects a case-sensitive directory inside an insensitive tree", () => {
     const lower = put("Sensitive/.env");
     const upper = put("Sensitive/.ENV");
+    // A simulated sensitive island needs two physical entries. The metadata
+    // mask itself is tested separately even when this host cannot hold both.
+    if (native.readdir(path.dirname(lower)).filter((name) => name === ".env" || name === ".ENV").length !== 2) return;
     insensitive([path.join(root, "Sensitive")]);
     expect(inspectPath(path.join(root, "sENSITIVE/.env")).canonical).toBe(lower);
     expect(inspectPath(path.join(root, "sENSITIVE/.ENV")).canonical).toBe(upper);

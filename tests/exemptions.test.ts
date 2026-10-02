@@ -239,6 +239,12 @@ describe("pinned root exemptions", () => {
     const exempt = path.join(fixture, "Shared");
     const guarded = path.join(fixture, "shared");
     fs.mkdirSync(exempt);
+    if (fs.existsSync(guarded)) {
+      // On an insensitive host these names are one directory, not distinct
+      // capabilities. It must therefore be rejected as containing the guard.
+      expect(() => loaded([exempt], { denyRoots: [guarded] })).toThrow("contains the guarded path");
+      return;
+    }
     fs.mkdirSync(guarded);
     const config = loaded([exempt], { denyRoots: [guarded] });
     expect(validExemptRoots(config)).toEqual([exempt]);
@@ -250,7 +256,7 @@ describe("pinned root exemptions", () => {
     const exempt = path.join(fixture, "Shared");
     fs.mkdirSync(exempt);
     const alias = path.join(fixture, "sHARED");
-    fs.symlinkSync(exempt, alias);
+    if (!fs.existsSync(alias)) fs.symlinkSync(exempt, alias);
     expect(() => loaded([exempt], { denyRoots: [path.join(alias, "missing/leaf")] }))
       .toThrow("contains the guarded path");
   });
