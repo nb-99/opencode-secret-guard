@@ -1,0 +1,18 @@
+tests/exemptions.test.ts
+  h_b53c9ceee800cb 242-247,259
+tests/gitignore-case.test.ts
+  h_b53c9ceee800cb 16-17
+tests/paths.test.ts
+  h_b53c9ceee800cb 357,364-366,402-404
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.6",
+  "base_commit_sha": "c9e816cd6d19e01ebc8b4c9beb0f196fd7fbb1cc",
+  "prompts": {},
+  "humans": {
+    "h_b53c9ceee800cb": {
+      "author": "nb99 <niklas@beilmann.dev>"
+    }
+  }
+}
