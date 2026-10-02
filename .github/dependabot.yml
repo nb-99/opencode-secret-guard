@@ -10,11 +10,11 @@ updates:
     commit-message:
       prefix: build
 
-  # package.json is the single source for the @types/node version, but the
-  # typecheck fetches that tarball with a pinned hash. A bump here therefore
-  # fails `nix flake check` until nix/checks.nix carries the new hash — which
-  # is the intended behaviour: a dependency must not change without the hash
-  # that proves what was fetched. Nix prints the correct hash on failure.
+  # Both npm dependencies reach the build through the lockfile: the version
+  # comes from package.json, the fetch hash from the integrity in
+  # package-lock.json, and nix/checks.nix and nix/zod.nix assert the two files
+  # agree. A bump therefore needs no Nix edit, and a package.json edited
+  # without the lock fails the build instead of fetching something unproven.
   - package-ecosystem: npm
     directory: /
     schedule:
