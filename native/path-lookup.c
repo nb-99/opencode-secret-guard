@@ -27,7 +27,11 @@ static const char *directory_mode(int fd) {
 #if defined(__linux__)
     struct statfs filesystem;
     if (fstatfs(fd, &filesystem) != 0) return "unknown";
-    if (filesystem.f_type == EXT4_SUPER_MAGIC) {
+    /* Both getters expose FS_CASEFOLD_FL, not just an unrelated flag subset.
+     * tmpfs gained per-directory casefold in Linux 6.13. A failed query on
+     * older kernels remains unknown instead of inferring sensitivity by type.
+     */
+    if (filesystem.f_type == EXT4_SUPER_MAGIC || filesystem.f_type == TMPFS_MAGIC) {
         int flags = 0;
         if (ioctl(fd, FS_IOC_GETFLAGS, &flags) != 0) return "unknown";
         return (flags & FS_CASEFOLD_FL) ? "insensitive" : "sensitive";
@@ -51,14 +55,18 @@ static const char *directory_mode(int fd) {
     return "unknown";
 }
 
-/* A single invocation walks the existing, realpath-resolved directory chain.
- * Output has one mode for / and one per component. Files, failed opens, and
+/* Keep these protocol bounds in sync with src/lookup.ts. Include the terminal
+ * NUL in each path's byte limit. Parse the entire batch before writing output.
+ */
+#define MAX_PATH_BYTES 4096
+#define MAX_BATCH_PATHS 256
+#define MAX_BATCH_BYTES (64 * 1024)
+
+/* Each path walks its existing, realpath-resolved directory chain.
+ * Its row has one mode for / and one per component. Files, failed opens, and
  * every descendant of a failed open are unknown. Never follow a raced symlink.
  */
-int main(int argc, char **argv) {
-    if (argc != 2 || argv[1][0] != '/') return 2;
-    char *target = strdup(argv[1]);
-    if (!target) return 2;
+static void write_modes(char *target) {
     int directory = open("/", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     printf("[\"%s\"", directory_mode(directory));
     char *save = NULL;
@@ -69,8 +77,40 @@ int main(int argc, char **argv) {
         directory = next;
         printf(",\"%s\"", directory_mode(directory));
     }
-    puts("]");
+    printf("]");
     if (directory >= 0) close(directory);
-    free(target);
+}
+
+int main(int argc, char **argv) {
+    if (argc != 2) return 2;
+    if (strcmp(argv[1], "--batch") == 0) {
+        char input[MAX_BATCH_BYTES + 1];
+        size_t offsets[MAX_BATCH_PATHS];
+        size_t length = fread(input, 1, sizeof(input), stdin);
+        if (ferror(stdin) || length > MAX_BATCH_BYTES) return 2;
+        size_t count = 0;
+        for (size_t offset = 0; offset < length;) {
+            char *end = memchr(input + offset, '\0', length - offset);
+            if (!end || input[offset] != '/' || count == MAX_BATCH_PATHS)
+                return 2;
+            size_t bytes = (size_t)(end - (input + offset)) + 1;
+            if (bytes > MAX_PATH_BYTES) return 2;
+            offsets[count++] = offset;
+            offset += bytes;
+        }
+        printf("[");
+        for (size_t index = 0; index < count; index++) {
+            if (index) printf(",");
+            write_modes(input + offsets[index]);
+        }
+        puts("]");
+    } else {
+        size_t length = strnlen(argv[1], MAX_PATH_BYTES);
+        if (argv[1][0] != '/' || length == MAX_PATH_BYTES) return 2;
+        char target[MAX_PATH_BYTES];
+        memcpy(target, argv[1], length + 1);
+        write_modes(target);
+        putchar('\n');
+    }
     return ferror(stdout) ? 1 : 0;
 }

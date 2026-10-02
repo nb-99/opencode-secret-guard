@@ -1,7 +1,7 @@
 import * as os from "node:os";
 import * as path from "node:path";
 import { findRepoRoot, HELM_SECRET_FILENAME_PATTERN, isGitIgnored, isPossiblyGitIgnored, possibleIgnoreVerdicts, primeIgnoreCache, trackedHelmSecretTemplate } from "./gitignore.ts";
-import { hasAliasLookup, inspectPath, isExistingDirectory, isInside, realpath, type PathEvidence } from "./paths.ts";
+import { hasAliasLookup, inspectPath, inspectPaths, isExistingDirectory, isInside, realpath, type PathEvidence } from "./paths.ts";
 import { matchPathPattern, mayBeInside } from "./path-pattern.ts";
 import type { GuardConfig } from "./policy.ts";
 import { cacheDirectory } from "./profile.ts";
@@ -70,16 +70,17 @@ function classifyEvidence(
   if (exemptRoots.some((root) => isInside(canonical, root))) return "allow";
   if (config.denyRoots.some((root) => mayBeInside(inspected, realpath(root)))) return "deny";
   if (config.secretPatterns.includes(HELM_SECRET_FILENAME_PATTERN) &&
-    !aliasLookup &&
-    possible([HELM_SECRET_FILENAME_PATTERN]) &&
+    certain([HELM_SECRET_FILENAME_PATTERN]) &&
     !possible(config.secretPatterns.filter((pattern) => pattern !== HELM_SECRET_FILENAME_PATTERN)) &&
     trackedHelmSecretTemplate(config.tools.git, canonical)) return "allow";
   if (certain(config.secretExceptions)) return "allow";
   if (possible(config.secretPatterns)) return "deny";
   // An ignored *directory* stays listable, matching the profile: enumeration
   // reveals names, and names are not the secret. Its files stay denied.
+  const batchedIgnore = aliasIgnore?.get(canonical);
   const ignored = aliasLookup
-    ? aliasIgnore?.get(canonical) ?? isPossiblyGitIgnored(config.tools.git, canonical)
+    ? batchedIgnore !== false && !certainArtifactAllowance(inspected, config.artifactAllowlist) &&
+      (batchedIgnore ?? isPossiblyGitIgnored(config.tools.git, canonical))
     : isGitIgnored(config.tools.git, canonical, config.artifactAllowlist);
   if (ignored) {
     return isExistingDirectory(canonical) ? "allow" : "deny";
@@ -87,9 +88,28 @@ function classifyEvidence(
   return "allow";
 }
 
+/** Artifact names only override Git ignore rules, never secret or root denials. */
+function certainArtifactAllowance(inspected: PathEvidence, names: string[]): boolean {
+  const root = findRepoRoot(inspected.canonical);
+  if (!root) return false;
+  const relative = path.relative(root, inspected.canonical);
+  if (!relative || relative === ".." || relative.startsWith("../")) return false;
+  const offset = inspected.canonical.length - relative.length;
+  const target = {
+    canonical: "/" + relative,
+    insensitive: [false, ...inspected.insensitive.slice(offset)],
+    knownPrefixLength: Math.max(0, inspected.knownPrefixLength - offset + 1),
+  };
+  return names.some((name) => {
+    if (name.includes("/")) return false;
+    const literal = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    return matchPathPattern(`/${literal}/|/${literal}$`, target).mustMatch;
+  });
+}
+
 /**
  * Classifies many paths at once. The verdicts are exactly those of calling
- * `classifyPath` on each path; only the number of git subprocesses differs.
+ * `classifyPath` on each path; filesystem metadata and Git subprocesses are batched.
  * A path that is classifiable but outside every rule keeps the layer's default,
  * allow. A path whose classification *fails* is denied, as the before-call check
  * refuses the same call: an error must not turn a result into a disclosure.
@@ -98,13 +118,7 @@ export function classifyPaths(
   targets: string[],
   config: GuardConfig,
 ): Map<string, "allow" | "deny"> {
-  const evidence = targets.map((target) => {
-    try {
-      return inspectPath(path.resolve(target));
-    } catch {
-      return null;
-    }
-  });
+  const evidence = inspectPaths(targets.map((target) => path.resolve(target)));
 
   const valid = evidence.filter((target): target is PathEvidence => target !== null);
   let aliasIgnore: Map<string, boolean> | undefined;

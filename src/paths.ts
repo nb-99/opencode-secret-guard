@@ -78,9 +78,34 @@ function resolveExisting(target: string): { resolved: string; missing: string[] 
 
 export function inspectPath(target: string, readModes: lookup.ReadDirectoryModes = lookup.readDirectoryModes): PathEvidence {
   const { resolved, missing } = resolveExisting(target);
+  return inspectResolved(resolved, missing, readModes(resolved));
+}
+
+/** Resolve independently, then read directory metadata in bounded helper batches. */
+export function inspectPaths(
+  targets: string[],
+  readModes = lookup.readDirectoryModesBatch,
+): Array<PathEvidence | null> {
+  const resolutions = targets.map((target) => {
+    try { return resolveExisting(target); } catch { return null; }
+  });
+  let modes: lookup.LookupMode[][];
+  try {
+    modes = readModes(resolutions.filter((target) => target !== null).map((target) => target.resolved));
+  } catch {
+    return targets.map(() => null);
+  }
+  let index = 0;
+  return resolutions.map((target) => {
+    if (!target) return null;
+    const row = modes[index++] ?? [];
+    try { return inspectResolved(target.resolved, target.missing, row); } catch { return null; }
+  });
+}
+
+function inspectResolved(resolved: string, missing: string[], modes: lookup.LookupMode[]): PathEvidence {
   // Keep normalization outside the missing-path catch. A proven alias whose
   // directory cannot be inspected must fail closed, not regain caller case.
-  const modes = readModes(resolved);
   const canonical = path.join(diskSpelling(resolved, modes), ...missing);
   const insensitive = Array<boolean>(canonical.length).fill(false);
   let knownPrefixLength = canonical.length;

@@ -233,12 +233,45 @@ in
       if (expected !== "${package}/bin/opencode-secret-guard") {
         throw new Error("layout mismatch: " + expected);
       }
-      const { readDirectoryModes } = await import("${package}/lib/lookup.ts");
+      const { readDirectoryModes, readDirectoryModesBatch } = await import("${package}/lib/lookup.ts");
       const result = Bun.spawnSync(["${package}/bin/path-lookup", "/"]);
       if (result.exitCode !== 0) throw new Error("lookup helper failed");
       const native = JSON.parse(new TextDecoder().decode(result.stdout));
+      if (process.platform === "darwin" && native.includes("unknown")) {
+        throw new Error("Darwin root volume lookup metadata was not established");
+      }
       if (JSON.stringify(readDirectoryModes("/")) !== JSON.stringify(native)) {
         throw new Error("lookup helper layout mismatch");
+      }
+      const paths = ["/", "/nix/store", "/nonexistent/x"];
+      const batch = Bun.spawnSync(["${package}/bin/path-lookup", "--batch"], {
+        stdin: new TextEncoder().encode(paths.join("\0") + "\0"),
+      });
+      if (batch.exitCode !== 0) throw new Error("native lookup batch failed");
+      const rows = JSON.parse(new TextDecoder().decode(batch.stdout));
+      const singles = paths.map(readDirectoryModes);
+      if (JSON.stringify(rows) !== JSON.stringify(singles) ||
+          JSON.stringify(readDirectoryModesBatch(paths)) !== JSON.stringify(rows)) {
+        throw new Error("lookup batch and single-path results differ");
+      }
+      for (const input of ["/unterminated", "relative\0", Array(257).fill("/\0").join("")]) {
+        const invalid = Bun.spawnSync(["${package}/bin/path-lookup", "--batch"], {
+          stdin: new TextEncoder().encode(input),
+        });
+        if (invalid.exitCode === 0 || invalid.stdout.length !== 0) {
+          throw new Error("lookup batch accepted malformed or oversized input");
+        }
+      }
+      for (const paths of [Array(256).fill("/"), Array(16).fill("/" + "é".repeat(2047))]) {
+        const result = Bun.spawnSync(["${package}/bin/path-lookup", "--batch"], {
+          stdin: new TextEncoder().encode(paths.join("\0") + "\0"),
+        });
+        if (result.exitCode !== 0) throw new Error("lookup rejected a full valid chunk");
+        const single = readDirectoryModes(paths[0]);
+        const expected = paths.map(() => single);
+        if (JSON.stringify(JSON.parse(new TextDecoder().decode(result.stdout))) !== JSON.stringify(expected)) {
+          throw new Error("lookup full chunk results differ from single-path metadata");
+        }
       }
     '
     touch $out
