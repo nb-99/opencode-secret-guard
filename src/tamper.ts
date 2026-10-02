@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { isInside, realpath } from "./paths.ts";
+import { mayBeInside, mayEqualPath, type PatternPath } from "./path-pattern.ts";
 import type { GuardConfig } from "./policy.ts";
 import { configPath, opencodeCacheDirectory, opencodeConfigDirectory, opencodeDataDirectory } from "./policy.ts";
 
@@ -172,10 +173,15 @@ export function tamperTargets(options: {
   return { literals: [...resolved.literals].sort(), subpaths: [...resolved.subpaths].sort() };
 }
 
-export function isTamperProtected(canonical: string, targets: TamperTargets): boolean {
+export function mayBeTamperProtected(target: PatternPath, targets: TamperTargets): boolean {
+  return targets.literals.some((literal) => mayEqualPath(target, literal)) ||
+    targets.subpaths.some((root) => mayBeInside(target, root));
+}
+
+export function isTamperProtected(target: string, targets: TamperTargets): boolean {
   return (
-    targets.literals.includes(canonical) ||
-    targets.subpaths.some((root) => isInside(canonical, root))
+    targets.literals.includes(target) ||
+    targets.subpaths.some((root) => isInside(target, root))
   );
 }
 

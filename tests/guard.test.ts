@@ -7,6 +7,7 @@ import { canonicalName, checkToolCall, hostDirectory, patchPaths } from "../src/
 import { loadConfig } from "../src/policy.ts";
 import type { GuardConfig } from "../src/policy.ts";
 import { resolveTarget } from "../src/predicate.ts";
+import { hasAliasLookup, inspectPath } from "../src/paths.ts";
 
 const policyPath = process.env.OPENCODE_SECRET_GUARD_CONFIG;
 if (!policyPath) throw new Error("OPENCODE_SECRET_GUARD_CONFIG must be set");
@@ -286,8 +287,11 @@ describe("read of a misspelled name", () => {
     expect(canonicalName("a b")).not.toBe(canonicalName("a_b"));
   });
 
-  test("is allowed when the file it would open is ordinary", () => {
-    expect(() => check("read", { path: "plain\u00a0name.txt" })).not.toThrow();
+  test("an ordinary Unicode fallback requires unambiguous lookup metadata", () => {
+    const requested = "plain\u00a0name.txt";
+    const read = () => check("read", { path: requested });
+    if (hasAliasLookup(inspectPath(path.join(repo, requested)))) expect(read).toThrow("blocked");
+    else expect(read).not.toThrow();
   });
 
   test("is allowed when nothing resembles the missing name", () => {

@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -10,6 +10,7 @@ import { configPath, loadConfig, opencodeConfigDirectory } from "../src/policy.t
 import type { GuardConfig } from "../src/policy.ts";
 import { classifyPath, classifyPaths } from "../src/predicate.ts";
 import { buildProfile } from "../src/profile.ts";
+import * as lookup from "../src/lookup.ts";
 import { encodeHint, expectedShell, failureHint, resolveForShell, resolveProfile, scrubbedEnvironment } from "../src/shell.ts";
 
 const policyPath = process.env.OPENCODE_SECRET_GUARD_CONFIG;
@@ -22,6 +23,8 @@ const baseConfig = loadConfig(policyPath);
 
 let repo: string;
 let config: GuardConfig;
+let restoreModes: () => void;
+let setMode: (mode: lookup.LookupMode) => void;
 
 /** Writes a file, creating parents. */
 function put(relative: string, contents = "x\n"): string {
@@ -32,6 +35,13 @@ function put(relative: string, contents = "x\n"): string {
 }
 
 beforeAll(() => {
+  // These tests describe the legacy sensitive-path policy. Other lookup modes
+  // have explicit coverage rather than depending on the CI host's filesystem.
+  const modes = spyOn(lookup, "readDirectoryModes").mockImplementation((target) =>
+    Array(target.split(path.sep).filter(Boolean).length + 1).fill("sensitive"));
+  restoreModes = () => modes.mockRestore();
+  setMode = (mode) => modes.mockImplementation((target) =>
+    Array(target.split(path.sep).filter(Boolean).length + 1).fill(mode));
   repo = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "secret-guard-")));
 
   put(".env", "TOKEN=live\n");
@@ -99,10 +109,22 @@ beforeAll(() => {
 });
 
 afterAll(() => {
+  restoreModes();
   fs.rmSync(repo, { recursive: true, force: true });
 });
 
 const verdict = (relative: string) => classifyPath(path.join(repo, relative), config);
+
+test.each(["insensitive", "unknown"] as const)("%s lookup does not reuse sensitive-only naming grants", (mode) => {
+  setMode(mode);
+  try {
+    for (const relative of [".env.example", "node_modules/pkg/index.js", "dist/app.js", "templates/postgresql/secret.yaml"]) {
+      expect(verdict(relative)).toBe("deny");
+    }
+  } finally {
+    setMode("sensitive");
+  }
+});
 
 /** The V1 hooks, as OpenCode V1 builds them for a project at `repo`. */
 const v1 = (guardConfig: GuardConfig, moduleDirectory = path.join(repo, "package", "lib")) =>
