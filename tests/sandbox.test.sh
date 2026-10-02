@@ -532,11 +532,11 @@ assert_untampered "symlinked policy" "$linked_policy"
 assert_untampered "the policy the link points at" "$policy_destination"
 expect_true "the policy link itself survives" test -L "$linked_policy"
 
-echo "== the file-tool predicate and the kernel must agree =="
+echo "== file tools must not grant more than the strict kernel profile =="
 # classifyPath mirrors buildProfile by hand. Every other test in this suite
 # exercises one layer or the other, so the two could drift apart without a
-# single failure — leaving a secret guarded where the agent reads files and
-# exposed where it runs commands, or the reverse. This compares them directly.
+# single failure. Sensitive paths must agree; the alias-aware file guard may
+# deliberately refuse more, but it must never grant what the kernel refuses.
 drift_paths="$scratch/drift-paths"
 find "$fixture" "$public_fixture" "$vault" "$fakehome" \
   \( -name .git -type d -prune \) -o -type f -print | sort > "$drift_paths"
@@ -550,13 +550,18 @@ if ! SG_EXEMPT_ROOTS="$vault/memory" SG_DENY_ROOTS="$vault" HOME="$fakehome" \
 fi
 
 drift=0
-while read -r predicate target; do
-  if HOME="$fakehome" sandbox-exec -f "$strict" /bin/cat "$target" >/dev/null 2>&1; then
+conservative=0
+while read -r predicate lookup target; do
+  if output="$(HOME="$fakehome" sandbox-exec -f "$strict" /bin/cat "$target" 2>/dev/null)"; then
     kernel="allow"
   else
     kernel="deny"
   fi
-  if [[ "$predicate" != "$kernel" ]]; then
+  # A secret marker allowed by the kernel is always a leak, not an accepted
+  # conservative difference. Only public fixtures may take this exception.
+  if [[ "$predicate" == "deny" && "$kernel" == "allow" && "$lookup" == "alias" && "$output" != *"$SECRET"* ]]; then
+    conservative=$((conservative + 1))
+  elif [[ "$predicate" != "$kernel" ]]; then
     drift=$((drift + 1))
     failures+=("DRIFT: predicate=$predicate kernel=$kernel $target")
     printf '  FAIL  drift: predicate=%s kernel=%s %s\n' "$predicate" "$kernel" "$target"
@@ -565,7 +570,8 @@ done < "$drift_verdicts"
 
 if ((drift == 0)); then
   pass=$((pass + 1))
-  printf '  ok    both layers agree on %s files\n' "$(wc -l < "$drift_verdicts" | tr -d ' ')"
+  printf '  ok    %s files compared; file tools conservatively refused %s alias paths\n' \
+    "$(wc -l < "$drift_verdicts" | tr -d ' ')" "$conservative"
 else
   fail=$((fail + drift))
 fi
