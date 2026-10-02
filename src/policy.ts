@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { exemptRootContaining, pinExemptRoots } from "./exemptions.ts";
 
 /**
  * Policy file format understood by this build. The writer declares it and the
@@ -308,21 +309,7 @@ export function validateConfig(
   const relaxationGroups = requireRelaxationGroups(record.relaxationGroups, source);
   const denyRoots = requireRoots(record.denyRoots, "denyRoots", source, home);
   const exemptRoots = requireRoots(record.exemptRoots, "exemptRoots", source, home);
-  // An exempt root allows every write below it and is the last rule, so one
-  // above a credential root would re-enable renaming that root out from under
-  // its pattern. Exempt roots are for a subtree inside a denied one, not around it.
-  const guardedRoots = [
-    ...denyRoots,
-    ...Object.values(relaxationGroups).flatMap((group) => group.allowPaths.map((relative) => path.join(home, relative))),
-  ];
-  for (const exempt of exemptRoots) {
-    const covered = guardedRoots.find((root) => root === exempt || root.startsWith(`${exempt}/`));
-    if (covered) {
-      throw configError(source, `"exemptRoots" entry ${exempt} contains the guarded path ${covered}; an exempt root must lie inside a guarded one, not around it`);
-    }
-  }
-
-  return {
+  const config: GuardConfig = {
     configVersion: SUPPORTED_CONFIG_VERSION,
     mode: mode as GuardMode,
     cleanupRoot,
@@ -344,6 +331,20 @@ export function validateConfig(
       : requireRegexArray(record.secretEnvironmentPatterns, "secretEnvironmentPatterns", source),
     cacheTtlMs: record.cacheTtlMs,
   };
+
+  // An exemption above a guarded root would reopen renaming that guarded root.
+  // Pin once, then compare ancestor identities without helper processes.
+  const guardedRoots = pinExemptRoots(config).length === 0 ? [] : [
+    ...denyRoots,
+    ...Object.values(relaxationGroups).flatMap((group) => group.allowPaths.map((relative) => path.join(home, relative))),
+  ];
+  for (const guarded of guardedRoots) {
+    const containing = exemptRootContaining(config, guarded);
+    if (containing) {
+      throw configError(source, `"exemptRoots" entry ${containing} contains the guarded path ${guarded}; an exempt root must lie inside a guarded one, not around it`);
+    }
+  }
+  return config;
 }
 
 export function loadConfig(source = configPath(), home = os.homedir()): GuardConfig {

@@ -1,10 +1,12 @@
 import * as os from "node:os";
 import * as path from "node:path";
-import { findRepoRoot, HELM_SECRET_FILENAME_PATTERN, isGitIgnored, primeIgnoreCache, trackedHelmSecretTemplate } from "./gitignore.ts";
-import { isExistingDirectory, isInside, matchesAny, realpath } from "./paths.ts";
+import { findRepoRoot, HELM_SECRET_FILENAME_PATTERN, isGitIgnored, isPossiblyGitIgnored, possibleIgnoreVerdicts, primeIgnoreCache, trackedHelmSecretTemplate } from "./gitignore.ts";
+import { hasAliasLookup, inspectPath, isExistingDirectory, isInside, realpath, type PathEvidence } from "./paths.ts";
+import { matchPathPattern, mayBeInside } from "./path-pattern.ts";
 import type { GuardConfig } from "./policy.ts";
 import { cacheDirectory } from "./profile.ts";
-import { isTamperProtected, tamperTargets } from "./tamper.ts";
+import { mayBeTamperProtected, tamperTargets } from "./tamper.ts";
+import { validExemptRoots } from "./exemptions.ts";
 
 export type FileOperation = "read" | "write";
 
@@ -39,28 +41,47 @@ export function classifyPath(
   config: GuardConfig,
   operation: FileOperation = "read",
 ): "allow" | "deny" {
-  const canonical = realpath(path.resolve(target));
+  return classifyEvidence(inspectPath(path.resolve(target)), config, operation);
+}
 
-  if (isInside(canonical, realpath(cacheDirectory()))) return "deny";
+function classifyEvidence(
+  inspected: PathEvidence,
+  config: GuardConfig,
+  operation: FileOperation = "read",
+  exemptRoots = validExemptRoots(config),
+  aliasIgnore?: Map<string, boolean>,
+): "allow" | "deny" {
+  const canonical = inspected.canonical;
+  const aliasLookup = hasAliasLookup(inspected);
+  const possible = (patterns: string[]) => patterns.some((pattern) => matchPathPattern(pattern, inspected).mayMatch);
+  const certain = (patterns: string[]) => patterns.some((pattern) => matchPathPattern(pattern, inspected).mustMatch);
+
+  if (mayBeInside(inspected, realpath(cacheDirectory()))) return "deny";
   if (operation === "write") {
     const targets = tamperTargets({
       repoRoot: findRepoRoot(canonical),
       pathEnvironment: process.env.PATH,
       home: os.homedir(),
     });
-    if (isTamperProtected(canonical, targets)) return "deny";
+    if (mayBeTamperProtected(inspected, targets)) return "deny";
   }
-  if (config.exemptRoots.some((root) => isInside(canonical, realpath(root)))) return "allow";
-  if (config.denyRoots.some((root) => isInside(canonical, realpath(root)))) return "deny";
+  // A root exemption names a real directory, not a folded text prefix. A missing
+  // root cannot grant a capability whose lookup identity has not been established.
+  if (exemptRoots.some((root) => isInside(canonical, root))) return "allow";
+  if (config.denyRoots.some((root) => mayBeInside(inspected, realpath(root)))) return "deny";
   if (config.secretPatterns.includes(HELM_SECRET_FILENAME_PATTERN) &&
-    matchesAny(canonical, [HELM_SECRET_FILENAME_PATTERN]) &&
-    !matchesAny(canonical, config.secretPatterns.filter((pattern) => pattern !== HELM_SECRET_FILENAME_PATTERN)) &&
+    !aliasLookup &&
+    possible([HELM_SECRET_FILENAME_PATTERN]) &&
+    !possible(config.secretPatterns.filter((pattern) => pattern !== HELM_SECRET_FILENAME_PATTERN)) &&
     trackedHelmSecretTemplate(config.tools.git, canonical)) return "allow";
-  if (matchesAny(canonical, config.secretExceptions)) return "allow";
-  if (matchesAny(canonical, config.secretPatterns)) return "deny";
+  if (certain(config.secretExceptions)) return "allow";
+  if (possible(config.secretPatterns)) return "deny";
   // An ignored *directory* stays listable, matching the profile: enumeration
   // reveals names, and names are not the secret. Its files stay denied.
-  if (isGitIgnored(config.tools.git, canonical, config.artifactAllowlist)) {
+  const ignored = aliasLookup
+    ? aliasIgnore?.get(canonical) ?? isPossiblyGitIgnored(config.tools.git, canonical)
+    : isGitIgnored(config.tools.git, canonical, config.artifactAllowlist);
+  if (ignored) {
     return isExistingDirectory(canonical) ? "allow" : "deny";
   }
   return "allow";
@@ -77,10 +98,27 @@ export function classifyPaths(
   targets: string[],
   config: GuardConfig,
 ): Map<string, "allow" | "deny"> {
-  const canonical = targets.map((target) => realpath(path.resolve(target)));
+  const evidence = targets.map((target) => {
+    try {
+      return inspectPath(path.resolve(target));
+    } catch {
+      return null;
+    }
+  });
 
+  const valid = evidence.filter((target): target is PathEvidence => target !== null);
+  let aliasIgnore: Map<string, boolean> | undefined;
+  let exemptions: string[];
   try {
-    primeIgnoreCache(config.tools.git, canonical, config.artifactAllowlist);
+    exemptions = validExemptRoots(config);
+  } catch {
+    return new Map(targets.map((target) => [target, "deny"]));
+  }
+  try {
+    primeIgnoreCache(config.tools.git, valid.filter((target) => !hasAliasLookup(target))
+      .map((target) => target.canonical), config.artifactAllowlist);
+    aliasIgnore = possibleIgnoreVerdicts(config.tools.git, valid.filter(hasAliasLookup)
+      .map((target) => target.canonical));
   } catch {
     // Fall through: classifyPath asks git per path.
   }
@@ -88,7 +126,8 @@ export function classifyPaths(
   const verdicts = new Map<string, "allow" | "deny">();
   targets.forEach((target, index) => {
     try {
-      verdicts.set(target, classifyPath(canonical[index]!, config));
+      if (evidence[index] === null) throw new Error("Path normalization failed");
+      verdicts.set(target, classifyEvidence(evidence[index]!, config, "read", exemptions, aliasIgnore));
     } catch {
       verdicts.set(target, "deny");
     }

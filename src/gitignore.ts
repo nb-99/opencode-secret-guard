@@ -260,3 +260,41 @@ export function isGitIgnored(git: string, target: string, artifactAllowlist: str
   ignoreCache.set(target, ignored);
   return ignored;
 }
+
+/** Case-folded negations are not proof that every lookup spelling is allowed. */
+export function isPossiblyGitIgnored(git: string, target: string): boolean {
+  return possibleIgnoreVerdicts(git, [target]).get(target)!;
+}
+
+/** One Git invocation per repository; verdicts live only for this classification. */
+export function possibleIgnoreVerdicts(git: string, targets: string[]): Map<string, boolean> {
+  const verdicts = new Map(targets.map((target) => [target, false]));
+  const byRoot = new Map<string, string[]>();
+  for (const target of targets) {
+    const root = findRepoRoot(target);
+    if (!root) continue;
+    const paths = byRoot.get(root) ?? [];
+    paths.push(target);
+    byRoot.set(root, paths);
+  }
+  // Any rule hit, including a negation, is conservatively protected here. Git
+  // supplies the glob grammar; the guard does not reimplement it or cache grants.
+  for (const [root, paths] of byRoot) {
+    const result = runGit(git, ["-C", root, "-c", "core.ignorecase=true", "check-ignore", "-v", "-z", "--stdin"], {
+      input: paths.join("\0") + "\0",
+    });
+    if (result.status !== 0 && result.status !== 1) {
+      throw new Error("secret-guard: cannot establish case-alias gitignore protection.");
+    }
+    const fields = result.stdout.split("\0");
+    if (fields.at(-1) !== "" || (fields.length - 1) % 4 !== 0) {
+      throw new Error("secret-guard: invalid case-alias gitignore response.");
+    }
+    for (let index = 3; index < fields.length - 1; index += 4) {
+      const target = fields[index]!;
+      if (!verdicts.has(target)) throw new Error("secret-guard: gitignore returned an unexpected path.");
+      verdicts.set(target, true);
+    }
+  }
+  return verdicts;
+}

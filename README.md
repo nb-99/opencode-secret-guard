@@ -21,7 +21,9 @@ This enforces the boundary where expansion cannot reach it:
   `files.drop`, `preview`) are checked as reads.
 
 Both layers are derived from one policy file, and a test compares their verdicts
-against each other on every run.
+on ordinary paths. File-tool matching is additionally conservative for
+case-insensitive or unknown filesystem lookup modes; the kernel regex profile
+does not implement that alias matching.
 
 The rule is: a credential may be **used**, never **read**. `git push` reaches
 `~/.ssh` because git needs it; `cat ~/.ssh/id_ed25519` does not, and neither
@@ -156,13 +158,13 @@ with a leading `~`, expanded at runtime, so a policy is portable between hosts.
 | `mode`                      | `shell+files` or `files-only`                                                           |
 | `cleanupRoot`               | Opt-in root for `cleanup_temp`, may start with `~` or `$TMPDIR`; `null` disables it and files-only mode cannot enable it |
 | `tools.git`                 | Absolute path of the git the guard spawns; never resolved through `PATH`                |
-| `secretPatterns`            | Regexes denied in both layers                                                           |
-| `secretExceptions`          | Re-allowed after the deny block                                                         |
-| `artifactAllowlist`         | Path components re-allowed against the gitignore layer                                  |
+| `secretPatterns`            | JavaScript regexes; alias paths use the bounded grammar described below                  |
+| `secretExceptions`          | Naming allowances; alias paths require a proved universal match                         |
+| `artifactAllowlist`         | Sensitive-path components re-allowed against the gitignore layer                         |
 | `relaxationGroups`          | Per-binary credential access, e.g. `git` → `~/.ssh`, plus `allowEnvironment`            |
 | `secretPrintingCommands`    | Invocations refused outright because their output is the credential                    |
 | `denyRoots`                 | Never relaxed, never excepted                                                           |
-| `exemptRoots`               | Overrides everything above                                                              |
+| `exemptRoots`               | Explicit subtree exemptions; file tools require an existing directory, and cache/write-tamper protection takes precedence |
 | `secretEnvironment`         | Variable names scrubbed before a command runs, always                                   |
 | `secretEnvironmentPatterns` | Regexes; every inherited variable whose name matches is scrubbed                        |
 | `cacheTtlMs`                | How often a profile is regenerated                                                      |
@@ -179,6 +181,33 @@ editable, including by `helm lint`. Ignored or untracked lookalikes keep the
 usual secret-file restriction. Other secret patterns and denied roots still
 apply. Chart templates should not contain plaintext credentials; the guard
 checks their path and Git status, not their contents.
+
+### Filesystem case aliases
+
+File tools obtain per-directory lookup metadata from the bundled `path-lookup`
+helper. Known-sensitive paths keep JavaScript regex semantics. Insensitive or
+unknown paths use a bounded ASCII path-pattern grammar: a possible deny match
+protects every alias, while a naming exception must cover every spelling.
+Unsupported syntax, Unicode ambiguity, and evaluation limits cannot grant an
+exception. A proved prefix exception is independent of unknown descendants.
+An unsupported custom deny pattern conservatively refuses every alias-bearing
+path unless an explicit root exemption applies. Unsupported custom naming
+exceptions never grant access there. Policy loading retains arbitrary valid
+JavaScript regexes for known-sensitive paths rather than rejecting them globally.
+
+The tested WSL mount exposes no usable directory case attribute. Its mode is
+unknown. Naming exceptions, ignored artifacts, and Helm-template allowances can
+be refused on both unknown and known-insensitive filesystems, including default
+macOS APFS. The guard does not automatically widen their allowances. Explicit
+existing-directory exemptions remain available, but a missing exemption root
+grants no file-tool access until it exists and the policy is reloaded. Loaded
+file-tool policies pin each exempt directory's identity and drop its grant if
+the root is replaced or retargeted. The shell profile does not have this lasting
+identity binding; inode reuse and filesystem check/use races also remain.
+
+See [the supported grammar and decision](docs/adr/0001-case-alias-policy.md)
+and [the WSL verification and limits](docs/wsl-case-matching.md). This does not
+add shell isolation to `files-only` mode.
 
 The current policy format is version 3. Version-1 and version-2 policies still
 load: `tools.git` defaults to `/usr/bin/git`, and `secretEnvironmentPatterns`,
@@ -302,6 +331,19 @@ all writes by ordinary shell commands.
 nix flake check        # typecheck, unit tests, default-policy and layout checks
 nix run .#integration  # + kernel tests
 ```
+
+Nix tests provide the native lookup helper automatically. For direct Bun tests
+from a checkout, install the locked npm dependencies and link the built helper
+at its fixed location first:
+
+```sh
+npm ci
+nix build .#default
+ln -s ../result/bin/path-lookup bin/path-lookup
+```
+
+Without that helper, a checkout deliberately treats lookup metadata as unknown.
+The generated helper link is ignored by Git.
 
 The kernel suite must run from a plain terminal. `sandbox-exec` refuses to apply
 a profile inside an existing sandbox, and the suite's fixtures are exactly what

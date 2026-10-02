@@ -70,6 +70,9 @@ in
         mkdir -p pkg
         cp -r ${../src} pkg/src
         cp -r ${../tests} pkg/tests
+        cp -r ${../policy} pkg/policy
+        mkdir -p pkg/bin
+        ln -s ${package}/bin/path-lookup pkg/bin/path-lookup
         mkdir -p node_modules
         ln -s ${zod} node_modules/zod
         export HOME="$TMPDIR"
@@ -210,6 +213,8 @@ in
   # <package>/bin/opencode-secret-guard beside <package>/lib.
   layout = pkgs.runCommand "secret-guard-layout" { nativeBuildInputs = [ pkgs.bun ]; } ''
     test -x ${package}/bin/opencode-secret-guard
+    test -x ${package}/bin/path-lookup
+    test -f ${package}/lib/lookup.ts
     test -f ${package}/lib/index.ts
     test -f ${package}/lib/cli.ts
     test -f ${package}/lib/cleanup.ts
@@ -227,6 +232,13 @@ in
       const expected = expectedShell("${package}/lib");
       if (expected !== "${package}/bin/opencode-secret-guard") {
         throw new Error("layout mismatch: " + expected);
+      }
+      const { readDirectoryModes } = await import("${package}/lib/lookup.ts");
+      const result = Bun.spawnSync(["${package}/bin/path-lookup", "/"]);
+      if (result.exitCode !== 0) throw new Error("lookup helper failed");
+      const native = JSON.parse(new TextDecoder().decode(result.stdout));
+      if (JSON.stringify(readDirectoryModes("/")) !== JSON.stringify(native)) {
+        throw new Error("lookup helper layout mismatch");
       }
     '
     touch $out

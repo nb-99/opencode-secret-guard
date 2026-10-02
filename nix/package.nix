@@ -5,6 +5,7 @@
   bash,
   bun,
   callPackage,
+  stdenv,
 }:
 
 let
@@ -19,6 +20,7 @@ runCommand "opencode-secret-guard"
     nativeBuildInputs = [
       makeWrapper
       bash
+      stdenv.cc
     ];
 
     meta = {
@@ -29,6 +31,7 @@ runCommand "opencode-secret-guard"
   }
   ''
     mkdir -p "$out/lib" "$out/bin" "$out/share/opencode-secret-guard"
+    cc -std=c11 -O2 -Wall -Wextra -Werror ${../native/path-lookup.c} -o "$out/bin/path-lookup"
     cp ${../src}/*.ts "$out/lib/"
     mkdir -p "$out/lib/node_modules"
     ln -s ${zod} "$out/lib/node_modules/zod"
