@@ -1,0 +1,50 @@
+README.md
+  h_b53c9ceee800cb 163,197-208,213-218,223-224
+docs/adr/0001-case-alias-policy.md
+  h_b53c9ceee800cb 3,35-38,49-53,75-83
+docs/adr/0002-file-tool-exemption-identities.md
+  h_b53c9ceee800cb 3,27-30
+docs/wsl-case-matching.md
+  h_b53c9ceee800cb 3-5,40,49-52,58-84,92-93
+native/path-lookup.c
+  h_b53c9ceee800cb 30-34,58-66,69,80,82-114
+nix/checks.nix
+  h_b53c9ceee800cb 236,240-242,246-275
+src/exemptions.ts
+  h_b53c9ceee800cb 99-100,104,107,113-124,128
+src/index.ts
+  h_b53c9ceee800cb 10,18-27,33,41
+src/lookup.ts
+  h_b53c9ceee800cb 8-91,96,98,107
+src/paths.ts
+  h_b53c9ceee800cb 81-106
+src/policy.ts
+  h_b53c9ceee800cb 5,371-386
+src/predicate.ts
+  h_b53c9ceee800cb 4,73,80,82-83,91-109,112,121
+tests/exemptions.test.ts
+  h_b53c9ceee800cb 51-66
+tests/gitignore-case.test.ts
+  h_b53c9ceee800cb 62,68
+tests/lookup.test.ts
+  h_b53c9ceee800cb 1-141
+tests/path-pattern.test.ts
+  h_b53c9ceee800cb 93-106
+tests/paths.test.ts
+  h_b53c9ceee800cb 9,26,35-36,360-444
+tests/policy-diagnostics.test.ts
+  h_b53c9ceee800cb 1-78
+tests/predicate.test.ts
+  h_b53c9ceee800cb 42-43
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.6",
+  "base_commit_sha": "5081ad44e0eda830171258106778164b75e0d539",
+  "prompts": {},
+  "humans": {
+    "h_b53c9ceee800cb": {
+      "author": "nb99 <niklas@beilmann.dev>"
+    }
+  }
+}
