@@ -1,0 +1,22 @@
+nix/integration.nix
+  h_b53c9ceee800cb 8-10
+tests/classify.ts
+  h_b53c9ceee800cb 2,7-8,17,40-41
+tests/gitignore-case.test.ts
+  h_b53c9ceee800cb 14
+tests/sandbox.test.sh
+  h_b53c9ceee800cb 535,538-539,553-555,560-564,573-574
+tests/tamper.test.ts
+  h_b53c9ceee800cb 172
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.6",
+  "base_commit_sha": "80e440113bcad9fe4149e19672193eae0b5a691b",
+  "prompts": {},
+  "humans": {
+    "h_b53c9ceee800cb": {
+      "author": "nb99 <niklas@beilmann.dev>"
+    }
+  }
+}
