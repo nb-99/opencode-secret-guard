@@ -9,24 +9,26 @@
 import * as path from "node:path";
 import { checkToolCall, FILES_ONLY_WARNING, guardsTool, hostDirectory, isRecord } from "./guard.ts";
 import type { GuardConfig } from "./policy.ts";
+import { setupPermissionReview } from "./permission-review.ts";
+import type { ReviewCleanup, ReviewContext, ReviewDependencies, ToolCallBefore, ToolCallIdentity } from "./permission-review.ts";
 import { classifyPaths } from "./predicate.ts";
 import { validatePlatform, validateShell } from "./shell.ts";
 
 type MaybePromise = void | Promise<void>;
 
-interface ToolBefore {
-  tool: string;
-  input: unknown;
-}
+type ToolBefore = ToolCallBefore;
 
-interface ToolAfter {
+interface ToolAfter extends ToolCallIdentity {
   tool: string;
   status: string;
   result?: { output?: unknown; content?: unknown; metadata?: unknown };
 }
 
-/** V2's context subset; see index.ts for the structural typing rationale. */
-export interface V2Context {
+/**
+ * V2's context subset; see index.ts for the structural typing rationale. The
+ * reviewer's members are optional and read only when it is enabled.
+ */
+export interface V2Context extends Omit<ReviewContext, "tool"> {
   readonly location: { readonly directory: string };
   readonly shell: {
     hook(name: "create.before", callback: (event: { shell?: unknown }) => MaybePromise): Promise<unknown>;
@@ -215,7 +217,12 @@ function pinShell(event: { shell?: unknown }, check: (shell: unknown) => void): 
  * host creates, because V2 resolves the configured shell afresh and falls back
  * to the platform shell when that path is not a file.
  */
-export async function setupV2(ctx: V2Context, guardConfig: GuardConfig, moduleDirectory: string): Promise<void> {
+export async function setupV2(
+  ctx: V2Context,
+  guardConfig: GuardConfig,
+  moduleDirectory: string,
+  reviewDependencies: Partial<ReviewDependencies> = {},
+): Promise<ReviewCleanup | undefined> {
   validatePlatform(guardConfig);
   const base = hostDirectory(ctx.location?.directory);
 
@@ -255,9 +262,15 @@ export async function setupV2(ctx: V2Context, guardConfig: GuardConfig, moduleDi
     }
   });
 
+  // After the guard's own hooks, so the reviewer sees only calls the guard let
+  // through, and its failures never reach the guard's startup path.
+  const review = guardConfig.permissionReview.mode;
+  const cleanup = review === "off" ? undefined : await setupPermissionReview(ctx, review, base, guardConfig, reviewDependencies);
+
   if (guardConfig.cleanupRoot) {
     process.stderr.write(`secret-guard: cleanup_temp is not available on OpenCode V2 (${CLEANUP_ISSUE}).\n`);
   }
+  return cleanup;
 }
 
 /**

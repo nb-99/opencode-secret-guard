@@ -1,7 +1,7 @@
 import type { V2Context } from "../src/v2.ts";
 
 /** A V2 context that records hook registrations and replays events in order. */
-export function host(directory: string | undefined, shellHook?: () => Promise<never>) {
+export function host(directory: string | undefined, shellHook?: () => Promise<never>, extra: Record<string, unknown> = {}) {
   const registered = new Map<string, Array<(event: any) => unknown>>();
   const register = (domain: string) => async (name: string, callback: (event: any) => unknown) => {
     const key = `${domain}.${name}`;
@@ -11,6 +11,8 @@ export function host(directory: string | undefined, shellHook?: () => Promise<ne
     location: { directory },
     shell: { hook: shellHook ?? register("shell") },
     tool: { hook: register("tool") },
+    permission: { hook: register("permission") },
+    ...extra,
   } as unknown as V2Context;
   const emit = async <E>(key: string, event: E): Promise<E> => {
     for (const callback of registered.get(key) ?? []) await callback(event);

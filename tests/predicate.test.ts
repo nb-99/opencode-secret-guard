@@ -154,7 +154,7 @@ describe("configuration loading", () => {
   });
 
   test("the generated policy validates", () => {
-    expect(baseConfig.configVersion).toBe(4);
+    expect(baseConfig.configVersion).toBe(5);
     expect(baseConfig.secretPatterns.length).toBeGreaterThan(0);
   });
 
@@ -175,7 +175,10 @@ describe("configuration loading", () => {
   });
 
   test.each([
-    ["a newer configVersion", { configVersion: 5 }, /unsupported configVersion 5/],
+    ["a newer configVersion", { configVersion: 6 }, /unsupported configVersion 6/],
+    ["an unknown permissionReview mode", { permissionReview: { mode: "on" } }, /"permissionReview.mode" must be one of/],
+    ["an unknown permissionReview key", { permissionReview: { mode: "auto", model: "x" } }, /unknown keys: model/],
+    ["a non-object permissionReview", { permissionReview: "auto" }, /"permissionReview" must be an object/],
     ["a missing configVersion", { configVersion: undefined }, /unsupported configVersion/],
     ["a non-string list entry", { artifactAllowlist: ["dist", 7] }, /must be an array of strings/],
     ["a negative cacheTtlMs", { cacheTtlMs: -1 }, /"cacheTtlMs"/],
@@ -184,7 +187,7 @@ describe("configuration loading", () => {
     ["a relative write-protected root", { writeProtectedRoots: ["Applications/OpenCode.app"] }, /absolute path/],
     [
       "a write-protected root in a policy older than version 4",
-      { configVersion: 3, writeProtectedRoots: ["/Applications/OpenCode.app"] },
+      { configVersion: 3, permissionReview: undefined, writeProtectedRoots: ["/Applications/OpenCode.app"] },
       /"writeProtectedRoots" requires configVersion 4/,
     ],
     ["a non-object relaxationGroups", { relaxationGroups: [] }, /must be an object/],
@@ -203,12 +206,22 @@ describe("configuration loading", () => {
   });
 
   test("a version-2 policy loads with the fixed git and no environment patterns", () => {
-    const { tools, secretEnvironmentPatterns, writeProtectedRoots, ...rest } = valid();
+    const { tools, secretEnvironmentPatterns, writeProtectedRoots, permissionReview, ...rest } = valid();
     const loaded = loadConfig(policy("v2.json", { ...rest, configVersion: 2 }));
     expect(loaded.tools.git).toBe("/usr/bin/git");
     expect(loaded.secretEnvironmentPatterns).toEqual([]);
     expect(loaded.writeProtectedRoots).toEqual([]);
-    expect(loaded.configVersion).toBe(4);
+    expect(loaded.permissionReview).toEqual({ mode: "off" });
+    expect(loaded.configVersion).toBe(5);
+  });
+
+  test("permissionReview needs configVersion 5 and defaults to off", () => {
+    expect(loadConfig(policy("review-off.json", { ...valid(), permissionReview: undefined })).permissionReview)
+      .toEqual({ mode: "off" });
+    expect(loadConfig(policy("review-auto.json", { ...valid(), permissionReview: { mode: "auto" } })).permissionReview)
+      .toEqual({ mode: "auto" });
+    expect(() => loadConfig(policy("review-v4.json", { ...valid(), configVersion: 4, permissionReview: { mode: "auto" } })))
+      .toThrow(/requires configVersion 5/);
   });
 
   test("an uncompilable secret pattern is rejected", () => {
