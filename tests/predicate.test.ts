@@ -154,7 +154,7 @@ describe("configuration loading", () => {
   });
 
   test("the generated policy validates", () => {
-    expect(baseConfig.configVersion).toBe(3);
+    expect(baseConfig.configVersion).toBe(4);
     expect(baseConfig.secretPatterns.length).toBeGreaterThan(0);
   });
 
@@ -175,7 +175,10 @@ describe("configuration loading", () => {
   });
 
   test.each([
-    ["a newer configVersion", { configVersion: 4 }, /unsupported configVersion 4/],
+    ["a newer configVersion", { configVersion: 5 }, /unsupported configVersion 5/],
+    ["an unknown permissionReview mode", { permissionReview: { mode: "on" } }, /"permissionReview.mode" must be one of/],
+    ["an unknown permissionReview key", { permissionReview: { mode: "auto", model: "x" } }, /unknown keys: model/],
+    ["a non-object permissionReview", { permissionReview: "auto" }, /"permissionReview" must be an object/],
     ["a missing configVersion", { configVersion: undefined }, /unsupported configVersion/],
     ["a non-string list entry", { artifactAllowlist: ["dist", 7] }, /must be an array of strings/],
     ["a negative cacheTtlMs", { cacheTtlMs: -1 }, /"cacheTtlMs"/],
@@ -197,11 +200,21 @@ describe("configuration loading", () => {
   });
 
   test("a version-2 policy loads with the fixed git and no environment patterns", () => {
-    const { tools, secretEnvironmentPatterns, ...rest } = valid();
+    const { tools, secretEnvironmentPatterns, permissionReview, ...rest } = valid();
     const loaded = loadConfig(policy("v2.json", { ...rest, configVersion: 2 }));
     expect(loaded.tools.git).toBe("/usr/bin/git");
     expect(loaded.secretEnvironmentPatterns).toEqual([]);
-    expect(loaded.configVersion).toBe(3);
+    expect(loaded.permissionReview).toEqual({ mode: "off" });
+    expect(loaded.configVersion).toBe(4);
+  });
+
+  test("permissionReview needs configVersion 4 and defaults to off", () => {
+    expect(loadConfig(policy("review-off.json", { ...valid(), permissionReview: undefined })).permissionReview)
+      .toEqual({ mode: "off" });
+    expect(loadConfig(policy("review-auto.json", { ...valid(), permissionReview: { mode: "auto" } })).permissionReview)
+      .toEqual({ mode: "auto" });
+    expect(() => loadConfig(policy("review-v3.json", { ...valid(), configVersion: 3, permissionReview: { mode: "auto" } })))
+      .toThrow(/requires configVersion 4/);
   });
 
   test("an uncompilable secret pattern is rejected", () => {

@@ -37,7 +37,8 @@ payloads at its boundary and translates them into `checkToolCall` arguments.
 The package uses local structural types rather than `@opencode/plugin`.
 `Plugin.define` is an identity function, and the loader accepts the object
 export directly. Avoiding the SDK also avoids vendoring its dependency tree for
-the hermetic typecheck; the package vendors only Zod for the V1 cleanup tool.
+the hermetic typecheck; the package vendors only Zod, used by the V1 cleanup
+tool and by the V2 permission reviewer.
 
 | Purpose | V1 | V2 |
 | --- | --- | --- |
@@ -52,6 +53,30 @@ V2 before-hooks cover built-in, plugin and MCP calls, including subagent calls
 at the same location, before the executor's permission checks ([source][v2-tool]).
 Live Code Mode checks confirmed that inner calls reach the hook under their
 effective tool names.
+
+### Permission review dependencies
+
+The optional [permission reviewer](permission-review.md) uses V2 host
+contracts that were checked against the [v2.0.20][v2.0.20-tag] and
+[v2.0.23][v2.0.23-tag] source, not in a live session:
+
+- `permission` `evaluate` runs after the rulesets resolve a request's effect
+  and lets a plugin change it ([source][v2-permission]).
+- A tool permission request's `source` carries the tool call's `messageID` and
+  `id`, which correlate it with the `tool` `execute.before` and `execute.after`
+  events ([source][v2-plugin-tool]).
+- `session.get` and `session.context` return the session and its messages;
+  message types include `user` and `compaction` ([source][v2-session-message]).
+- `integration.connection.active` and `resolve` return the saved credential
+  for an integration ([source][v2-integration]).
+- `event.subscribe` streams host events ([source][v2-plugin-event]). The
+  reviewer cancels reviews on `session.execution.interrupted`,
+  `session.deleted`, `session.moved` and `session.inbox.*` events
+  ([source][v2-session-event]), and stops reviewing a session after a
+  `permission.replied` rejection ([source][v2-schema-permission]).
+- A plugin's `setup` may return a cleanup function
+  ([source][v2-plugin-cleanup]); the guard returns the reviewer's, which
+  closes its event subscription.
 
 ### Startup and shell checks
 
@@ -175,6 +200,12 @@ classification. The no-break-space read substitution could not be tested live
 because the submitted path became a plain space; unit tests cover it. A captured
 real glob/grep fixture would provide a regression check for rebuilt formatting.
 
+The [permission reviewer](permission-review.md) has unit tests with stubbed
+host APIs and System One, but no live checks yet: the `evaluate` hook and
+tool-call correlation, the event stream and cleanup, session and credential
+lookup, the System One call, `observe` prompt notes and `auto` approvals, the
+V2 unavailable notices, and where its stderr lines appear in the TUI.
+
 ## Source versions
 
 Hook and tool contracts were read from [V2 2.0.16][v2-tag] and
@@ -187,6 +218,8 @@ the tested host to V2 2.0.20.
 [migrate]: https://opencode.ai/v2/docs/build/plugins/migrate-v1
 [plugins]: https://opencode.ai/v2/docs/build/plugins
 [v2-tag]: https://github.com/anomalyco/opencode/tree/v2.0.16
+[v2.0.20-tag]: https://github.com/anomalyco/opencode/tree/v2.0.20
+[v2.0.23-tag]: https://github.com/anomalyco/opencode/tree/v2.0.23
 [v1-tag]: https://github.com/anomalyco/opencode/tree/v1.18.33
 [v2-source]: https://github.com/anomalyco/opencode/blob/v2.0.16/packages/core/src/config/plugin/source.ts
 [v2-host]: https://github.com/anomalyco/opencode/blob/v2.0.16/packages/plugin/src/host.ts
@@ -196,6 +229,14 @@ the tested host to V2 2.0.20.
 [v1-bash]: https://github.com/anomalyco/opencode/blob/v1.18.33/packages/opencode/src/tool/shell.ts
 [v2-plugin-service]: https://github.com/anomalyco/opencode/blob/v2.0.16/packages/core/src/plugin.ts
 [v2-tool]: https://github.com/anomalyco/opencode/blob/v2.0.16/packages/core/src/tool.ts
+[v2-permission]: https://github.com/anomalyco/opencode/blob/v2.0.20/packages/core/src/permission.ts
+[v2-plugin-tool]: https://github.com/anomalyco/opencode/blob/v2.0.20/packages/plugin/src/promise/tool.ts
+[v2-integration]: https://github.com/anomalyco/opencode/blob/v2.0.20/packages/plugin/src/promise/integration.ts
+[v2-session-message]: https://github.com/anomalyco/opencode/blob/v2.0.20/packages/schema/src/session-message.ts
+[v2-plugin-event]: https://github.com/anomalyco/opencode/blob/v2.0.20/packages/plugin/src/promise/event.ts
+[v2-session-event]: https://github.com/anomalyco/opencode/blob/v2.0.20/packages/schema/src/session-event.ts
+[v2-schema-permission]: https://github.com/anomalyco/opencode/blob/v2.0.20/packages/schema/src/permission.ts
+[v2-plugin-cleanup]: https://github.com/anomalyco/opencode/blob/v2.0.20/packages/plugin/src/promise/plugin.ts
 [v2-patch]: https://github.com/anomalyco/opencode/blob/v2.0.16/packages/util/src/patch.ts
 [v2-glob]: https://github.com/anomalyco/opencode/blob/v2.0.16/packages/core/src/tool/plugin/glob.ts
 [v2-grep]: https://github.com/anomalyco/opencode/blob/v2.0.16/packages/core/src/tool/plugin/grep.ts

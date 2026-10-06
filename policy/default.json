@@ -1,7 +1,10 @@
 {
-  "configVersion": 3,
+  "configVersion": 4,
   "mode": "shell+files",
   "cleanupRoot": null,
+  "permissionReview": {
+    "mode": "off"
+  },
   "tools": {
     "git": "/usr/bin/git"
   },
