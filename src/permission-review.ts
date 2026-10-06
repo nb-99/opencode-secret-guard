@@ -189,7 +189,7 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
 /** The decision this module reports, with a reason code that carries no content. */
-export type ReviewOutcome = { allow: boolean; reason: string };
+export type ReviewOutcome = { allow: boolean; reason: string; score?: number };
 
 const ask = (reason: string): ReviewOutcome => ({ allow: false, reason });
 
@@ -375,11 +375,19 @@ const ReviewResponse = z.object({
 export function decide(answers: z.infer<typeof ReviewResponse>["answers"], threshold = DEFAULT_PERMISSION_REVIEW.confidenceThreshold): ReviewOutcome {
   const digits = threshold.toString().split(".")[1]?.length ?? 0;
   const negativeLimit = Number((1 - threshold).toFixed(digits));
-  if (answers.confirmation_required.noul > negativeLimit) return ask("model-confirmation-required");
-  if (answers.high_impact.noul > negativeLimit) return ask("model-high-impact");
-  if (answers.explicitly_authorized.noul < threshold) return ask("model-not-authorized");
-  if (answers.within_scope.noul < threshold) return ask("model-out-of-scope");
-  return { allow: true, reason: "model-approved" };
+  // Display only: the comparisons below decide, not this score.
+  const score = Math.min(
+    answers.explicitly_authorized.noul,
+    answers.within_scope.noul,
+    1 - answers.confirmation_required.noul,
+    1 - answers.high_impact.noul,
+  );
+  const scored = (reason: string): ReviewOutcome => ({ allow: false, reason, score });
+  if (answers.confirmation_required.noul > negativeLimit) return scored("model-confirmation-required");
+  if (answers.high_impact.noul > negativeLimit) return scored("model-high-impact");
+  if (answers.explicitly_authorized.noul < threshold) return scored("model-not-authorized");
+  if (answers.within_scope.noul < threshold) return scored("model-out-of-scope");
+  return { allow: true, reason: "model-approved", score };
 }
 
 /** Rejects with Ineligible("deadline") once `signal` aborts. */
@@ -825,6 +833,7 @@ export async function setupPermissionReview(
         proposed: verdict,
         applied: evaluation.effect,
         reason: outcome.reason,
+        ...(outcome.score === undefined ? {} : { score: outcome.score }),
         threshold,
         reviewID,
         elapsedMs: dependencies.now() - started,
@@ -835,7 +844,8 @@ export async function setupPermissionReview(
       if (evaluation.effect !== "ask") return;
       const notes: string[] = [];
       if (mode === "observe" || !outcome.allow) {
-        notes.push(formatNote(mode === "observe" && outcome.allow ? "would allow" : "manual approval", outcome.reason));
+        const observed = mode === "observe" && !outcome.allow && outcome.score !== undefined ? { score: outcome.score, threshold } : undefined;
+        notes.push(formatNote(mode === "observe" && outcome.allow ? "would allow" : "manual approval", outcome.reason, observed));
       }
       if (!logWritable) notes.push(LOG_UNAVAILABLE_NOTE);
       if (!payloadWritable) notes.push(PAYLOAD_LOG_UNAVAILABLE_NOTE);
