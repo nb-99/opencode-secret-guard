@@ -67,8 +67,8 @@ export interface GuardConfig {
 /**
  * Optional approval-only review of V2 permission prompts; see
  * permission-review.ts. "observe" reviews and reports but leaves every prompt;
- * "auto" may turn an eligible prompt into a one-time allow. Nothing else is
- * configurable: the endpoint and model are fixed so a project cannot redirect them.
+ * "auto" may turn an eligible prompt into a one-time allow. The endpoint and
+ * model are fixed so a project cannot redirect them.
  */
 export type PermissionReviewMode = "off" | "observe" | "auto";
 
@@ -76,7 +76,21 @@ export const PERMISSION_REVIEW_MODES: readonly PermissionReviewMode[] = ["off", 
 
 export interface PermissionReviewSettings {
   mode: PermissionReviewMode;
+  /** Opt-in copy of every System One request and response body; see review-log.ts. */
+  logPayloads: boolean;
+  /**
+   * t in (0.5, 1]: the positive answers must reach t and the negative ones
+   * stay at or below 1 - t. Applies to the model's yes-probabilities, which
+   * are not calibrated confidence.
+   */
+  confidenceThreshold: number;
 }
+
+export const DEFAULT_PERMISSION_REVIEW: Readonly<PermissionReviewSettings> = {
+  mode: "off",
+  logPayloads: false,
+  confidenceThreshold: 0.9,
+};
 
 /**
  * "shell+files" is the real boundary: the kernel enforces it, so it covers
@@ -270,23 +284,36 @@ export function requirePermissionReview(
   source: string,
 ): PermissionReviewSettings {
   // Policies older than version 4 predate the reviewer, so it stays off.
-  if (value === undefined) return { mode: "off" };
+  if (value === undefined) return { ...DEFAULT_PERMISSION_REVIEW };
   if (configVersion < 4) throw configError(source, '"permissionReview" requires configVersion 4 or later');
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw configError(source, '"permissionReview" must be an object');
   }
   const record = value as Record<string, unknown>;
-  const unknown = Object.keys(record).filter((key) => key !== "mode");
+  const unknown = Object.keys(record).filter((key) => !Object.hasOwn(DEFAULT_PERMISSION_REVIEW, key));
   if (unknown.length > 0) {
     throw configError(source, `"permissionReview" has unknown keys: ${unknown.join(", ")}`);
   }
-  if (!PERMISSION_REVIEW_MODES.includes(record.mode as PermissionReviewMode)) {
+  const mode = record.mode === undefined ? DEFAULT_PERMISSION_REVIEW.mode : record.mode;
+  if (!PERMISSION_REVIEW_MODES.includes(mode as PermissionReviewMode)) {
     throw configError(
       source,
       `"permissionReview.mode" must be one of ${PERMISSION_REVIEW_MODES.join(", ")}, not ${JSON.stringify(record.mode)}`,
     );
   }
-  return { mode: record.mode as PermissionReviewMode };
+  const logPayloads = record.logPayloads === undefined ? DEFAULT_PERMISSION_REVIEW.logPayloads : record.logPayloads;
+  if (typeof logPayloads !== "boolean") {
+    throw configError(source, `"permissionReview.logPayloads" must be true or false, not ${JSON.stringify(logPayloads)}`);
+  }
+  const confidenceThreshold = record.confidenceThreshold === undefined ? DEFAULT_PERMISSION_REVIEW.confidenceThreshold : record.confidenceThreshold;
+  // 0.5 would approve an answer the model is undecided about.
+  if (typeof confidenceThreshold !== "number" || !Number.isFinite(confidenceThreshold) || confidenceThreshold <= 0.5 || confidenceThreshold > 1) {
+    throw configError(
+      source,
+      `"permissionReview.confidenceThreshold" must be a number above 0.5 and at most 1, not ${JSON.stringify(confidenceThreshold)}`,
+    );
+  }
+  return { mode: mode as PermissionReviewMode, logPayloads, confidenceThreshold };
 }
 
 export function validateConfig(

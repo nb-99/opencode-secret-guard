@@ -169,6 +169,8 @@ with a leading `~`, expanded at runtime, so a policy is portable between hosts.
 | `secretEnvironmentPatterns` | Regexes; every inherited variable whose name matches is scrubbed                        |
 | `cacheTtlMs`                | How often a profile is regenerated                                                      |
 | `permissionReview.mode`     | `off` (default), `observe`, or `auto`; optional, approval-only Jev review of OpenCode V2 shell `ask` prompts; requires `configVersion` 4. See [docs/permission-review.md](docs/permission-review.md) |
+| `permissionReview.logPayloads` | `false` (default) or `true`; also logs review request and response bodies to a private local file |
+| `permissionReview.confidenceThreshold` | `0.9` (default); t above 0.5 and at most 1. Authorization and scope answers must reach t; confirmation and impact answers must stay at or below 1 − t. The scores are uncalibrated; see [docs/permission-review.md](docs/permission-review.md#how-a-request-is-approved) |
 
 Validation fails closed: an unsupported version, a wrong type, a non-absolute
 root, an `allowPaths` entry that is not `$HOME`-relative, or a pattern that does

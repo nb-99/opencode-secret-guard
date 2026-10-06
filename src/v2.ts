@@ -264,8 +264,11 @@ export async function setupV2(
 
   // After the guard's own hooks, so the reviewer sees only calls the guard let
   // through, and its failures never reach the guard's startup path.
-  const review = guardConfig.permissionReview.mode;
-  const cleanup = review === "off" ? undefined : await setupPermissionReview(ctx, review, base, guardConfig, reviewDependencies);
+  const review = guardConfig.permissionReview;
+  const cleanup =
+    review.mode === "off"
+      ? undefined
+      : await setupPermissionReview(ctx, { ...review, mode: review.mode }, base, guardConfig, reviewDependencies);
 
   if (guardConfig.cleanupRoot) {
     process.stderr.write(`secret-guard: cleanup_temp is not available on OpenCode V2 (${CLEANUP_ISSUE}).\n`);

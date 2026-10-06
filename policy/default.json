@@ -3,7 +3,9 @@
   "mode": "shell+files",
   "cleanupRoot": null,
   "permissionReview": {
-    "mode": "off"
+    "mode": "off",
+    "logPayloads": false,
+    "confidenceThreshold": 0.9
   },
   "tools": {
     "git": "/usr/bin/git"
