@@ -8,6 +8,7 @@ import type { ReviewDependencies, ReviewFetch } from "../src/permission-review.t
 import { fileReviewLog, MAX_LOG_BYTES, PAYLOAD_LOG_LIMITS, payloadLogPath, reviewLogPath } from "../src/review-log.ts";
 import { loadConfig } from "../src/policy.ts";
 import tuiPlugin, { createTuiListener, REASON_QUIET_MS } from "../src/tui.ts";
+import { formatNote, parseNote } from "../src/review-notes.ts";
 import { DEFAULT_PERMISSION_REVIEW, type GuardConfig, type PermissionReviewMode, type PermissionReviewSettings } from "../src/policy.ts";
 import { createV1Hooks } from "../src/v1.ts";
 import { setupV2 } from "../src/v2.ts";
@@ -1582,5 +1583,133 @@ describe("TUI companion", () => {
     expect(calls).toEqual(["permission.asked"]);
     cleanup();
     expect(calls).toEqual(["permission.asked", "unsubscribed"]);
+  });
+});
+
+describe("observe score warnings", () => {
+  const judged = (answers: Answers, mode: PermissionReviewMode = "observe", confidenceThreshold = 0.9) =>
+    started(mode, { fetch: async () => response(200, answerBody(answers)) }, {}, { confidenceThreshold });
+  const toasts = () => {
+    const shown: any[] = [];
+    return { shown, listen: createTuiListener({ toast: { show: (options) => shown.push(options) } }) };
+  };
+  const asked = (message: unknown, id = "per_1") => ({ data: { id, sessionID: "ses_1", message } });
+
+  test.each([
+    ["model-confirmation-required", "confirmation", { ...APPROVE, confirmation_required: 0.28 }, "72%"],
+    ["model-high-impact", "impact", { ...APPROVE, high_impact: 0.4 }, "60%"],
+    ["model-not-authorized", "authorization", { ...APPROVE, explicitly_authorized: 0.5 }, "50%"],
+    ["model-out-of-scope", "scope", { ...APPROVE, within_scope: 0.123 }, "12%"],
+  ])("%s warns with the score and keeps the prompt", async (reason, label, answers, score) => {
+    const fake = await judged(answers);
+    const event = (await reviewed(fake)) as { effect: string; message?: string };
+    expect(event.effect).toBe("ask");
+    expect(event.message).toMatch(new RegExp(`^secret-guard review: manual approval \\(${reason}\\); observe score=0\\.\\d+ threshold=0\\.9$`));
+    expect(fake.records.find((entry) => entry.event === "review")).toMatchObject({ reason, threshold: 0.9, score: expect.any(Number) });
+    const { shown, listen } = toasts();
+    listen(asked(event.message));
+    expect(shown).toEqual([
+      {
+        title: expect.any(String),
+        message: `Observe mode: Jev would not auto-approve (reason: ${label}). Approval score: ${score}; threshold: 90%. Manual approval required.`,
+        variant: "warning",
+        duration: 8_000,
+        sessionID: "ses_1",
+      },
+    ]);
+    expect(JSON.stringify(shown)).not.toMatch(/denied|bun test/i);
+  });
+
+  test("uses a custom threshold and enough decimals to tell values apart", async () => {
+    const fake = await judged({ explicitly_authorized: 0.99, within_scope: 0.99, high_impact: 0.01, confirmation_required: 0.025 }, "observe", 0.98);
+    const event = (await reviewed(fake)) as { message?: string };
+    const { shown, listen } = toasts();
+    listen(asked(event.message));
+    expect(shown[0].message).toContain("Approval score: 97.5%; threshold: 98%.");
+  });
+
+  test("a positive judgment keeps its informational toast", async () => {
+    const event = (await reviewed(await judged(APPROVE))) as { message?: string };
+    expect(event.message).toBe("secret-guard review: would allow (model-approved)");
+    const { shown, listen } = toasts();
+    listen(asked(event.message));
+    expect(shown.map((toast) => toast.variant)).toEqual(["info"]);
+  });
+
+  test("auto mode carries no observe score and shows no toast", async () => {
+    const event = (await reviewed(await judged({ ...APPROVE, high_impact: 0.4 }, "auto"))) as { effect: string; message?: string };
+    expect(event.effect).toBe("ask");
+    expect(event.message).toBe("secret-guard review: manual approval (model-high-impact)");
+    const { shown, listen } = toasts();
+    listen(asked(event.message));
+    expect(shown).toEqual([]);
+  });
+
+  test("auth and invalid responses carry no score", async () => {
+    const auth = (await reviewed(await started("observe", { connection: null }))) as { message?: string };
+    const invalid = (await reviewed(await started("observe", { fetch: async () => response(200, "not json") }))) as { message?: string };
+    for (const message of [auth.message, invalid.message]) {
+      expect(message).not.toContain("score");
+      const { shown, listen } = toasts();
+      listen(asked(message));
+      expect(JSON.stringify(shown)).not.toMatch(/score|%/);
+    }
+  });
+
+  test.each([
+    "secret-guard review: manual approval (model-high-impact); observe score=1.5 threshold=0.9",
+    "secret-guard review: manual approval (model-high-impact); observe score=0.5 threshold=0.4",
+    "secret-guard review: manual approval (model-high-impact); observe score=0.5 threshold=0.5",
+    "secret-guard review: manual approval (model-high-impact); observe score=NaN threshold=0.9",
+    "secret-guard review: manual approval (model-high-impact); observe score=0.5e3 threshold=0.9",
+    "secret-guard review: manual approval (model-high-impact); observe score=0.5 threshold=1e9",
+    "secret-guard review: manual approval (model-high-impact); observe score=1e999 threshold=0.9",
+    "secret-guard review: manual approval (model-high-impact); observe score=--1 threshold=0.9",
+    "secret-guard review: manual approval (model-high-impact); observe score=0.5 threshold=0.9<b>",
+    `secret-guard review: manual approval (model-high-impact); observe score=0.${"1".repeat(30)} threshold=0.9`,
+    "secret-guard review: manual approval (other-reason); observe score=0.5 threshold=0.9",
+    "secret-guard review: manual approval (constructor); observe score=0.5 threshold=0.9",
+    "secret-guard review: manual approval (to-string); observe score=0.5 threshold=0.9",
+  ])("ignores invalid score data: %s", (message) => {
+    const { shown, listen } = toasts();
+    listen(asked(message));
+    expect(shown).toEqual([]);
+  });
+
+  test("dedups per request, not per reason", () => {
+    const message = "secret-guard review: manual approval (model-high-impact); observe score=0.6 threshold=0.9";
+    const { shown, listen } = toasts();
+    listen(asked(message, "per_1"));
+    listen(asked(message, "per_1"));
+    listen(asked(message, "per_2"));
+    expect(shown.length).toBe(2);
+  });
+
+  test("a boundary score below the threshold is not shown as equal", () => {
+    const { shown, listen } = toasts();
+    listen(asked("secret-guard review: manual approval (model-confirmation-required); observe score=0.899999 threshold=0.9"));
+    listen(asked("secret-guard review: manual approval (model-confirmation-required); observe score=0.8999999 threshold=0.9", "per_2"));
+    expect(shown[0].message).toContain("Approval score: 89.9999%; threshold: 90%.");
+    expect(shown[1].message).toContain("Approval score: ≈90%; threshold: 90%.");
+  });
+
+  test("a threshold just above one half reaches the toast unrounded", async () => {
+    const fake = await judged({ ...APPROVE, within_scope: 0.49 }, "observe", 0.5000001);
+    const event = (await reviewed(fake)) as { effect: string; message?: string };
+    expect(event.effect).toBe("ask");
+    expect(event.message).toBe("secret-guard review: manual approval (model-out-of-scope); observe score=0.49 threshold=0.5000001");
+    const { shown, listen } = toasts();
+    listen(asked(event.message));
+    expect(shown.map((toast) => toast.message)).toEqual([
+      "Observe mode: Jev would not auto-approve (reason: scope). Approval score: 49%; threshold: 50%. Manual approval required.",
+    ]);
+  });
+
+  test.each([
+    { score: Number.MIN_VALUE, threshold: 0.9 },
+    { score: 0.123456789012345, threshold: 0.5000001 },
+    { score: 0, threshold: 1 },
+  ])("score and threshold round-trip exactly: %o", (observed) => {
+    expect(parseNote(formatNote("manual approval", "model-high-impact", observed))?.observed).toEqual(observed);
   });
 });

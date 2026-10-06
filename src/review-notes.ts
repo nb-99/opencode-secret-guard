@@ -38,20 +38,42 @@ export const hasLogUnavailableNote = (message: unknown): boolean =>
 
 export type Proposal = "would allow" | "manual approval";
 
-export function formatNote(proposal: Proposal, reason: string): string {
+/**
+ * An observe-mode model judgment. `score` is the weakest of the four answers,
+ * oriented so that higher favours approval, and `threshold` is the policy's
+ * confidence threshold (0.5 < t <= 1).
+ */
+export type ObserveScore = { score: number; threshold: number };
+
+export function formatNote(proposal: Proposal, reason: string, observed?: ObserveScore): string {
   const guidance = guidanceFor(reason);
-  return `${NOTE_PREFIX} ${proposal} (${reason})${guidance ? `: ${guidance}` : ""}`;
+  const scored = observed ? `; observe score=${observed.score} threshold=${observed.threshold}` : "";
+  return `${NOTE_PREFIX} ${proposal} (${reason})${scored}${guidance ? `: ${guidance}` : ""}`;
 }
 
-const NOTE = /^secret-guard review: (would allow|manual approval) \(([a-z0-9-]{1,60})\)(?::.*)?$/;
+const NOTE =
+  /^secret-guard review: (would allow|manual approval) \(([a-z0-9-]{1,60})\)(?:; observe score=([0-9.e+-]{1,24}) threshold=([0-9.e+-]{1,24}))?(?::.*)?$/;
 
-/** The last reviewer note in a message; only its proposal and reason code are returned. */
-export function parseNote(message: unknown): { proposal: Proposal; reason: string } | undefined {
+/** A plain decimal or exponent form, as `String(number)` writes it. */
+const NUMBER = /^\d+(?:\.\d+)?(?:e[+-]?\d+)?$/;
+
+const observedScore = (score: string | undefined, threshold: string | undefined): ObserveScore | undefined => {
+  if (score === undefined || threshold === undefined) return undefined;
+  if (!NUMBER.test(score) || !NUMBER.test(threshold)) return undefined;
+  const parsed = { score: Number(score), threshold: Number(threshold) };
+  const valid = Number.isFinite(parsed.score) && Number.isFinite(parsed.threshold) && parsed.score >= 0 && parsed.score <= 1 && parsed.threshold > 0.5 && parsed.threshold <= 1;
+  return valid ? parsed : undefined;
+};
+
+/** The last reviewer note in a message; only its proposal, reason code and validated score are returned. */
+export function parseNote(message: unknown): { proposal: Proposal; reason: string; observed?: ObserveScore } | undefined {
   if (typeof message !== "string") return undefined;
   const lines = message.split("\n");
   for (let index = lines.length - 1; index >= 0; index--) {
     const match = NOTE.exec(lines[index]!);
-    if (match) return { proposal: match[1] as Proposal, reason: match[2]! };
+    if (!match) continue;
+    const observed = observedScore(match[3], match[4]);
+    return { proposal: match[1] as Proposal, reason: match[2]!, ...(observed ? { observed } : {}) };
   }
   return undefined;
 }

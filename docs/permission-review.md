@@ -98,7 +98,8 @@ message already there:
 `secret-guard review: would allow (<reason>)` (`observe` only) or
 `secret-guard review: manual approval (<reason>)`, followed by a remedy for
 reasons you can act on, such as a missing OpenCode Zen connection. An
-approval in `auto` adds no message.
+approval in `auto` adds no message. Negative model judgments in `observe`
+also carry the score suffix described below.
 
 OpenCode V2.0.20 carries this message on the permission request, but neither
 its TUI ([prompt](https://github.com/anomalyco/opencode/blob/84c9be93a56304a108f1a22df0c5d62c26d5b6ca/packages/tui/src/routes/session/permission.tsx),
@@ -120,6 +121,20 @@ same text written by another trusted plugin, since notes are a convention
 a reviewer note, it shows a toast:
 
 - `observe`, would allow: an informational toast, once per request.
+- `observe`, Jev's answers would not auto-approve: a warning once per request
+  naming the first failed check (authorization, scope, confirmation or impact), the
+  approval score and the threshold, for example `Observe mode: Jev would not
+  auto-approve (reason: confirmation). Approval score: 72%; threshold: 90%.
+  Manual approval required.` The score is the weakest of the four answers,
+  oriented so that higher favours approval:
+  min(explicitly_authorized, within_scope, 1 - confirmation_required,
+  1 - high_impact). The score can come from a different answer than the first
+  failed check. It is for display only and is not calibrated; the
+  [per-answer decision rules](#how-a-request-is-approved) are unchanged.
+  The note carries both numbers unrounded, for
+  example `; observe score=0.72 threshold=0.9`. The decision log records
+  `score`. Only model judgments have scores. In `auto`, negative model
+  judgments remain log-only and produce no scored toast.
 - A reason with a remedy, such as a missing or rejected OpenCode Zen key (see
   [Credential reasons](#credential-reasons)), a timeout, or a stopped event
   stream (`events-unavailable`): a "Manual approval required" warning naming
@@ -131,7 +146,8 @@ a reviewer note, it shows a toast:
   failed; it clears once a write succeeds.
 
 Toasts follow live events: one missed while the TUI is disconnected is not
-shown later. The log keeps the record. The toast text is fixed per reason. It never contains the command, the
+shown later. The log keeps the record. Toasts use fixed reason text and validated
+numeric scores. They never contain the command, the
 resources or the prompt's message. An approval in `auto` creates no prompt,
 so it appears only in the log. The one-off startup and unavailability notices
 go only to the log and stderr; once the event stream has ended, later prompts
@@ -171,7 +187,8 @@ Records have one of three `event` values:
 - `review`: also `action`, `proposed` (the reviewer's verdict, `allow` or
   `ask`), `applied` (the effect when the reviewer's hook returned; a later
   plugin can still change it, so this is not a record of what ran),
-  `reason`, `threshold`, `elapsedMs`, a `reviewID` that matches the payload
+  `reason`, `threshold`, `score` when the model returned a judgment,
+  `elapsedMs`, a `reviewID` that matches the payload
   log, and the `sessionID`, `messageID` and `callID` of the
   tool call. These identify the call in the session's data; the prompt does
   not display them.
@@ -180,7 +197,7 @@ Records have one of three `event` values:
 V2 evaluates a pending request again after an "always" reply, so the same
 identifiers can appear in more than one `review` record. Records never contain
 the command, paths, resources, your messages, the
-model's answer, host error text or a key.
+model's raw answer, host error text or a key.
 
 The plugin creates the file with mode 0600 and its directory with mode 0700.
 It refuses to write through a symlink, a hard link, a FIFO or other

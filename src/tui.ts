@@ -42,6 +42,25 @@ const LOG_WARNING =
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
+const MODEL_JUDGMENTS: Readonly<Record<string, string>> = {
+  "model-not-authorized": "authorization",
+  "model-out-of-scope": "scope",
+  "model-confirmation-required": "confirmation",
+  "model-high-impact": "impact",
+};
+
+/**
+ * Percentages with the fewest decimals (up to 4) that tell the two apart; a
+ * score that still rounds to the threshold is marked as approximate.
+ */
+function percents(score: number, threshold: number): [string, string] {
+  const format = (value: number, digits: number) => `${Number((value * 100).toFixed(digits))}%`;
+  for (const digits of [0, 1, 2, 4]) {
+    if (format(score, digits) !== format(threshold, digits)) return [format(score, digits), format(threshold, digits)];
+  }
+  return [`≈${format(score, 4)}`, format(threshold, 4)];
+}
+
 export function createTuiListener(ui: TuiContext["ui"], now: () => number = Date.now) {
   const seen = new Set<string>();
   // Keys are reason codes with guidance and the two log keys only, so the map stays small.
@@ -72,6 +91,19 @@ export function createTuiListener(ui: TuiContext["ui"], now: () => number = Date
       if (!note) return;
       if (note.proposal === "would allow") {
         ui.toast.show({ title: TITLE, message: "Observe mode: Jev would allow this request. You are still asked.", variant: "info", duration: 4_000, sessionID });
+        return;
+      }
+      const judgment =
+        note.observed && Object.prototype.hasOwnProperty.call(MODEL_JUDGMENTS, note.reason) ? MODEL_JUDGMENTS[note.reason] : undefined;
+      if (judgment && note.observed) {
+        const [score, threshold] = percents(note.observed.score, note.observed.threshold);
+        ui.toast.show({
+          title: TITLE,
+          message: `Observe mode: Jev would not auto-approve (reason: ${judgment}). Approval score: ${score}; threshold: ${threshold}. Manual approval required.`,
+          variant: "warning",
+          duration: 8_000,
+          sessionID,
+        });
         return;
       }
       const guidance = guidanceFor(note.reason);
