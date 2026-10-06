@@ -157,6 +157,7 @@ in
           "/opt/homebrew/Cellar/opencode"
           "~/Applications/OpenCode.app"
         ];
+        settings.permissionReview.confidenceThreshold = 0.95;
       };
       mergedFile = pkgs.writeText "merged-policy.json" (builtins.toJSON merged);
       # A settings.mode would disagree with the shell the module wires up.
@@ -194,6 +195,8 @@ in
         assert(JSON.stringify(config.writeProtectedRoots) ===
           JSON.stringify(["/opt/homebrew/Cellar/opencode", "/home/example/Applications/OpenCode.app"]),
           "extra write-protected roots not appended or not expanded");
+        const review = config.permissionReview;
+        assert(review.mode === "off" && review.confidenceThreshold === 0.95 && review.logPayloads === false, "permissionReview settings not decoded");
       '
       touch $out
     '';
@@ -225,6 +228,7 @@ in
     test -f ${package}/lib/index.ts
     test -f ${package}/lib/cli.ts
     test -f ${package}/lib/cleanup.ts
+    test -f ${package}/lib/tui.ts
     test -f ${package}/lib/node_modules/zod/package.json
     # The wrapper's interpreter must be a store path, not resolved via PATH.
     head -1 ${package}/bin/.opencode-secret-guard-wrapped | grep -q '^#!/nix/store/'
@@ -234,6 +238,11 @@ in
       const { default: plugin } = await import("${package}/lib/index.ts");
       if (typeof plugin.id !== "string" || typeof plugin.setup !== "function" || typeof plugin.server !== "function") {
         throw new Error("lib/index.ts must default-export { id, setup, server }");
+      }
+      // V2 TUI loads <plugin directory>/tui beside the server entry.
+      const { default: tui } = await import("${package}/lib/tui.ts");
+      if (tui.id !== "opencode-secret-guard.tui" || typeof tui.setup !== "function") {
+        throw new Error("lib/tui.ts must default-export { id, setup }");
       }
       const { expectedShell } = await import("${package}/lib/shell.ts");
       const expected = expectedShell("${package}/lib");

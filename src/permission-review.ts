@@ -11,11 +11,14 @@
  * The thresholds below are not calibrated against labelled data; they are
  * deliberately strict starting points.
  */
+import { randomUUID } from "node:crypto";
 import * as os from "node:os";
 import * as path from "node:path";
 import { z } from "zod";
 import { matchesAny } from "./paths.ts";
-import type { PermissionReviewMode } from "./policy.ts";
+import { DEFAULT_PERMISSION_REVIEW, type PermissionReviewMode, type PermissionReviewSettings } from "./policy.ts";
+import { formatNote, LOG_UNAVAILABLE_NOTE, PAYLOAD_LOG_UNAVAILABLE_NOTE } from "./review-notes.ts";
+import { fileReviewLog, PAYLOAD_LOG_LIMITS, payloadLogPath, reviewLogPath, type ReviewLogWriter, type ReviewRecord } from "./review-log.ts";
 
 export const SYSTEM_ONE_ENDPOINT = "https://opencode.ai/zen/v1/systemone";
 export const SYSTEM_ONE_MODEL = "jev-1.13-free";
@@ -35,9 +38,6 @@ const MAX_HUMAN_CHARS = 12_000;
 const MAX_REQUEST_BYTES = 48_000;
 const MAX_RESPONSE_BYTES = 64_000;
 
-/** Uncalibrated: a yes must be near-certain, a no must be near-certain. */
-const YES = 0.9;
-const NO = 0.1;
 
 type MaybePromise = void | Promise<void>;
 
@@ -117,14 +117,31 @@ export interface ReviewDependencies {
   deadlineMs: number;
   now: () => number;
   log: (line: string) => void;
+  /** The decision log; see review-log.ts. */
+  record: ReviewLogWriter;
+  logPath: string;
+  /** The opt-in payload log, written only with `logPayloads`. */
+  recordPayload: ReviewLogWriter;
+  payloadLogPath: string;
 }
 
-const defaultDependencies = (): ReviewDependencies => ({
-  fetch: (globalThis as unknown as { fetch: ReviewFetch }).fetch,
-  deadlineMs: REVIEW_DEADLINE_MS,
-  now: Date.now,
-  log: (line) => process.stderr.write(`secret-guard: permission review: ${line}\n`),
-});
+const defaultDependencies = (): ReviewDependencies => {
+  const logPath = reviewLogPath();
+  const payloadPath = payloadLogPath();
+  return {
+    fetch: (globalThis as unknown as { fetch: ReviewFetch }).fetch,
+    deadlineMs: REVIEW_DEADLINE_MS,
+    now: Date.now,
+    log: (line) => process.stderr.write(`secret-guard: permission review: ${line}\n`),
+    record: fileReviewLog(logPath),
+    logPath,
+    recordPayload: fileReviewLog(payloadPath, PAYLOAD_LOG_LIMITS),
+    payloadLogPath: payloadPath,
+  };
+};
+
+/** A safe identifier for correlation, or null; host ids are not trusted to be short or plain. */
+const safeID = (value: unknown) => (typeof value === "string" && /^[A-Za-z0-9_.:-]{1,80}$/.test(value) ? value : null);
 
 /**
  * Obvious inline credentials. Any match in the action or in the human's text
@@ -348,11 +365,20 @@ const ReviewResponse = z.object({
   }),
 });
 
-export function decide(answers: z.infer<typeof ReviewResponse>["answers"]): ReviewOutcome {
-  if (answers.confirmation_required.noul > NO) return ask("model-confirmation-required");
-  if (answers.high_impact.noul > NO) return ask("model-high-impact");
-  if (answers.explicitly_authorized.noul < YES) return ask("model-not-authorized");
-  if (answers.within_scope.noul < YES) return ask("model-out-of-scope");
+/**
+ * `threshold` is validated by the policy: 0.5 < t <= 1. A negative answer
+ * must stay at or below 1 - t, computed in decimal at t's own precision, so
+ * t = 0.93 gives exactly 0.07 rather than 0.06999...; at t = 1 the limit is
+ * 0 and any positive p asks. A JSON number in (0.5, 1] prints without an
+ * exponent, so its decimal digits are its precision.
+ */
+export function decide(answers: z.infer<typeof ReviewResponse>["answers"], threshold = DEFAULT_PERMISSION_REVIEW.confidenceThreshold): ReviewOutcome {
+  const digits = threshold.toString().split(".")[1]?.length ?? 0;
+  const negativeLimit = Number((1 - threshold).toFixed(digits));
+  if (answers.confirmation_required.noul > negativeLimit) return ask("model-confirmation-required");
+  if (answers.high_impact.noul > negativeLimit) return ask("model-high-impact");
+  if (answers.explicitly_authorized.noul < threshold) return ask("model-not-authorized");
+  if (answers.within_scope.noul < threshold) return ask("model-out-of-scope");
   return { allow: true, reason: "model-approved" };
 }
 
@@ -369,68 +395,113 @@ function within<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
 async function apiKey(ctx: ReviewContext, signal: AbortSignal): Promise<string> {
   const connection = ctx.integration?.connection;
   if (!connection) throw new Ineligible("auth-unsupported");
-  const active = await within(connection.active("opencode"), signal);
-  if (active === undefined || active === null) throw new Ineligible("auth-missing");
-  const credential = await within(connection.resolve(active), signal);
-  if (!isRecord(credential)) throw new Ineligible("auth-missing");
-  if (credential.type !== "key") throw new Ineligible("auth-unsupported-type");
-  if (typeof credential.key !== "string" || !credential.key.trim()) throw new Ineligible("auth-missing");
+  // Host errors carry arbitrary text and are reduced to a code.
+  // A thunk, so a host method that throws synchronously is caught the same way.
+  const host = <T>(call: () => Promise<T>) =>
+    within(Promise.resolve().then(call), signal).catch((error) => {
+      throw error instanceof Ineligible || signal.aborted ? error : new Ineligible("auth-error");
+    });
+  const active = await host(() => connection.active("opencode"));
+  if (active === undefined || active === null) throw new Ineligible("auth-no-connection");
+  const credential = await host(() => connection.resolve(active));
+  if (!isRecord(credential)) throw new Ineligible("auth-unresolved");
+  if (credential.type !== "key") throw new Ineligible("auth-not-key");
+  if (typeof credential.key !== "string" || !credential.key.trim()) throw new Ineligible("auth-empty-key");
   return credential.key.trim();
 }
 
-async function readBounded(response: ReviewResponseLike): Promise<string> {
+/** At most MAX_RESPONSE_BYTES of the body; `omitted` says why the rest is missing. */
+async function readBounded(response: ReviewResponseLike): Promise<{ text: string; omitted?: "declared-oversize" | "oversize" }> {
   const declared = Number(response.headers.get("content-length"));
-  if (Number.isFinite(declared) && declared > MAX_RESPONSE_BYTES) throw new Ineligible("response-oversize");
-  if (!response.body) return "";
+  if (Number.isFinite(declared) && declared > MAX_RESPONSE_BYTES) {
+    response.body?.cancel().catch(() => {});
+    return { text: "", omitted: "declared-oversize" };
+  }
+  if (!response.body) return { text: "" };
   const reader = response.body.getReader();
   const chunks: Uint8Array[] = [];
   let size = 0;
   for (;;) {
     const { done, value } = await reader.read();
     if (done || !value) break;
-    size += value.byteLength;
-    if (size > MAX_RESPONSE_BYTES) {
-      // Not awaited: cancellation must not extend the deadline.
+    if (size + value.byteLength > MAX_RESPONSE_BYTES) {
+      // Not awaited: cancellation must not extend the deadline. No prefix is
+      // kept: a cut could split the key and defeat the payload log's scrub.
       reader.cancel().catch(() => {});
-      throw new Ineligible("response-oversize");
+      return { text: "", omitted: "oversize" };
     }
+    size += value.byteLength;
     chunks.push(value);
   }
-  return new TextDecoder().decode(Buffer.concat(chunks));
+  return { text: new TextDecoder().decode(Buffer.concat(chunks)) };
 }
+
+/** Payload log fields for one System One exchange; see `logPayloads`. */
+type Trace = (fields: ReviewRecord) => void;
 
 async function askSystemOne(
   key: string,
   state: unknown,
   signal: AbortSignal,
   dependencies: ReviewDependencies,
+  threshold: number,
+  trace: Trace | undefined,
 ): Promise<ReviewOutcome> {
   const body = JSON.stringify({ model: SYSTEM_ONE_MODEL, state, questions: REVIEW_QUESTIONS });
   if (Buffer.byteLength(body) > MAX_REQUEST_BYTES) throw new Ineligible("request-oversize");
-  const response = await within(
-    dependencies.fetch(SYSTEM_ONE_ENDPOINT, {
-      method: "POST",
-      headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
-      body,
+  // The key travels only in the header; an exact copy in a body, raw or
+  // JSON-escaped, is still removed. Other encodings are not.
+  const scrub = (text: string) =>
+    [key, JSON.stringify(key).slice(1, -1)].reduce((out, form) => out.split(form).join("[redacted]"), text);
+  // The reviewer aborts with a reason code: "deadline" or why it was cancelled.
+  const aborted = () => (typeof signal.reason === "string" ? signal.reason : "request-aborted");
+  trace?.({ phase: "request", endpoint: SYSTEM_ONE_ENDPOINT, body: scrub(body) });
+  let response: ReviewResponseLike;
+  try {
+    response = await within(
+      dependencies.fetch(SYSTEM_ONE_ENDPOINT, {
+        method: "POST",
+        headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
+        body,
+        signal,
+        redirect: "error",
+      }),
       signal,
-      redirect: "error",
-    }),
-    signal,
-  );
-  if (!response.ok) {
-    response.body?.cancel().catch(() => {});
-    throw new Ineligible(`http-${response.status}`);
+    );
+  } catch (error) {
+    // The error's text can carry anything; only a code is kept.
+    trace?.({ phase: "failure", reason: signal.aborted ? aborted() : "network" });
+    throw error;
   }
+  if (!response.ok) {
+    const reason = response.status === 401 ? "auth-rejected" : `http-${response.status}`;
+    if (!trace) {
+      response.body?.cancel().catch(() => {});
+      throw new Ineligible(reason);
+    }
+    // Read for the log only, within the same bounds and deadline.
+    const read = await within(readBounded(response), signal).catch(() => ({ text: "", omitted: signal.aborted ? aborted() : "unreadable" }));
+    trace({ phase: "response", status: response.status, body: scrub(read.text), omitted: read.omitted ?? null });
+    throw new Ineligible(reason);
+  }
+  let read: Awaited<ReturnType<typeof readBounded>>;
+  try {
+    read = await within(readBounded(response), signal);
+  } catch (error) {
+    trace?.({ phase: "failure", reason: signal.aborted ? aborted() : "response-read" });
+    throw error instanceof Ineligible ? error : new Ineligible("response-json");
+  }
+  trace?.({ phase: "response", status: response.status, body: scrub(read.text), omitted: read.omitted ?? null });
+  if (read.omitted) throw new Ineligible("response-oversize");
   let parsed: unknown;
   try {
-    parsed = JSON.parse(await within(readBounded(response), signal));
-  } catch (error) {
-    if (error instanceof Ineligible) throw error;
+    parsed = JSON.parse(read.text);
+  } catch {
     throw new Ineligible("response-json");
   }
   const result = ReviewResponse.safeParse(parsed);
   if (!result.success) throw new Ineligible("response-shape");
-  return decide(result.data.answers);
+  return decide(result.data.answers, threshold);
 }
 
 interface PendingCall {
@@ -504,23 +575,58 @@ interface ActiveReview {
  */
 export async function setupPermissionReview(
   ctx: ReviewContext,
-  mode: Exclude<PermissionReviewMode, "off">,
+  settings: PermissionReviewSettings & { mode: Exclude<PermissionReviewMode, "off"> },
   location: string | undefined,
   secrets: SecretNames,
   overrides: Partial<ReviewDependencies> = {},
 ): Promise<ReviewCleanup | undefined> {
   const dependencies = { ...defaultDependencies(), ...overrides };
+  const { mode, confidenceThreshold: threshold } = settings;
   const { log } = dependencies;
-  const report = (line: string) => {
+  const say = (line: string) => {
     try {
       log(line);
     } catch {
       // A failing log must not turn a review into a host error.
     }
   };
+  // Whether the last write succeeded; a pending prompt reports a failing log.
+  let logWritable = true;
+  let logFailureReported = false;
+  const record = (fields: ReviewRecord) => {
+    try {
+      dependencies.record({ time: new Date(dependencies.now()).toISOString(), pid: process.pid, mode, ...fields });
+      logWritable = true;
+    } catch {
+      // The log is best effort and never affects a decision. The error text is
+      // not echoed; the fixed notice says where to look. Once per reviewer.
+      logWritable = false;
+      if (logFailureReported) return;
+      logFailureReported = true;
+      say(`review log unavailable at ${dependencies.logPath}; check the directory's and file's ownership and private permissions, free space, and the rotation target. Decisions are not affected.`);
+    }
+  };
+  let payloadWritable = true;
+  let payloadFailureReported = false;
+  const recordPayload = (fields: ReviewRecord) => {
+    try {
+      dependencies.recordPayload({ time: new Date(dependencies.now()).toISOString(), pid: process.pid, ...fields });
+      payloadWritable = true;
+    } catch {
+      payloadWritable = false;
+      if (payloadFailureReported) return;
+      payloadFailureReported = true;
+      say(`payload log unavailable at ${dependencies.payloadLogPath}; check the directory's and file's ownership and private permissions, free space, and the rotation target. Decisions are not affected.`);
+    }
+  };
+  /** Fixed text only: it is recorded as is. */
+  const unavailable = (line: string) => {
+    record({ event: "unavailable", notice: line });
+    say(line);
+  };
   const { permission, session: sessions, event: events } = ctx;
   if (!permission || !sessions || !ctx.integration?.connection || !events || location === undefined) {
-    report("unavailable: this OpenCode does not provide the permission, session, integration and event APIs it needs; prompts are unchanged.");
+    unavailable("unavailable: this OpenCode does not provide the permission, session, integration and event APIs it needs; prompts are unchanged.");
     return undefined;
   }
 
@@ -553,7 +659,7 @@ export async function setupPermissionReview(
     for (const active of reviews) {
       if (sessionID !== undefined && active.sessionID !== sessionID) continue;
       active.cancelled = reason;
-      active.controller.abort();
+      active.controller.abort(reason);
     }
     for (const [key, entry] of pending) {
       if (sessionID === undefined || entry.event.sessionID === sessionID) retire(key);
@@ -574,7 +680,7 @@ export async function setupPermissionReview(
     }
   };
 
-  const review = async (evaluation: PermissionEvaluation): Promise<ReviewOutcome> => {
+  const review = async (evaluation: PermissionEvaluation, reviewID: string): Promise<ReviewOutcome> => {
     if (!live) return ask("events-unavailable");
     if (refused.has(evaluation.sessionID) || refused.size >= MAX_REFUSED_SESSIONS) return ask("session-rejected");
     const source = evaluation.source;
@@ -597,7 +703,7 @@ export async function setupPermissionReview(
     const active: ActiveReview = { sessionID: evaluation.sessionID, controller: new AbortController() };
     reviews.add(active);
     const signal = active.controller.signal;
-    const timer = setTimeout(() => active.controller.abort(), dependencies.deadlineMs);
+    const timer = setTimeout(() => active.controller.abort("deadline"), dependencies.deadlineMs);
     const sessionID = evaluation.sessionID;
     const state = async () => rootSession(await within(sessions.get({ sessionID }), signal), sessionID, location);
     try {
@@ -608,7 +714,23 @@ export async function setupPermissionReview(
       // never causes the context to be read.
       const key = await apiKey(ctx, signal);
       const human = userMessages(await within(sessions.context({ sessionID }), signal), hasCredential);
-      const outcome = await askSystemOne(key, { pending_action: action, user_messages: human.texts }, signal, dependencies);
+      const correlation = {
+        event: "payload",
+        reviewID,
+        sessionID: safeID(sessionID),
+        messageID: safeID(source.messageID),
+        callID: safeID(source.id),
+        model: SYSTEM_ONE_MODEL,
+      };
+      const trace = settings.logPayloads ? (fields: ReviewRecord) => recordPayload({ ...correlation, ...fields }) : undefined;
+      const outcome = await askSystemOne(
+        key,
+        { pending_action: action, user_messages: human.texts },
+        signal,
+        dependencies,
+        threshold,
+        trace,
+      );
       if (!outcome.allow) return outcome;
       // What was reviewed must still be what runs, in the same session state:
       // events can be missed, so the session and the human's messages are read
@@ -660,7 +782,7 @@ export async function setupPermissionReview(
       }
       if (subscription.signal.aborted) return;
       stop("events-ended");
-      report("unavailable: the OpenCode event stream ended; prompts are unchanged.");
+      unavailable("unavailable: the OpenCode event stream ended; prompts are unchanged.");
     })();
 
     await ctx.tool.hook("execute.before", (event) => {
@@ -681,31 +803,57 @@ export async function setupPermissionReview(
     });
     await permission.hook("evaluate", async (evaluation) => {
       if (evaluation.effect !== "ask") return;
+      const started = dependencies.now();
+      const reviewID = randomUUID();
       let outcome: ReviewOutcome;
       try {
-        outcome = await review(evaluation);
+        outcome = await review(evaluation, reviewID);
       } catch {
         outcome = ask("error");
       }
       const verdict = outcome.allow ? "allow" : "ask";
       // The action name comes from the host; only a short plain name is echoed.
       const action = /^[A-Za-z0-9_.-]{1,40}$/.test(evaluation.action) ? evaluation.action : "other";
-      report(`${mode}: ${verdict} ${action} (${outcome.reason})`);
-      // Re-read: a hook running concurrently must not have its deny overturned.
+      say(`${mode}: ${verdict} ${action} (${outcome.reason})`);
+      // Preserve a decision changed while review was pending.
+      const stillAsk = evaluation.effect === "ask";
+      if (stillAsk && mode === "auto" && outcome.allow) evaluation.effect = "allow";
+      // Recorded first, so the notes below reflect this write.
+      record({
+        event: "review",
+        action,
+        proposed: verdict,
+        applied: evaluation.effect,
+        reason: outcome.reason,
+        threshold,
+        reviewID,
+        elapsedMs: dependencies.now() - started,
+        sessionID: safeID(evaluation.sessionID),
+        messageID: safeID(evaluation.source?.messageID),
+        callID: safeID(evaluation.source?.id),
+      });
       if (evaluation.effect !== "ask") return;
-      if (mode === "auto") {
-        if (outcome.allow) evaluation.effect = "allow";
-        return;
+      const notes: string[] = [];
+      if (mode === "observe" || !outcome.allow) {
+        notes.push(formatNote(mode === "observe" && outcome.allow ? "would allow" : "manual approval", outcome.reason));
       }
-      const note = `secret-guard review: ${outcome.allow ? "would allow" : "manual approval"} (${outcome.reason})`;
-      evaluation.message = evaluation.message ? `${evaluation.message}\n${note}` : note;
+      if (!logWritable) notes.push(LOG_UNAVAILABLE_NOTE);
+      if (!payloadWritable) notes.push(PAYLOAD_LOG_UNAVAILABLE_NOTE);
+      if (notes.length === 0) return;
+      evaluation.message = [evaluation.message, ...notes].filter(Boolean).join("\n");
     });
   } catch {
     stop("unavailable");
     // Host errors can carry arbitrary text; the notice stays fixed.
-    report("unavailable: OpenCode refused a reviewer hook or event subscription; prompts are unchanged.");
+    unavailable("unavailable: OpenCode refused a reviewer hook or event subscription; prompts are unchanged.");
     return undefined;
   }
 
+  // The stream can end while the hooks register; that was reported instead.
+  if (!live) return () => stop("unloaded");
+  // The path stays out of the record, which holds no user paths.
+  record({ event: "start", model: SYSTEM_ONE_MODEL, threshold, logPayloads: settings.logPayloads });
+  say(`${mode} with ${SYSTEM_ONE_MODEL}, threshold ${threshold}; decision log: ${dependencies.logPath}`);
+  if (settings.logPayloads) say(`request and response bodies are logged to ${dependencies.payloadLogPath}`);
   return () => stop("unloaded");
 }

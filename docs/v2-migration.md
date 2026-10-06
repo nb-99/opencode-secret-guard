@@ -191,8 +191,7 @@ after-hook arguments and host directory contract; their behavior on the minimum
 release still needs live confirmation.
 
 V2 checks still unrecorded include a stale `lib/plugin.ts` path, a missing
-configured shell, unsupported policy versions, startup stderr notices in the
-TUI, failed-call event shape, and the interactive PTY boundary. A later rewrite
+configured shell, unsupported policy versions, failed-call event shape, and the interactive PTY boundary. A later rewrite
 to `/bin/sh` was refused live, but the reports do not separately establish the
 TUI presentation for every shell failure. Patch `*** Environment ID:` handling
 also needs confirmation that it does not change the filesystem root used for
@@ -203,8 +202,20 @@ real glob/grep fixture would provide a regression check for rebuilt formatting.
 The [permission reviewer](permission-review.md) has unit tests with stubbed
 host APIs and System One, but no live checks yet: the `evaluate` hook and
 tool-call correlation, the event stream and cleanup, session and credential
-lookup, the System One call, `observe` prompt notes and `auto` approvals, the
-V2 unavailable notices, and where its stderr lines appear in the TUI.
+lookup, the System One call, `auto` approvals, the decision and payload
+logs, and the V2 unavailable notices. Its stderr lines are not shown by
+default: source inspection shows the managed service discards plugin stderr
+after startup (`packages/client/src/service-contender.ts`), and a standalone
+server passes it through only with `--print-logs`
+(`packages/cli/src/services/standalone.ts`). The notes
+it appends to a permission request's `message` are not displayed by the
+V2.0.20 TUI or desktop app. The TUI companion `lib/tui.ts` follows
+`permission.asked` (`packages/schema/src/permission.ts`: the request's `id`,
+`sessionID` and optional `message`) through the TUI plugin API
+(`packages/plugin/src/tui/context.ts`: `data.on`, `ui.toast.show`) and is
+found by `Host.resolve` as the `tui` entry beside the server entry
+(`packages/plugin/src/host.ts`), all at v2.0.20 commit 84c9be93; it is not
+yet checked in a live TUI.
 
 ## Source versions
 
