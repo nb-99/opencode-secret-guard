@@ -37,7 +37,7 @@ payloads at its boundary and translates them into `checkToolCall` arguments.
 The package uses local structural types rather than `@opencode/plugin`.
 `Plugin.define` is an identity function, and the loader accepts the object
 export directly. Avoiding the SDK also avoids vendoring its dependency tree for
-the hermetic typecheck; the package vendors only Zod, used by the V1 cleanup
+the hermetic typecheck; the package vendors only Zod at runtime, used by the V1 cleanup
 tool and by the V2 permission reviewer.
 
 | Purpose | V1 | V2 |
@@ -84,7 +84,66 @@ contracts that were checked against the [v2.0.20][v2.0.20-tag] and
   `permission.replied` rejection ([source][v2-schema-permission]).
 - A plugin's `setup` may return a cleanup function
   ([source][v2-plugin-cleanup]); the guard returns the reviewer's, which
-  closes its event subscription.
+  closes its event subscription and disposes its review RPC registration and
+  in-memory status store.
+
+### TUI review dependencies
+
+The review sidebar and notifications use supported plugin contracts checked
+against the [V2.1.4][v2.1.4-tag] source. No custom OpenCode build is required.
+
+- `Host.resolve` loads `lib/tui.ts` beside the server entry
+  ([source][v2-tui-host]). The TUI appends a `sidebar.content` section through
+  `ctx.ui.slot` ([contract][v2-tui-context], [slot mount][v2-tui-sidebar]).
+  The section mounts with the visible sidebar and may require scrolling.
+  It is not part of the native permission prompt.
+- The selectable `session.panel` slot opens explicitly in side or fullscreen mode
+  ([contract][v2-tui-context]). This plugin uses the sidebar instead.
+- The server registers `JevRpc` with ID `opencode-secret-guard.jev`.
+  Its only method, `snapshot`, reads status without changing permission decisions.
+  Its `review` events carry the same validated status fields
+  ([RPC documentation][v2-review-rpc]). Registration does not block reviewer setup.
+  Cleanup unregisters the RPC and clears the bounded 128-entry store.
+  A client disconnect does not clear server state; a server restart or unload does.
+- `ctx.data.listen` follows the host's reconnecting event bus for
+  `rpc.opencode-secret-guard.jev.review` and `server.connected`
+  ([data contract][v2-tui-context], [reconnection][v2-tui-connection]).
+  The generic RPC event is typed for `data.on`; `data.listen` can receive all event types.
+  The plugin does not create a direct `client.rpc(JevRpc).events.on` loop,
+  because that stream does not reconnect.
+- Public event locations expose `directory` only
+  ([`PublicRef`][v2-public-location]). The required nullable status field
+  `workspaceID` comes from the server's `ctx.location.workspaceID`.
+  The TUI checks the public directory and validated payload workspace ID.
+  Snapshot calls route through `client.rpc(JevRpc).snapshot` with the full
+  project location, including workspace routing, and the selected session ID.
+  Each call has a four-second abort deadline.
+- The mounted section reads a snapshot on mounting, session changes and
+  `server.connected`, without polling. Reconnection aborts pending reads and
+  clears the display cache before refresh. Snapshot reconciliation prunes
+  absent session review IDs and preserves newer live updates received during the read.
+  A separate live-only phase history deduplicates toasts.
+  Snapshots neither replay old toasts nor consume a later live completion toast.
+- The sidebar shows up to four session reviews, active first and then newest.
+  Every incoming `ask` produces checking and completion status, including
+  skipped file, MCP and delegated-session requests. Only eligible shell-tool
+  `shell` and `external_directory` checks call Jev.
+  An off reviewer registers no RPC; the section remains empty until a snapshot
+  succeeds or a live status arrives. The mounting probe does not start polling.
+- Plain TypeScript calls Solid's `createComponent` and OpenTUI's `Dynamic`,
+  without JSX compilation or a bundled UI runtime. OpenCode supplies the shared
+  Solid/OpenTUI modules through OpenTUI's
+  [runtime plugin configuration][opentui-runtime-configure].
+  Development and typecheck dependencies pin the UI declarations separately.
+- `ctx.ui.toast.show` displays each unique live phase and fixed `Next:` remedy text.
+  The separate `permission.asked` listener still deduplicates decision-log and
+  payload-log warnings for 10 minutes. An automatic approval has no prompt,
+  so a failed log write can still lack a TUI log warning.
+
+The source retains a permission-note fallback for missing RPC, slots or `data.listen`.
+This is defensive, not a verified older-version requirement: the inspected
+[V2.0.20 TUI context][v2-old-tui-context] also has these APIs. See
+[sidebar behavior and limits](permission-review.md#tui-sidebar-and-notifications).
 
 ### Startup and shell checks
 
@@ -190,6 +249,10 @@ typecheck, unit, policy, package-layout and shell checks. Run
 `nix run .#integration` from a plain terminal for the macOS kernel suite;
 `sandbox-exec` cannot nest inside the agent's sandbox.
 
+Headless native review-panel rendering, reactive updates and cleanup have been verified.
+That evidence does not verify live OpenCode RPC or reconnection.
+Question-contract tests check request shape and wording, not live Jev interpretation.
+
 ### Remaining live checks
 
 V1 1.18.29 still needs directory loading and tool checks, including cleanup
@@ -208,22 +271,20 @@ because the submitted path became a plain space; unit tests cover it. A captured
 real glob/grep fixture would provide a regression check for rebuilt formatting.
 
 The [permission reviewer](permission-review.md) has unit tests with stubbed
-host APIs and System One, but no live checks yet: the `evaluate` hook and
-tool-call correlation, the event stream and cleanup, session and credential
-lookup, the System One call, `auto` approvals, the decision and payload
-logs, and the V2 unavailable notices. Its stderr lines are not shown by
-default: source inspection shows the managed service discards plugin stderr
-after startup (`packages/client/src/service-contender.ts`), and a standalone
-server passes it through only with `--print-logs`
-(`packages/cli/src/services/standalone.ts`). The notes
-it appends to a permission request's `message` are not displayed by the
-V2.0.20 TUI or desktop app. The TUI companion `lib/tui.ts` follows
-`permission.asked` (`packages/schema/src/permission.ts`: the request's `id`,
-`sessionID` and optional `message`) through the TUI plugin API
-(`packages/plugin/src/tui/context.ts`: `data.on`, `ui.toast.show`) and is
-found by `Host.resolve` as the `tui` entry beside the server entry
-(`packages/plugin/src/host.ts`), all at v2.0.20 commit 84c9be93; it is not
-yet checked in a live TUI.
+host APIs and System One. These tests do not validate every live combination
+of host APIs, credentials, review decisions or errors.
+The sidebar and notification implementation has not been deployed or checked
+in a live OpenCode TUI. Live RPC routing, disconnect recovery and sidebar
+presentation remain unverified. The confirmation wording has not been validated
+against live Jev responses, including summary-only ask-first restrictions.
+
+Reviewer stderr is not shown by default: the inspected V2.0.20 managed service
+discards it after startup (`packages/client/src/service-contender.ts`).
+A standalone server passes it through only with `--print-logs`
+(`packages/cli/src/services/standalone.ts`). The V2.0.20 TUI and desktop app
+do not display permission request `message` notes. The companion instead uses
+the sidebar and event-driven toasts described above, with a separate
+`permission.asked` listener for log warnings.
 
 ## Source versions
 
@@ -233,12 +294,24 @@ Plugin path loading was also checked at the `v2` branch head with
 `@opencode/plugin` 2.0.19. The [V2 plugin docs][plugins] and
 [migration guide][migrate] describe the public API. Live evidence above pins
 the tested host to V2 2.0.20.
+Review UI, event routing and reconnect contracts were checked against the
+tagged V2.1.4 source. Shared UI runtime mappings were checked against OpenTUI
+0.6.8. These source checks do not establish live OpenCode behavior.
 
 [migrate]: https://opencode.ai/v2/docs/build/plugins/migrate-v1
 [plugins]: https://opencode.ai/v2/docs/build/plugins
 [v2-tag]: https://github.com/anomalyco/opencode/tree/v2.0.16
 [v2.0.20-tag]: https://github.com/anomalyco/opencode/tree/v2.0.20
 [v2.0.23-tag]: https://github.com/anomalyco/opencode/tree/v2.0.23
+[v2.1.4-tag]: https://github.com/anomalyco/opencode/tree/v2.1.4
+[v2-tui-host]: https://github.com/anomalyco/opencode/blob/v2.1.4/packages/plugin/src/host.ts
+[v2-tui-context]: https://github.com/anomalyco/opencode/blob/v2.1.4/packages/plugin/src/tui/context.ts
+[v2-old-tui-context]: https://github.com/anomalyco/opencode/blob/v2.0.20/packages/plugin/src/tui/context.ts
+[v2-tui-sidebar]: https://github.com/anomalyco/opencode/blob/v2.1.4/packages/tui/src/routes/session/sidebar.tsx#L69-L75
+[v2-tui-connection]: https://github.com/anomalyco/opencode/blob/v2.1.4/packages/client/src/solid/connection.ts
+[v2-public-location]: https://github.com/anomalyco/opencode/blob/v2.1.4/packages/schema/src/location.ts
+[v2-review-rpc]: https://opencode.ai/v2/docs/build/plugins/rpc
+[opentui-runtime-configure]: https://github.com/anomalyco/opentui/blob/v0.6.8/packages/solid/scripts/runtime-plugin-support-configure.ts
 [v1-tag]: https://github.com/anomalyco/opencode/tree/v1.18.33
 [v2-source]: https://github.com/anomalyco/opencode/blob/v2.0.16/packages/core/src/config/plugin/source.ts
 [v2-host]: https://github.com/anomalyco/opencode/blob/v2.0.16/packages/plugin/src/host.ts

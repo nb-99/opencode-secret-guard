@@ -3,8 +3,8 @@
  * a fixed per-user file. Only the reviewer writes them, only while review is
  * enabled, and a failure to write never reaches a decision.
  *
- * Decision-log records carry codes and identifiers only, never a command,
- * resource, path, message text, credential, host error text or model output.
+ * Decision-log records carry codes, identifiers and numeric scores only, never a command,
+ * resource, path, message text, credential, host error text or response body.
  * Payload-log records, written only with the opt-in `logPayloads`, do contain
  * the request and response bodies, including commands and user messages. The
  * files are observability, not policy: anything running as the user can write
@@ -21,6 +21,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import type { ReviewScores } from "./review-status.ts";
 
 export const MAX_LOG_BYTES = 1024 * 1024;
 const MAX_RECORD_BYTES = 4096;
@@ -42,7 +43,7 @@ function stateDirectory(): string {
 export const reviewLogPath = (): string => path.join(stateDirectory(), "permission-review.jsonl");
 export const payloadLogPath = (): string => path.join(stateDirectory(), "permission-review-payloads.jsonl");
 
-export type ReviewRecord = Record<string, string | number | boolean | null>;
+export type ReviewRecord = Record<string, string | number | boolean | null | ReviewScores>;
 export type ReviewLogWriter = (record: ReviewRecord) => void;
 
 /** Existing files with wider modes are refused, not changed: they are the user's. */

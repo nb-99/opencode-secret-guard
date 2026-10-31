@@ -1,6 +1,6 @@
 # Optional permission review with Jev
 
-Status: approval-only first version. Off by default.
+Status: approval-only. Off by default.
 
 The secret guard decides deterministically what a command or file tool may
 touch. Permission review is a separate, optional step: when OpenCode V2 is
@@ -29,10 +29,11 @@ reaches you as a normal prompt.
   seconds. `observe` is synchronous on purpose.
 - It requires OpenCode V2.0.20 or later. The V2 plugin and credential
   contracts it relies on were checked against the 2.0.20 and 2.0.23 source
-  ([details](v2-migration.md#permission-review-dependencies));
-  it has not been tested against a live OpenCode session. If the running
-  OpenCode lacks the permission, session, integration or event APIs, or the
-  event stream ends, the reviewer prints a notice and prompts are unchanged.
+  ([details](v2-migration.md#permission-review-dependencies)). The TUI contracts
+  described below were checked against the V2.1.4 source.
+  If a required permission, session, integration or event API is missing,
+  the reviewer prints a notice and leaves prompts in place.
+  It also stops reviewing if its server event stream ends.
 - On OpenCode V1 an enabled reviewer prints a startup notice that it is only
   available on V2. Prompts are unchanged and the guard works as before.
 - Evidence of your intent comes from user-role messages in the root session.
@@ -90,7 +91,7 @@ reads the policy at startup, so restart OpenCode after a change.
 
 | `mode`    | Behavior                                                                          |
 | --------- | --------------------------------------------------------------------------------- |
-| `off`     | Default. The reviewer is not set up and sends no traffic.                         |
+| `off`     | Default. The reviewer is not set up and sends no model traffic.                   |
 | `observe` | Each `ask` is logged and noted; eligible `shell`-tool asks (`shell` and `external_directory`) are sent to Jev. You still decide. |
 | `auto`    | A request that meets every approval condition is allowed once; otherwise asked.   |
 
@@ -111,52 +112,159 @@ displays a request's message, so the note does not appear on the prompt
 itself. The note is a text convention, not an authenticated claim: another
 plugin you run could write the same text.
 
-### TUI notices
+### TUI sidebar and notifications
 
-The package also contains a TUI plugin, `lib/tui.ts`. According to the
-V2.0.20 source, the TUI loads it from the same plugin directory as the server
-plugin, so no extra configuration is needed; this has not been tested in a
-live TUI yet. It only listens for permission prompts. With review `off` it is
-normally silent, because the reviewer adds no notes; it still reacts to the
-same text written by another trusted plugin, since notes are a convention
-(see above). When a prompt carries
-a reviewer note, it shows a toast:
+The package contains a TUI plugin, `lib/tui.ts`, loaded from the same plugin
+directory as the server plugin. No custom OpenCode build is required.
+The plugin appends its section to the supported `sidebar.content` slot.
+The section mounts with the session sidebar; you may need to scroll to see it.
+It is plugin UI, not a slot inside the native permission prompt.
+Hiding the sidebar hides the section, but does not stop reviews or notifications.
 
-- `observe`, would allow: an informational toast, once per request.
-- `observe`, Jev's answers would not auto-approve: a warning once per request
-  naming the first failed check (authorization, scope, confirmation or impact), the
-  approval score and the threshold, for example `Observe mode: Jev would not
-  auto-approve (reason: confirmation). Approval score: 72%; threshold: 90%.
-  Manual approval required.` The score is the weakest of the four answers,
-  oriented so that higher favours approval:
-  min(explicitly_authorized, within_scope, 1 - confirmation_required,
-  1 - high_impact). The score can come from a different answer than the first
-  failed check. It is for display only and is not calibrated; the
-  [per-answer decision rules](#how-a-request-is-approved) are unchanged.
-  The note carries both numbers unrounded, for
-  example `; observe score=0.72 threshold=0.9`. The decision log records
-  `score`. Only model judgments have scores. In `auto`, negative model
-  judgments remain log-only and produce no scored toast.
-- A reason with a remedy, such as a missing or rejected OpenCode Zen key (see
-  [Credential reasons](#credential-reasons)), a timeout, or a stopped event
-  stream (`events-unavailable`): a "Manual approval required" warning naming
-  the reason's remedy, at most once per reason every 10 minutes.
-- Any other reason: no toast; the decision is in the log.
-- The decision log cannot be written: a separate warning, at most once every
-  10 minutes, shown with any of the above. The prompt carries it as an extra
-  line, `secret-guard log: unavailable`, only while the most recent write
-  failed; it clears once a write succeeds.
+The section shows up to four reviews for the current project-scoped session.
+Active reviews appear first; within each group, newer reviews appear first.
+Each entry shows the mode, permission action, phase and available context warnings.
+Completed entries also show the reason, `proposed` verdict and `applied` effect.
+Every incoming `ask` gets checking and completion status, including skipped
+edit, read, MCP and delegated-session requests. These entries also occupy the
+four-review list. Only eligible `shell` and `external_directory` checks from
+the shell tool reach Jev.
 
-Toasts follow live events: one missed while the TUI is disconnected is not
-shown later. The log keeps the record. Toasts use fixed reason text and validated
-numeric scores. They never contain the command, the
-resources or the prompt's message. An approval in `auto` creates no prompt,
-so it appears only in the log. The one-off startup and unavailability notices
-go only to the log and stderr; once the event stream has ended, later prompts
-show the `events-unavailable` warning.
+OpenCode also offers the selectable `session.panel` slot, opened explicitly in
+side or fullscreen mode. This plugin uses the sidebar instead.
+These contracts were checked against the tagged V2.1.4 source:
+[slot and panel contracts](https://github.com/anomalyco/opencode/blob/v2.1.4/packages/plugin/src/tui/context.ts#L165-L225),
+the [sidebar content slot mount](https://github.com/anomalyco/opencode/blob/v2.1.4/packages/tui/src/routes/session/sidebar.tsx#L69-L75),
+and the [TUI plugin documentation](https://opencode.ai/v2/docs/build/plugins/cli).
 
-In the V2.0.20 source inspected, the desktop app offers server plugins no
-notification API, so there the decision log is the place to look.
+The panel uses plain TypeScript and `Dynamic`, without a JSX build step.
+OpenCode supplies the shared Solid/OpenTUI runtime through OpenTUI's
+[runtime plugin configuration](https://github.com/anomalyco/opentui/blob/v0.6.8/packages/solid/scripts/runtime-plugin-support-configure.ts).
+The plugin does not bundle a separate UI runtime.
+
+#### Live phase notifications
+
+Every unique live phase update produces a toast, in both `auto` and `observe`:
+
+| Phase | Meaning | Toast |
+| ----- | ------- | ----- |
+| `checking` | Review started; eligibility checks run before a model call. | Informational. |
+| `evaluating` | The reviewer starts the Jev request. Skipped reviews do not reach this phase. | Informational. |
+| `completed` | Review ended, including approvals, negative judgments, skipped requests and failures. | Success for applied `allow`; warning otherwise. |
+
+Duplicate or older live phase updates do not produce another toast.
+Automatic approvals and negative `auto` judgments therefore have notifications,
+even when no permission prompt appears. The reviewer emits completion status
+for skipped and failed reviews too.
+
+When Jev returns a valid judgment, the sidebar and phase toast show all four
+raw yes-probabilities. Each row shows its threshold, comparison direction and
+pass/fail result:
+
+- Authorization and scope must each be at least `confidenceThreshold`.
+- Confirmation and impact must each be at most `1 - confidenceThreshold`.
+
+At the default threshold, these limits are ≥ 90% and ≤ 10%, respectively.
+The display does not replace the [per-answer approval rules](#how-a-request-is-approved).
+It does not invent missing scores. It shows `not evaluated` before a model call,
+`pending` during evaluation, and `unavailable` after a call without a valid judgment.
+
+`proposed` records Jev's verdict when Jev returns a valid judgment; otherwise it is `ask`.
+`applied` records the permission effect at the reviewer's hook exit.
+It does not prove that a command ran or that later hooks kept that effect.
+If context changes after a passing judgment, the review keeps all four scores
+and proposed `allow`, but applies `ask` with the invalidation reason.
+In `observe`, even a valid proposed `allow` leaves manual approval in place.
+For reasons with a remedy, the sidebar and toast also show a `Next:` line.
+`guidanceFor` selects fixed, safe text from a validated reason code.
+It covers credential problems, timeouts and `events-unavailable`.
+
+#### Reconnection and privacy
+
+The server keeps a bounded, in-memory store of 128 review statuses.
+Its read-only `JevRpc` definition has ID `opencode-secret-guard.jev`, a `snapshot`
+method and `review` events. Each session snapshot contains at most four reviews.
+See the [plugin RPC documentation](https://opencode.ai/v2/docs/build/plugins/rpc).
+
+This state survives a TUI client disconnect, not a server restart or plugin unload.
+The TUI uses `ctx.data.listen` on the host's reconnecting event bus for
+`rpc.opencode-secret-guard.jev.review` and `server.connected`.
+It does not start a direct `client.rpc(JevRpc).events.on` loop, which does not reconnect.
+The generic RPC event is typed for `data.on`, but `data.listen` supports listening
+to all event types on that bus.
+
+The mounted section refreshes on mounting, session changes and `server.connected`.
+There is no periodic polling. Reconnection clears the display cache and aborts
+pending snapshot calls before requesting fresh state.
+`client.rpc(JevRpc).snapshot` uses the selected session ID and full project location,
+including workspace routing. Each request has a four-second abort deadline.
+Unloading the plugin also cancels pending requests.
+
+Each snapshot replaces the retained session result and removes absent cached review IDs.
+The client preserves newer live updates received while the snapshot request runs.
+Snapshots restore the display without replaying toasts.
+Separate live-only notification history prevents duplicate phase toasts.
+A snapshot cannot consume a subsequent live completion notification.
+
+The public event location contains only `directory`, not `workspaceID`.
+Each status payload therefore requires a nullable `workspaceID`, supplied from
+the server's `ctx.location.workspaceID`. The client validates the payload before
+matching its workspace ID and the public event directory to the current location.
+Snapshot results must match the selected session and current workspace too.
+See the tagged [public location schema](https://github.com/anomalyco/opencode/blob/v2.1.4/packages/schema/src/location.ts)
+and [reconnecting client connection](https://github.com/anomalyco/opencode/blob/v2.1.4/packages/client/src/solid/connection.ts).
+
+With review `off`, the server registers no review RPC.
+The sidebar probes once on mounting, without polling.
+Its contribution stays empty until a snapshot succeeds or a live status arrives.
+An off reviewer therefore does not produce an unavailable-status panel.
+
+Status and decision logs never contain commands, paths, resources, user messages,
+keys, host error text or model response bodies. They use identifiers, fixed codes,
+validated scores and context-warning flags. Neither display recovery nor raw score
+logging requires `logPayloads: true` or reads the private payload log.
+
+#### Defensive fallback and log warnings
+
+The plugin retains a defensive fallback if RPC, slots or `data.listen` are missing.
+This is an API check, not a version cutoff. The inspected
+[V2.0.20 TUI context](https://github.com/anomalyco/opencode/blob/v2.0.20/packages/plugin/src/tui/context.ts)
+also has these APIs; no supported host was verified to need this fallback.
+That fallback listens to `permission.asked`; automatic approvals have no prompt
+and no fallback notification. It has no persistent review section or snapshot recovery.
+With review `off`, the reviewer emits no status or notes. Another trusted plugin
+can still write matching notes, because the note format is not authenticated.
+
+The fallback shows proposed approvals in `observe` once per request.
+For negative `observe` judgments, it names the first failed check and displays
+the weakest score and threshold. The score is
+`min(explicitly_authorized, within_scope, 1 - confirmation_required, 1 - high_impact)`.
+It may describe a different answer than the first failed check.
+The note carries unrounded values, for example `; observe score=0.72 threshold=0.9`.
+Negative `auto` judgments have no scored fallback toast.
+
+Fallback credential/remedy warnings use fixed text, at most once per reason every
+10 minutes. See [Credential reasons](#credential-reasons). Remedies also cover
+timeouts and `events-unavailable`; other fallback reasons remain silent.
+These notices follow `permission.asked`, not snapshot recovery.
+
+Decision-log and payload-log warnings remain separate from review phase toasts.
+The `permission.asked` listener deduplicates each warning for 10 minutes.
+The prompt carries `secret-guard log: unavailable` or
+`secret-guard log: payloads unavailable` while the latest corresponding write failed.
+Each note clears after a successful write. An automatic approval can fail to
+write its log without a prompt, so it may produce no TUI log warning.
+Review status notifications do not close that warning gap.
+
+Startup and unavailability notices go to the decision log and stderr.
+After the server event stream ends, later prompts carry `events-unavailable`.
+The inspected V2.0.20 desktop source offers server plugins no notification API;
+these TUI slots and toasts do not add a desktop review display.
+
+Headless native panel rendering, reactive updates and cleanup have been verified.
+This does not verify live OpenCode RPC, reconnection or TUI presentation.
+The sidebar and notification implementation has not been deployed or verified
+in a live OpenCode TUI. The confirmation wording has not been validated against live Jev responses.
 
 ### Decision log
 
@@ -180,23 +288,31 @@ Follow the log while you work, or show the latest decisions:
 ```sh
 log="${XDG_STATE_HOME:-$HOME/.local/state}/opencode-secret-guard/permission-review.jsonl"
 tail -F "$log"
-tail -n 20 "$log" | jq -c '{time, mode, proposed, applied, reason}'
+tail -n 20 "$log" | jq -c '{time, mode, proposed, applied, reason, modelCalled, scores, score, threshold}'
 ```
 
 Records have one of three `event` values:
 
 - `start`: `time`, `pid`, `mode`, `model`, `threshold` and `logPayloads`.
-- `review`: also `action`, `proposed` (the reviewer's verdict, `allow` or
-  `ask`), `applied` (the effect when the reviewer's hook returned; a later
+- `review`: also `action`, `proposed` (Jev's verdict from a valid judgment,
+  otherwise `ask`), `applied` (the effect when the reviewer's hook returned; a later
   plugin can still change it, so this is not a record of what ran),
-  `reason`, `threshold`, `score` when the model returned a judgment,
+  `reason`, `threshold`, and `modelCalled` (a boolean recording whether the
+  reviewer started a model request, not whether it succeeded).
+  Valid judgments add a `scores` object with `explicitly_authorized`,
+  `within_scope`, `confirmation_required` and `high_impact`, plus the
+  weakest approval-oriented `score`. These numbers are logged in both modes
+  without payload logging. Skipped or failed calls without a valid judgment omit
+  `scores` and `score`; they do not record invented zeroes.
+  A stale passing judgment keeps its scores and proposed `allow`, with applied
+  `ask` and the invalidation reason. Records also include
   `elapsedMs`, a `reviewID` that matches the payload
   log, and the `sessionID`, `messageID` and `callID` of the
   tool call. These identify the call in the session's data; the prompt does
   not display them.
   After context validation, records also include `contextCompacted` and
   `outsideProject` booleans. They identify the warnings sent to Jev without
-  recording paths or summary text. Earlier exits omit both fields.
+  recording paths or summary text. Exits before context validation omit both fields.
   `outsideProject` covers the requested working directory and external access
   reported by OpenCode for the shell call. Both flags can be true in either mode.
 - `unavailable`: a fixed `notice` text.
@@ -204,7 +320,7 @@ Records have one of three `event` values:
 V2 evaluates a pending request again after an "always" reply, so the same
 identifiers can appear in more than one `review` record. Records never contain
 the command, paths, resources, your messages, the
-model's raw answer, host error text or a key.
+model response body, host error text or a key.
 
 The plugin creates the file with mode 0600 and its directory with mode 0700.
 It refuses to write through a symlink, a hard link, a FIFO or other
@@ -212,8 +328,8 @@ non-regular file, to a file or directory owned by someone else, or to an
 existing one that group or others can access; it does not change their modes.
 The first refused or failed write of each plugin instance prints one stderr
 line, `secret-guard: permission review: review log unavailable at <path>; ...`;
-in the TUI the next prompt shows a warning (see [TUI notices](#tui-notices)).
-Review continues unchanged; an `auto` approval has no prompt, so a failure
+in the TUI the next prompt shows a warning (see [TUI sidebar and notifications](#tui-sidebar-and-notifications)).
+Review continues; an `auto` approval has no prompt, so a failure
 then shows only on stderr. Check ownership and modes (`chmod 700` the
 directory, `chmod 600` the file), free space and the `.1` rotation target, or
 delete them.
@@ -282,8 +398,8 @@ and the [OpenCode plugin documentation](https://opencode.ai/v2/docs/build/plugin
 
 ## Scope
 
-Only `ask` requests from the `shell` tool are reviewed. Supported permission
-actions are `shell` and `external_directory`. The session must be a root
+Only eligible `ask` requests from the `shell` tool are sent to Jev.
+Supported permission actions are `shell` and `external_directory`. The session must be a root
 session, not a fork, at the plugin's project directory, without a subpath.
 The requested working directory can be outside the project in either mode.
 The model receives:
@@ -305,7 +421,9 @@ The model receives:
 
 Completed summaries can provide the only context in either mode. Their text
 does not become a user message. The questions use summaries only as indirect
-evidence of the task, consent and restrictions. The reviewer does not send
+evidence of the task, consent and restrictions. Summary-only confirmation does
+not satisfy an ask-first requirement; that needs your own words in `user_messages`.
+The reviewer does not send
 `recent`, which contains a raw transcript, or provider-native compaction fields.
 Running, failed or malformed compactions remain ineligible. An empty native
 summary contributes no evidence, but later user messages can still be reviewed
@@ -329,8 +447,9 @@ Every question includes guidance for these warnings:
   evidence for the exact external target and side effects. They tell Jev to
   reduce authorization and scope scores when that evidence is missing.
 
-These are qualitative instructions, not a fixed score penalty. The approval
-threshold remains unchanged. The warnings do not prove danger or guarantee
+These are qualitative instructions, not a fixed score penalty.
+The same approval threshold applies with either warning.
+The warnings do not prove danger or guarantee
 that Jev will detect missing context.
 
 OpenCode checks external-directory access before shell permission for the same
@@ -354,7 +473,7 @@ allowed in `auto` only if all hold:
 | ---------------------------------------------------------------- | --------- |
 | `explicitly_authorized`: did you ask for or approve this action? | ≥ t       |
 | `within_scope`: does all of it serve the task you described?     | ≥ t       |
-| `confirmation_required`: did you ask to confirm or not do this?  | ≤ 1 − t   |
+| `confirmation_required`: do applicable instructions still require confirmation, or forbid this action? | ≤ 1 − t |
 | `high_impact`: could it lose data, reach remote systems, publish data, change permissions, or touch credentials? | ≤ 1 − t |
 
 At the default that is ≥ 0.9 and ≤ 0.1; at 0.95 it is ≥ 0.95 and ≤ 0.05;
@@ -371,6 +490,37 @@ For the same evidence and model answers, `auto` would apply that approval.
 This includes compacted sessions and outside-project shell work. Separate
 external-access and shell checks can have different results. Switching modes
 or repeating inference can change subsequent context and model answers.
+
+### Confirmation restrictions
+
+The normal confirmation question starts with these exact sentences:
+
+> Do instructions in `state.user_messages` require further confirmation for `state.pending_action`, or forbid what it would do? Judge its command, flags, arguments, targets, working directory and effects.
+
+The compacted question also checks instructions recorded in `state.compaction_context`.
+Summaries remain indirect evidence, not direct consent. Missing context does not establish that restrictions are absent or satisfied.
+Confirmation recorded only in a summary cannot satisfy an ask-first requirement.
+That requirement needs your own confirmation in `state.user_messages`.
+
+Both question variants apply these rules:
+
+- Check every flag, argument, target, working directory, chained command and side effect.
+- Apply an effect restriction only to effects the action actually has.
+  Known reporting-only `git clean --dry-run` satisfies `Do not delete anything`.
+  A `--dry-run` flag alone does not prove reporting-only behavior.
+- Keep command, tool, target and action-class bans or confirmation requirements,
+  even when effects are harmless. `Ask before any git clean` still requires
+  confirmation unless you already confirmed that exact action.
+- Do not ask again merely because a condition is already satisfied.
+  Do not assume that unmet or unknown conditions are satisfied.
+  Do not infer unknown effects, alias behavior or effects of chained commands.
+- Prior confirmation that names the exact action can satisfy a textual ask requirement.
+  A bare `yes` or `ok` does not establish exact-action authorization.
+  Prior confirmation does not cancel a refusal.
+
+This guidance is not a blanket confirmation bypass. The other three questions,
+scope gates, refusal checks and all score thresholds still apply.
+The question-contract tests check request shape and wording, not Jev's interpretation.
 
 ## When you are still asked
 

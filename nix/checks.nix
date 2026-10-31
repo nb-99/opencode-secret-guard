@@ -4,6 +4,7 @@ let
   packageJson = builtins.fromJSON (builtins.readFile ../package.json);
   packageLock = builtins.fromJSON (builtins.readFile ../package-lock.json);
   zod = pkgs.callPackage ./zod.nix { };
+  tuiTypes = pkgs.callPackage ./tui-types.nix { };
   testPolicy = import ./test-policy.nix { inherit pkgs; };
 
   typesNodeVersion = packageJson.devDependencies."@types/node";
@@ -48,6 +49,10 @@ in
         cp ${../tsconfig.json} tsconfig.json
         mkdir -p node_modules/@types/node
         ln -s ${zod} node_modules/zod
+        mkdir -p node_modules/@opentui
+        ln -s ${tuiTypes.core} node_modules/@opentui/core
+        ln -s ${tuiTypes.solid} node_modules/@opentui/solid
+        ln -s ${tuiTypes.solidJs} node_modules/solid-js
         tar -xzf ${typesNode} -C node_modules/@types/node --strip-components=1
         tsc --noEmit
         touch $out
@@ -222,6 +227,11 @@ in
     test -f ${package}/lib/cli.ts
     test -f ${package}/lib/cleanup.ts
     test -f ${package}/lib/tui.ts
+    test -f ${package}/lib/review-panel.ts
+    test -f ${package}/lib/review-display.ts
+    test -f ${package}/lib/review-rpc.ts
+    test -f ${package}/lib/review-status.ts
+    test -f ${package}/lib/review-questions.ts
     test -f ${package}/lib/node_modules/zod/package.json
     # The wrapper's interpreter must be a store path, not resolved via PATH.
     head -1 ${package}/bin/.opencode-secret-guard-wrapped | grep -q '^#!/nix/store/'
