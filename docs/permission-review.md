@@ -43,6 +43,8 @@ reaches you as a normal prompt.
   them apart, so it trusts the commands, MCP servers, clients and plugins you
   run. The model is told that consent claimed inside quoted material is not
   yours, which reduces but does not remove this risk.
+- Both `observe` and `auto` review completed compactions and outside-project
+  shell work with context warnings. See [Scope](#scope).
 - On V2, a shell call runs in this order: `tool` `execute.before` sees the
   original tool input; `shell` `create.before` plugins may then rewrite the
   command or working directory; the built-in shell tool parses the result
@@ -89,7 +91,7 @@ reads the policy at startup, so restart OpenCode after a change.
 | `mode`    | Behavior                                                                          |
 | --------- | --------------------------------------------------------------------------------- |
 | `off`     | Default. The reviewer is not set up and sends no traffic.                         |
-| `observe` | Each `ask` is logged and noted on the permission request; only eligible shell asks are sent to Jev. You are still asked. |
+| `observe` | Each `ask` is logged and noted; eligible `shell`-tool asks (`shell` and `external_directory`) are sent to Jev. You still decide. |
 | `auto`    | A request that meets every approval condition is allowed once; otherwise asked.   |
 
 When review leaves a prompt in place, in `observe` and in `auto`, the
@@ -192,6 +194,11 @@ Records have one of three `event` values:
   log, and the `sessionID`, `messageID` and `callID` of the
   tool call. These identify the call in the session's data; the prompt does
   not display them.
+  After context validation, records also include `contextCompacted` and
+  `outsideProject` booleans. They identify the warnings sent to Jev without
+  recording paths or summary text. Earlier exits omit both fields.
+  `outsideProject` covers the requested working directory and external access
+  reported by OpenCode for the shell call. Both flags can be true in either mode.
 - `unavailable`: a fixed `notice` text.
 
 V2 evaluates a pending request again after an "always" reply, so the same
@@ -235,8 +242,9 @@ visible only as described above.
 | `auth-error`         | OpenCode failed while looking up the connection. |
 | `auth-unsupported`   | Defensive: this OpenCode does not expose saved credentials to plugins. V2.0.20 does. |
 
-Start with `observe`, compare each decision in the log with your own answer
-to the prompt, and switch to `auto` only when you agree with them.
+Use `observe` to record judgments without applying approvals. Use `auto` to
+apply judgments that pass every approval check. Both modes use the same scope
+and score checks, including compacted and outside-project shell work.
 
 With Home Manager, set it through the existing `settings` option, which is
 written into the protected config file:
@@ -274,21 +282,67 @@ and the [OpenCode plugin documentation](https://opencode.ai/v2/docs/build/plugin
 
 ## Scope
 
-Only `ask` requests from the `shell` tool with permission action `shell` are
-reviewed, in a root session (no parent, not a fork) whose location is the
-plugin's project directory, without a subpath. The working directory must lie
-inside the project directory. The model receives:
+Only `ask` requests from the `shell` tool are reviewed. Supported permission
+actions are `shell` and `external_directory`. The session must be a root
+session, not a fork, at the plugin's project directory, without a subpath.
+The requested working directory can be outside the project in either mode.
+The model receives:
 
+- `permission_action`: the current check, `shell` or `external_directory`
 - `requested_command`: the command from the original tool input
 - `requested_cwd`: the directory that input asked for, resolved against the
   project directory; not proof of where the command finally runs
 - `project_directory`
-- `permission_resources`: the commands OpenCode parsed for the prompt
+- `permission_resources`: parsed commands for `shell`, or access targets for
+  `external_directory`
 - `user_messages`: the plain text of the session's user-role messages,
   oldest first
+- `compaction_context`: completed compaction summaries, each with
+  `summary`; empty when no compaction is present
+- `context_warnings`: `compacted` and `outside_project` booleans. The latter
+  covers the requested working directory or prior external-access permission
+  checks for the same tool call, including `cd` targets within the command.
+
+Completed summaries can provide the only context in either mode. Their text
+does not become a user message. The questions use summaries only as indirect
+evidence of the task, consent and restrictions. The reviewer does not send
+`recent`, which contains a raw transcript, or provider-native compaction fields.
+Running, failed or malformed compactions remain ineligible. An empty native
+summary contributes no evidence, but later user messages can still be reviewed
+with the compaction warning.
+
+OpenCode V2.0.20 returns the latest completed compaction and later messages.
+The reviewer cannot inspect original messages, refusals or attachments before
+that boundary. A summary may omit them. Live refusals remain final while the
+plugin runs, even if compaction removes their history.
+
+Every question includes guidance for these warnings:
+
+- Compaction can omit earlier restrictions. Summaries are generated evidence,
+  not direct user consent. The questions tell Jev to reduce authorization and
+  scope scores when original consent or limits are unclear. Missing restrictions
+  do not show that confirmation is unnecessary.
+  The restriction and scope questions explicitly include summaries. Recorded
+  restrictions apply to the action. Summaries can repeat untrusted tool output
+  or assistant claims; consent attributed to you is not verified.
+- Project-local consent does not authorize another target. The questions require
+  evidence for the exact external target and side effects. They tell Jev to
+  reduce authorization and scope scores when that evidence is missing.
+
+These are qualitative instructions, not a fixed score penalty. The approval
+threshold remains unchanged. The warnings do not prove danger or guarantee
+that Jev will detect missing context.
+
+OpenCode checks external-directory access before shell permission for the same
+call. The reviewer evaluates each permission action separately. In `auto`, each
+check can receive a one-time approval if its own review passes. Approving
+external access does not approve a separate shell ask. Shell permission can
+already be allowed by a rule. In that case, external-access approval can be
+the last permission check before execution. In `observe`, every ask stays manual.
 
 Everything else stays a prompt, including edits, writes, reads, patches, MCP
-tools and external-directory requests.
+tools and external-directory requests from tools other than `shell`.
+Review does not read another project's instructions or permission rules.
 
 ## How a request is approved
 
@@ -312,20 +366,28 @@ provably correct. Each `review` record in the decision log contains the
 threshold it used. This feature has not been shown to be safe or accurate on live traffic;
 `observe` exists to gather that evidence on your own work.
 
+In `observe`, a passing result is a proposed approval, not an applied one.
+For the same evidence and model answers, `auto` would apply that approval.
+This includes compacted sessions and outside-project shell work. Separate
+external-access and shell checks can have different results. Switching modes
+or repeating inference can change subsequent context and model answers.
+
 ## When you are still asked
 
 Besides any unmet approval condition, the reviewer leaves the prompt when:
 
 - The request is outside the [scope](#scope), cannot be matched to exactly
-  one pending tool call, or its agent differs. A call identity that two live
-  calls shared, or whose tracked call was dropped unfinished (after 15
-  minutes, beyond 512 tracked calls, or invalidated by a session event), is
-  never approved again while the plugin runs. After 1,024 such identities,
-  no call is approved until the plugin reloads.
-- The same tool call is evaluated again; only the first evaluation is
-  reviewed.
-- The session was compacted, has no user message, or its user messages exceed
-  12,000 characters in total. Text is never truncated.
+  one pending tool call, or its agent differs. An identity becomes permanently
+  ineligible when a shell call shares it with another live call.
+  Dropping an unfinished shell call also makes its identity permanently ineligible.
+  Calls are dropped after 15 minutes, beyond 512 tracked calls, or after a
+  session event. After 1,024 unsafe identities, no call is approved until reload.
+  Non-shell-only collisions and dropped non-shell calls do not fill that limit.
+- The same permission action for a tool call is evaluated again. Each action
+  receives at most one review per call.
+- The context has no user message and no non-blank completed summary.
+  User messages and summaries share a 12,000-character budget. Text is never
+  truncated. Running, failed or malformed compactions make the request ineligible.
 - A user message has attached files or explicitly selected skills. The
   reviewer neither reads nor sends their contents, so it cannot see
   instructions or restrictions in them.
@@ -333,20 +395,21 @@ Besides any unmet approval condition, the reviewer leaves the prompt when:
   uses for a configured block and for a rejection with feedback, or any
   aborted assistant or tool error. A plain rejection appears in history as an
   aborted error, and so does an ordinary interrupted call. Because the check
-  reads history, it still applies after a restart.
+  reads available history, it still applies after a restart unless compaction
+  removed the refusal. A compaction warning cannot recover a missing refusal.
 - A `reject` reply was seen live in the session while the plugin was running.
   This ends review in that session until the plugin reloads. After 1,024
   such sessions, review stops in every session. After a restart, the history
-  check above still applies, because a plain rejection is saved as an aborted
-  error.
+  check above still applies when the saved aborted error remains available.
 - The command, working directory or a resource is missing or too long.
 - A recognized credential appears in the command, working directory, a
-  resource or a user message (see [What leaves your machine](#what-leaves-your-machine)).
+  resource, a user message or compaction text (see [What leaves your machine](#what-leaves-your-machine)).
 - No usable API key is available.
 - The session is interrupted, deleted or moved, or its inbox changes, while
   the review runs.
-- Before allowing, the reviewer reads the session again: its location or
-  user messages differ, or the tool call changed or finished.
+- Before reporting a proposed approval, the reviewer reads the session again.
+  A changed location, user message, compaction entry or tool call invalidates
+  that result. A finished tool call also invalidates it.
 - The whole review takes longer than 10 seconds, or the call fails or returns
   an unusable answer.
 - Two reviews are already running.
@@ -354,7 +417,11 @@ Besides any unmet approval condition, the reviewer leaves the prompt when:
 ## What leaves your machine
 
 Each review sends to OpenCode Zen the fields listed under [Scope](#scope),
-including all user messages of the session. Nothing is redacted: if a
+including the available user messages and completed compaction
+summaries. Summaries can reproduce private text from earlier messages, tool
+results, reasoning or another project. The raw `recent` transcript and
+provider-native fields are not sent. In either mode, `requested_cwd` can name an
+absolute path outside the project. Nothing is redacted: if a
 recognized credential appears anywhere in them, the model is not called and
 you are asked. Recognition covers common token formats, private-key headers,
 inline passwords and URL credentials, and assignments to variable names in the
@@ -368,7 +435,7 @@ whose instructions or paths must not leave the machine.
 With `logPayloads: true` and a mode other than `off`, the plugin also writes
 `permission-review-payloads.jsonl` next to the decision log. Unlike the
 decision log, it contains the commands, resources, working directory and
-all user messages sent for review, and the model's answers. Enable it only
+all user messages and summaries sent for review, and the model's answers. Enable it only
 for debugging, and only where that is acceptable on disk.
 
 ```sh

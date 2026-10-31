@@ -65,8 +65,16 @@ contracts that were checked against the [v2.0.20][v2.0.20-tag] and
 - A tool permission request's `source` carries the tool call's `messageID` and
   `id`, which correlate it with the `tool` `execute.before` and `execute.after`
   events ([source][v2-plugin-tool]).
+- The [shell tool][v2-plugin-shell] checks [external-directory access][v2-file-access]
+  before shell permission. Both checks carry the same tool-call source identity.
+  The reviewer tracks each permission action separately.
 - `session.get` and `session.context` return the session and its messages;
   message types include `user` and `compaction` ([source][v2-session-message]).
+  Completed V2.0.20 compactions have top-level string fields `summary` and
+  `recent`. The latter contains a raw text transcript, not another summary.
+  [Context loading][v2-session-store] starts at the
+  [latest completed compaction][v2-session-history]. See the
+  [review scope](permission-review.md#scope) for the resulting evidence limits.
 - `integration.connection.active` and `resolve` return the saved credential
   for an integration ([source][v2-integration]).
 - `event.subscribe` streams host events ([source][v2-plugin-event]). The
@@ -242,8 +250,12 @@ the tested host to V2 2.0.20.
 [v2-tool]: https://github.com/anomalyco/opencode/blob/v2.0.16/packages/core/src/tool.ts
 [v2-permission]: https://github.com/anomalyco/opencode/blob/v2.0.20/packages/core/src/permission.ts
 [v2-plugin-tool]: https://github.com/anomalyco/opencode/blob/v2.0.20/packages/plugin/src/promise/tool.ts
+[v2-plugin-shell]: https://github.com/anomalyco/opencode/blob/v2.0.20/packages/core/src/tool/plugin/shell.ts
+[v2-file-access]: https://github.com/anomalyco/opencode/blob/v2.0.20/packages/core/src/file-access.ts
 [v2-integration]: https://github.com/anomalyco/opencode/blob/v2.0.20/packages/plugin/src/promise/integration.ts
 [v2-session-message]: https://github.com/anomalyco/opencode/blob/v2.0.20/packages/schema/src/session-message.ts
+[v2-session-store]: https://github.com/anomalyco/opencode/blob/v2.0.20/packages/core/src/session/store.ts
+[v2-session-history]: https://github.com/anomalyco/opencode/blob/v2.0.20/packages/core/src/session/history.ts
 [v2-plugin-event]: https://github.com/anomalyco/opencode/blob/v2.0.20/packages/plugin/src/promise/event.ts
 [v2-session-event]: https://github.com/anomalyco/opencode/blob/v2.0.20/packages/schema/src/session-event.ts
 [v2-schema-permission]: https://github.com/anomalyco/opencode/blob/v2.0.20/packages/schema/src/permission.ts
