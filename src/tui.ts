@@ -1,18 +1,7 @@
-/**
- * TUI companion of the permission reviewer. OpenCode V2.0.20 renders neither
- * in the TUI nor in the desktop app the message a server plugin adds to a
- * permission request, so this plugin turns the reviewer's note on each
- * `permission.asked` event into a toast. Only the TUI loads it; the desktop
- * app has no equivalent and relies on the decision log.
- *
- * Toasts carry fixed text chosen by the parsed reason code, never the
- * request's message, command or resources. Contracts, from the v2.0.20 source
- * (84c9be93): `packages/plugin/src/tui/plugin.ts` (default `{ id, setup }`),
- * `tui/context.ts` (`data.on` returns an unsubscribe; `ui.toast.show`) and
- * `schema/src/permission.ts` (`permission.asked` data is the request, with
- * `id`, `sessionID` and an optional `message`). No SDK types are imported.
- */
+/** Terminal review display. V2.1.4 supports sidebar slots and project-scoped plugin RPC. */
 import { guidanceFor, hasLogUnavailableNote, hasPayloadLogUnavailableNote, parseNote } from "./review-notes.ts";
+import { createReviewDisplay, type ReviewDisplayContext } from "./review-display.ts";
+import type { ReviewPanelContext } from "./review-panel.ts";
 
 type ToastVariant = "info" | "success" | "warning" | "error";
 
@@ -61,7 +50,7 @@ function percents(score: number, threshold: number): [string, string] {
   return [`≈${format(score, 4)}`, format(threshold, 4)];
 }
 
-export function createTuiListener(ui: TuiContext["ui"], now: () => number = Date.now) {
+export function createTuiListener(ui: TuiContext["ui"], now: () => number = Date.now, warningsOnly = false) {
   const seen = new Set<string>();
   // Keys are reason codes with guidance and the two log keys only, so the map stays small.
   const warned = new Map<string, number>();
@@ -88,6 +77,7 @@ export function createTuiListener(ui: TuiContext["ui"], now: () => number = Date
       };
       if (logFailing) warn(LOG_KEY, LOG_WARNING);
       if (payloadLogFailing) warn(PAYLOAD_LOG_KEY, PAYLOAD_LOG_WARNING);
+      if (warningsOnly) return;
       if (!note) return;
       if (note.proposal === "would allow") {
         ui.toast.show({ title: TITLE, message: "Observe mode: Jev would allow this request. You are still asked.", variant: "info", duration: 4_000, sessionID });
@@ -115,9 +105,29 @@ export function createTuiListener(ui: TuiContext["ui"], now: () => number = Date
   };
 }
 
+type DisplayContext = TuiContext & Partial<ReviewDisplayContext> & Partial<ReviewPanelContext>;
+
+export function setupTui(ctx: DisplayContext, loadPanel = () => import("./review-panel.ts")) {
+  if (!ctx.client?.rpc || !ctx.ui.slot || !ctx.data.listen) return ctx.data.on("permission.asked", createTuiListener(ctx.ui));
+  const display = createReviewDisplay(ctx as ReviewDisplayContext);
+  const stopWarnings = ctx.data.on("permission.asked", createTuiListener(ctx.ui, Date.now, true));
+  let disposed = false;
+  let unregister: (() => void) | undefined;
+  // Only the TUI loads the host's shared Solid/OpenTUI runtime.
+  void loadPanel().then(({ registerReviewPanel }) => {
+    if (!disposed) unregister = registerReviewPanel(ctx as ReviewPanelContext, display);
+  }).catch(() => {
+    if (!disposed) ctx.ui.toast.show({ title: TITLE, message: "The Jev sidebar could not load. Review notifications and decision logs remain available.", variant: "warning", duration: 8_000 });
+  });
+  return () => {
+    disposed = true;
+    unregister?.();
+    stopWarnings();
+    display.dispose();
+  };
+}
+
 export default {
   id: "opencode-secret-guard.tui",
-  setup(ctx: TuiContext) {
-    return ctx.data.on("permission.asked", createTuiListener(ctx.ui));
-  },
+  setup: setupTui,
 };
