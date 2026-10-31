@@ -1,6 +1,8 @@
-import { createReviewStatusStore, MAX_SESSION_REVIEWS, REVIEW_ACTION_PATTERN, REVIEW_ID_PATTERN, REVIEW_REASON_PATTERN, type ReviewStatus } from "./review-status.ts";
+import { createReviewStatusStore, MAX_SESSION_REVIEWS, type ReviewStatus } from "./review-status.ts";
 
-const id = { type: "string", pattern: REVIEW_ID_PATTERN };
+// OpenCode 2.2.5 builds RPC validators with Effect 4, which rejects JSON Schema
+// `pattern`. Both ends apply the character patterns in parseReviewStatus instead.
+const id = { type: "string", minLength: 1, maxLength: 80 };
 const probability = { type: "number", minimum: 0, maximum: 1 };
 const status = {
   type: "object",
@@ -9,7 +11,7 @@ const status = {
     workspaceID: { anyOf: [id, { type: "null" }] },
     messageID: { anyOf: [id, { type: "null" }] },
     callID: { anyOf: [id, { type: "null" }] },
-    action: { type: "string", pattern: REVIEW_ACTION_PATTERN },
+    action: { type: "string", minLength: 1, maxLength: 40 },
     mode: { enum: ["observe", "auto"] },
     phase: { enum: ["checking", "evaluating", "completed"] },
     modelCalled: { type: "boolean" },
@@ -18,7 +20,7 @@ const status = {
     threshold: { type: "number", exclusiveMinimum: 0.5, maximum: 1 },
     proposed: { enum: ["allow", "ask"] },
     applied: { enum: ["allow", "ask", "deny"] },
-    reason: { type: "string", pattern: REVIEW_REASON_PATTERN },
+    reason: { type: "string", minLength: 1, maxLength: 60 },
     scores: {
       type: "object", additionalProperties: false,
       properties: {

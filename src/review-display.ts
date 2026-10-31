@@ -1,5 +1,5 @@
 import { JevRpc } from "./review-rpc.ts";
-import { createReviewStatusStore, MAX_SESSION_REVIEWS, parseReviewStatus, reviewLines, type ReviewStatus } from "./review-status.ts";
+import { createReviewStatusStore, MAX_SESSION_REVIEWS, parseReviewStatus, reviewLines, type ReviewAvailability, type ReviewStatus } from "./review-status.ts";
 
 type Location = { directory: string; workspaceID?: string };
 export interface ReviewDisplayContext {
@@ -22,6 +22,12 @@ export interface ReviewDisplayContext {
 
 const record = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
+
+/** Fixed codes only: host error messages never reach the display. */
+export type RefreshResult = NonNullable<ReviewAvailability>;
+const failed = (code: string): RefreshResult => ({ ok: false, code });
+const rpcErrorCode = (error: unknown) =>
+  record(error) && typeof error.type === "string" && /^rpc\.[a-z_]{1,40}$/.test(error.type) ? error.type : "error";
 
 /** Live updates notify. Snapshots only restore the display, without replaying old notifications. */
 export function createReviewDisplay(ctx: ReviewDisplayContext, refreshTimeoutMs = 4_000) {
@@ -73,13 +79,15 @@ export function createReviewDisplay(ctx: ReviewDisplayContext, refreshTimeoutMs 
   });
   return {
     snapshot(sessionID: string): ReviewStatus[] { return store.snapshot(sessionID); },
-    async refresh(sessionID: string): Promise<boolean> {
+    async refresh(sessionID: string): Promise<RefreshResult> {
       const current = location();
-      if (disposed || !current) return false;
+      if (disposed) return failed("disposed");
+      if (!current) return failed("no-location");
       const controller = new AbortController();
       const request = { controller, sessionID, live: createReviewStatusStore() };
       requests.add(request);
-      const timer = setTimeout(() => controller.abort(), refreshTimeoutMs);
+      let timedOut = false;
+      const timer = setTimeout(() => { timedOut = true; controller.abort(); }, refreshTimeoutMs);
       const interrupted = new Promise<never>((_, reject) => {
         controller.signal.addEventListener("abort", () => reject(new Error("review-status-unavailable")), { once: true });
       });
@@ -87,20 +95,24 @@ export function createReviewDisplay(ctx: ReviewDisplayContext, refreshTimeoutMs 
         const result = await Promise.race([
           ctx.client.rpc(JevRpc).snapshot({ sessionID }, { location: current, signal: controller.signal }), interrupted,
         ]);
-        if (disposed || !record(result) || !Array.isArray(result.reviews) || result.reviews.length > MAX_SESSION_REVIEWS) return false;
+        if (disposed) return failed("disposed");
+        if (!record(result) || !Array.isArray(result.reviews) || result.reviews.length > MAX_SESSION_REVIEWS) return failed("invalid-response");
         const statuses: ReviewStatus[] = [];
         for (const value of result.reviews) {
-          if (!record(value) || typeof value.sessionID !== "string") return false;
+          if (!record(value) || typeof value.sessionID !== "string") return failed("invalid-response");
           if (value.sessionID !== sessionID) continue;
           const status = parseReviewStatus(value);
-          if (!status) return false;
-          if (status.workspaceID !== (current.workspaceID ?? null)) return false;
+          if (!status) return failed("invalid-response");
+          if (status.workspaceID !== (current.workspaceID ?? null)) return failed("invalid-response");
           statuses.push(status);
         }
         store.reconcile(sessionID, [...statuses, ...request.live.snapshot(sessionID)]);
         changed(sessionID);
-        return true;
-      } catch { return false; }
+        return { ok: true };
+      } catch (error) {
+        if (timedOut) return failed("timeout");
+        return failed(controller.signal.aborted ? "cancelled" : rpcErrorCode(error));
+      }
       finally { clearTimeout(timer); requests.delete(request); }
     },
     subscribe(listener: (sessionID?: string) => void): () => void {

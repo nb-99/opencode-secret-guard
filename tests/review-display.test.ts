@@ -1,5 +1,5 @@
 import { describe, expect, mock, test } from "bun:test";
-import { createReviewDisplay, type ReviewDisplayContext } from "../src/review-display.ts";
+import { createReviewDisplay, type RefreshResult, type ReviewDisplayContext } from "../src/review-display.ts";
 import { JevRpc, setupReviewStatus, type ReviewRpcContext, type ReviewRpcRegistration } from "../src/review-rpc.ts";
 import { type ReviewStatus } from "../src/review-status.ts";
 
@@ -149,20 +149,36 @@ describe("review RPC boundary", () => {
     expect(Object.keys(rpc.handlers)).toEqual(["snapshot"]);
     expect(Object.keys(JevRpc.events)).toEqual(["review"]);
     expect(JevRpc.methods.snapshot.input).toEqual({
-      type: "object", properties: { sessionID: { type: "string", pattern: "^[A-Za-z0-9_.:-]{1,80}$" } },
+      type: "object", properties: { sessionID: { type: "string", minLength: 1, maxLength: 80 } },
       required: ["sessionID"], additionalProperties: false,
     });
     expect(JevRpc.methods.snapshot.output.properties.reviews.maxItems).toBe(4);
     expect(JevRpc.events.review.schema.additionalProperties).toBe(false);
     expect(JevRpc.events.review.schema.required).toContain("workspaceID");
     expect(JevRpc.events.review.schema.properties.workspaceID).toEqual({
-      anyOf: [{ type: "string", pattern: "^[A-Za-z0-9_.:-]{1,80}$" }, { type: "null" }],
+      anyOf: [{ type: "string", minLength: 1, maxLength: 80 }, { type: "null" }],
     });
     expect(Object.keys(JevRpc.events.review.schema.properties).sort()).toEqual([
       "action", "applied", "callID", "contextWarnings", "elapsedMs", "messageID", "mode", "modelCalled",
       "phase", "proposed", "reason", "reviewID", "scores", "sessionID", "startedAt", "threshold", "workspaceID",
     ]);
     publisher.dispose();
+  });
+
+  test("uses no JSON Schema pattern, which OpenCode 2.2.5 rejects as rpc.invalid_input", () => {
+    const keywords = new Set<string>();
+    const visit = (value: unknown) => {
+      if (Array.isArray(value)) value.forEach(visit);
+      else if (typeof value === "object" && value !== null) {
+        for (const [key, child] of Object.entries(value)) {
+          keywords.add(key);
+          visit(child);
+        }
+      }
+    };
+    visit(JevRpc);
+    expect(keywords.has("pattern")).toBe(false);
+    expect(keywords.has("patternProperties")).toBe(false);
   });
 
   test("publishes and snapshots only content-free status fields", async () => {
@@ -321,10 +337,10 @@ describe("review display boundary", () => {
     let hang = true;
     const ui = displayHarness({ refreshTimeoutMs: 10, snapshot: async () =>
       hang ? new Promise(() => {}) : { reviews: [completed({ scores: reviewedScores })] } });
-    expect(await ui.display.refresh("session-1")).toBe(false);
+    expect(await ui.display.refresh("session-1")).toMatchObject({ ok: false });
     expect(ui.snapshotCalls[0]!.options.signal.aborted).toBe(true);
     hang = false;
-    expect(await ui.display.refresh("session-1")).toBe(true);
+    expect(await ui.display.refresh("session-1")).toEqual({ ok: true });
     expect(ui.display.snapshot("session-1")[0]!.scores).toEqual(reviewedScores);
     expect(ui.toasts).toEqual([]);
     ui.display.dispose();
@@ -364,7 +380,7 @@ describe("review display boundary", () => {
     ui.emit(accepted, fallback);
     expect(ui.toasts).toHaveLength(1);
     expect(ui.display.snapshot("session-1")).toEqual([accepted]);
-    expect(await ui.display.refresh("session-1")).toBe(true);
+    expect(await ui.display.refresh("session-1")).toEqual({ ok: true });
     expect(ui.snapshotCalls).toMatchObject([{ input: { sessionID: "session-1" }, options: { location: fallback } }]);
     expect(ui.snapshotCalls[0]!.options.signal).toBeInstanceOf(AbortSignal);
     expect(ui.snapshotCalls[0]!.options.signal.aborted).toBe(false);
@@ -433,7 +449,7 @@ describe("review display boundary", () => {
     ui.emit(done);
     ui.emit(evaluating);
     pending.resolve({ reviews: [checking] });
-    expect(await restored).toBe(true);
+    expect(await restored).toEqual({ ok: true });
     expect(ui.display.snapshot("session-1")).toEqual([done]);
     expect(ui.toasts).toHaveLength(3);
     ui.emit(checking);
@@ -563,7 +579,7 @@ describe("review display boundary", () => {
     const ui = displayHarness({ snapshot: async () => ({ reviews: [done, other] }) });
     const updates: ReviewStatus[][] = [];
     ui.display.subscribe(() => { updates.push(ui.display.snapshot("session-1")); });
-    expect(await ui.display.refresh("session-1")).toBe(true);
+    expect(await ui.display.refresh("session-1")).toEqual({ ok: true });
     expect(ui.snapshotCalls).toMatchObject([{ input: { sessionID: "session-1" }, options: { location: project } }]);
     expect(ui.snapshotCalls[0]!.options.signal).toBeInstanceOf(AbortSignal);
     expect(ui.snapshotCalls[0]!.options.signal.aborted).toBe(false);
@@ -580,7 +596,7 @@ describe("review display boundary", () => {
     const checking = status();
     const evaluating = status({ phase: "evaluating", modelCalled: true });
     ui.emit(checking);
-    expect(await ui.display.refresh("session-1")).toBe(true);
+    expect(await ui.display.refresh("session-1")).toEqual({ ok: true });
     expect(ui.display.snapshot("session-1")).toEqual([done]);
     expect(ui.toasts).toHaveLength(1);
     ui.emit(evaluating);
@@ -605,7 +621,7 @@ describe("review display boundary", () => {
     ui.emit(completed({ reviewID: "old-completed" }));
     const other = status({ reviewID: "other-review", sessionID: "session-2" });
     ui.emit(other);
-    expect(await ui.display.refresh("session-1")).toBe(true);
+    expect(await ui.display.refresh("session-1")).toEqual({ ok: true });
     expect(ui.display.snapshot("session-1")).toEqual([
       completed({ reviewID: "new-4", startedAt: 2_004 }),
       completed({ reviewID: "new-3", startedAt: 2_003 }),
@@ -625,7 +641,7 @@ describe("review display boundary", () => {
     ui.display.subscribe(() => { updates.push(ui.display.snapshot("session-1")); });
     ui.emit(checking);
     ui.emit(done);
-    expect(await ui.display.refresh("session-1")).toBe(true);
+    expect(await ui.display.refresh("session-1")).toEqual({ ok: true });
     expect(ui.display.snapshot("session-1")).toEqual([]);
     expect(updates.at(-1)).toEqual([]);
     expect(ui.toasts).toHaveLength(2);
@@ -642,7 +658,7 @@ describe("review display boundary", () => {
     const live = status({ reviewID: "new-live", startedAt: 2_000 });
     ui.emit(live);
     pending.resolve({ reviews: [] });
-    expect(await refresh).toBe(true);
+    expect(await refresh).toEqual({ ok: true });
     expect(ui.display.snapshot("session-1")).toEqual([live]);
     expect(ui.toasts).toHaveLength(2);
     ui.display.dispose();
@@ -652,7 +668,7 @@ describe("review display boundary", () => {
     const done = completed({ scores: { ...reviewedScores } });
     const ui = displayHarness({ snapshot: async () => ({ reviews: [status()] }) });
     ui.emit(done);
-    expect(await ui.display.refresh("session-1")).toBe(true);
+    expect(await ui.display.refresh("session-1")).toEqual({ ok: true });
     expect(ui.display.snapshot("session-1")).toEqual([done]);
     expect(ui.toasts).toHaveLength(1);
     ui.display.dispose();
@@ -663,7 +679,7 @@ describe("review display boundary", () => {
       const ui = displayHarness({ snapshot: async () => ({ reviews: [{ ...completed(), workspaceID }] }) });
       const checking = status();
       ui.emit(checking);
-      expect(await ui.display.refresh("session-1")).toBe(false);
+      expect(await ui.display.refresh("session-1")).toMatchObject({ ok: false });
       expect(ui.display.snapshot("session-1")).toEqual([checking]);
       expect(ui.toasts).toHaveLength(1);
       ui.display.dispose();
@@ -676,7 +692,7 @@ describe("review display boundary", () => {
       const ui = displayHarness({ snapshot: async () => result });
       const changes = mock(() => {});
       ui.display.subscribe(changes);
-      expect(await ui.display.refresh("session-1")).toBe(false);
+      expect(await ui.display.refresh("session-1")).toMatchObject({ ok: false, code: "invalid-response" });
       expect(ui.display.snapshot("session-1")).toEqual([]);
       expect(ui.toasts).toEqual([]);
       expect(changes).not.toHaveBeenCalled();
@@ -686,7 +702,7 @@ describe("review display boundary", () => {
 
   test("a malformed status in the requested session makes snapshot recovery fail", async () => {
     const ui = displayHarness({ snapshot: async () => ({ reviews: [{ ...completed(), scores: { ...reviewedScores, high_impact: Infinity } }] }) });
-    expect(await ui.display.refresh("session-1")).toBe(false);
+    expect(await ui.display.refresh("session-1")).toMatchObject({ ok: false });
     expect(ui.display.snapshot("session-1")).toEqual([]);
     expect(ui.toasts).toEqual([]);
     ui.display.dispose();
@@ -700,17 +716,38 @@ describe("review display boundary", () => {
           return Promise.reject(new Error("Snapshot unavailable"));
         },
       });
-      expect(await ui.display.refresh("session-1")).toBe(false);
+      expect(await ui.display.refresh("session-1")).toEqual({ ok: false, code: "error" });
       expect(ui.toasts).toEqual([]);
       expect(ui.display.snapshot("session-1")).toEqual([]);
       ui.display.dispose();
     });
   }
 
+  test("host RPC failures report only their fixed rpc code", async () => {
+    for (const [thrown, code] of [
+      [{ type: "rpc.invalid_input", message: "synthetic host detail" }, "rpc.invalid_input"],
+      [{ type: "rpc.unavailable", message: "synthetic host detail" }, "rpc.unavailable"],
+      [{ type: "private text with spaces", message: "synthetic host detail" }, "error"],
+      [{ type: "rpc." + "x".repeat(41) }, "error"],
+    ] as const) {
+      const ui = displayHarness({ snapshot: () => Promise.reject(thrown) });
+      const result = await ui.display.refresh("session-1");
+      expect(result).toEqual({ ok: false, code });
+      expect(JSON.stringify(result)).not.toContain("synthetic host detail");
+      ui.display.dispose();
+    }
+  });
+
+  test("a snapshot that exceeds its deadline reports timeout", async () => {
+    const ui = displayHarness({ refreshTimeoutMs: 1, snapshot: () => new Promise(() => {}) });
+    expect(await ui.display.refresh("session-1")).toEqual({ ok: false, code: "timeout" });
+    ui.display.dispose();
+  });
+
   test("missing location ignores live events and does not issue a snapshot request", async () => {
     const ui = displayHarness({ noLocation: true });
     ui.emit(status());
-    expect(await ui.display.refresh("session-1")).toBe(false);
+    expect(await ui.display.refresh("session-1")).toEqual({ ok: false, code: "no-location" });
     expect(ui.snapshotCalls).toEqual([]);
     expect(ui.toasts).toEqual([]);
     expect(ui.display.snapshot("session-1")).toEqual([]);
@@ -771,11 +808,11 @@ describe("review display boundary", () => {
   test("reconnect callbacks can restore status without replaying snapshot toasts", async () => {
     const done = completed({ scores: { ...reviewedScores } });
     const ui = displayHarness({ snapshot: async () => ({ reviews: [done] }) });
-    let recovery: Promise<boolean> | undefined;
+    let recovery: Promise<RefreshResult> | undefined;
     ui.display.onReconnect(() => { recovery = ui.display.refresh("session-1"); });
     ui.event({ type: "server.connected" });
     expect(recovery).toBeDefined();
-    expect(await recovery).toBe(true);
+    expect(await recovery).toEqual({ ok: true });
     expect(ui.display.snapshot("session-1")).toEqual([done]);
     expect(ui.snapshotCalls).toMatchObject([{ input: { sessionID: "session-1" }, options: { location: project } }]);
     expect(ui.toasts).toEqual([]);
@@ -789,7 +826,7 @@ describe("review display boundary", () => {
     const refresh = ui.display.refresh("session-1");
     ui.event({ type: "server.connected" });
     expect(ui.snapshotCalls[0]!.options.signal.aborted).toBe(true);
-    expect(await refresh).toBe(false);
+    expect(await refresh).toMatchObject({ ok: false });
     pending.resolve({ reviews: [completed()] });
     await Promise.resolve();
     expect(ui.display.snapshot("session-1")).toEqual([]);
@@ -828,11 +865,11 @@ describe("review display boundary", () => {
     expect(ui.snapshotCalls[0]!.options.signal.aborted).toBe(true);
     ui.emit(completed());
     pending.resolve({ reviews: [completed()] });
-    expect(await refresh).toBe(false);
+    expect(await refresh).toMatchObject({ ok: false });
     expect(ui.display.snapshot("session-1")).toEqual([]);
     expect(updates).toEqual([[status()]]);
     expect(ui.toasts).toHaveLength(1);
-    expect(await ui.display.refresh("session-1")).toBe(false);
+    expect(await ui.display.refresh("session-1")).toMatchObject({ ok: false });
     expect(ui.snapshotCalls).toHaveLength(1);
   });
 });

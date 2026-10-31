@@ -167,7 +167,7 @@ describe("supported TUI setup", () => {
     const ui = host(async () => ({ reviews: [done] }));
     const dispose = setupTui(ui.ctx, async () => ui.panel);
     await settlePanel();
-    expect(await ui.display.refresh("session-1")).toBe(true);
+    expect(await ui.display.refresh("session-1")).toEqual({ ok: true });
     expect(ui.rpc.mock.calls).toEqual([[JevRpc]]);
     expect(ui.snapshot.mock.calls).toHaveLength(1);
     const [input, options] = ui.snapshot.mock.calls[0]!;
@@ -197,10 +197,10 @@ describe("supported TUI setup", () => {
     queuedBusEvent({ details: { type: "rpc.opencode-secret-guard.jev.review", location: project, data: completed({ scores }) } });
     ui.permission("secret-guard log: unavailable");
     pending.resolve({ reviews: [completed({ scores })] });
-    expect(await refresh).toBe(false);
+    expect(await refresh).toMatchObject({ ok: false });
     expect(ui.display.snapshot("session-1")).toEqual([]);
     expect(ui.toasts).toHaveLength(1);
-    expect(await ui.display.refresh("session-1")).toBe(false);
+    expect(await ui.display.refresh("session-1")).toMatchObject({ ok: false });
     expect(ui.snapshot).toHaveBeenCalledTimes(1);
   });
 
@@ -316,7 +316,7 @@ describe("supported TUI setup", () => {
       const dispose = setupTui(ui.ctx, async () => ui.panel);
       await settlePanel();
       expect(ui.toasts).toEqual([]);
-      expect(await ui.display.refresh("session-1")).toBe(false);
+      expect(await ui.display.refresh("session-1")).toMatchObject({ ok: false });
       expect(ui.display.snapshot("session-1")).toEqual([]);
       expect(ui.toasts).toEqual([]);
       expect(ui.rpc.mock.calls).toEqual([[JevRpc]]);

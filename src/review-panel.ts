@@ -1,6 +1,6 @@
 import { createComponent, createEffect, createSignal, onCleanup } from "solid-js";
 import { Dynamic } from "@opentui/solid";
-import { reviewLines, type ReviewStatus } from "./review-status.ts";
+import { panelText, type ReviewAvailability, type ReviewStatus } from "./review-status.ts";
 import type { ReviewDisplay } from "./review-display.ts";
 
 export interface ReviewPanelContext {
@@ -13,7 +13,7 @@ export interface ReviewPanelContext {
 export function registerReviewPanel(ctx: ReviewPanelContext, display: ReviewDisplay): () => void {
   function Summary(props: { readonly sessionID: string }) {
     const [reviews, setReviews] = createSignal<ReviewStatus[]>([]);
-    const [available, setAvailable] = createSignal<boolean | undefined>();
+    const [available, setAvailable] = createSignal<ReviewAvailability>();
     createEffect(() => {
       const sessionID = props.sessionID;
       let active = true;
@@ -24,12 +24,13 @@ export function registerReviewPanel(ctx: ReviewPanelContext, display: ReviewDisp
         if (!active || (changedSession !== undefined && changedSession !== sessionID)) return;
         const current = display.snapshot(sessionID);
         setReviews(current);
-        if (current.length) { receivedUpdates++; setAvailable(true); }
+        if (current.length) { receivedUpdates++; setAvailable({ ok: true }); }
       });
       const refresh = async () => {
         const before = receivedUpdates;
         const result = await display.refresh(sessionID);
-        if (active && (result || receivedUpdates === before)) setAvailable(result);
+        if (!result.ok && result.code === "cancelled") return;
+        if (active && (result.ok || receivedUpdates === before)) setAvailable(result);
       };
       void refresh();
       const stopReconnect = display.onReconnect(() => { void refresh(); });
@@ -40,14 +41,7 @@ export function registerReviewPanel(ctx: ReviewPanelContext, display: ReviewDisp
       get children() {
         return createComponent(Dynamic, {
           component: "text",
-          get children() {
-            const state = reviews();
-            // An off reviewer has no RPC registration. Keep its sidebar contribution empty.
-            if (available() !== true && state.length === 0) return "";
-            const connection = available() === false ? "\nReview status unavailable; cached results below.\n" : "\n";
-            return "JEV PERMISSION REVIEW" + connection + (state.length ? state.map((status) => reviewLines(status, true).join("\n")).join("\n\n") :
-              available() === undefined ? "Loading review status…" : available() ? "No reviews recorded for this session." : "No cached review status.");
-          },
+          get children() { return panelText(reviews(), available()); },
         });
       },
     });

@@ -214,10 +214,18 @@ Snapshot results must match the selected session and current workspace too.
 See the tagged [public location schema](https://github.com/anomalyco/opencode/blob/v2.1.4/packages/schema/src/location.ts)
 and [reconnecting client connection](https://github.com/anomalyco/opencode/blob/v2.1.4/packages/client/src/solid/connection.ts).
 
-With review `off`, the server registers no review RPC.
+With review `off`, the server registers no review RPC, and snapshots fail with `rpc.unavailable`.
 The sidebar probes once on mounting, without polling.
-Its contribution stays empty until a snapshot succeeds or a live status arrives.
-An off reviewer therefore does not produce an unavailable-status panel.
+Its contribution stays empty while that probe is pending, and when it fails with
+`rpc.unavailable` and no cached status exists. An off reviewer therefore produces no panel.
+Other failures show `Review status unavailable (<code>)` with a fixed code, such as
+`rpc.invalid_input`, `timeout` or `invalid-response`. The panel never shows host error text.
+
+The RPC schemas contain no JSON Schema `pattern` keyword. OpenCode 2.2.5 builds RPC
+validators with Effect 4.0.6, which refuses patterns. That failure returned
+`rpc.invalid_input` (HTTP 400) for every snapshot and prevented live status events.
+Both ends apply the identifier, action and reason character rules in
+`parseReviewStatus` instead.
 
 Status and decision logs never contain commands, paths, resources, user messages,
 keys, host error text or model response bodies. They use identifiers, fixed codes,
