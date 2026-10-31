@@ -29,12 +29,9 @@ export type ReviewStatus = {
 
 export const MAX_REVIEW_STATUSES = 128;
 export const MAX_SESSION_REVIEWS = 4;
-export const REVIEW_ID_PATTERN = "^[A-Za-z0-9_.:-]{1,80}$";
-export const REVIEW_ACTION_PATTERN = "^[A-Za-z0-9_.-]{1,40}$";
-export const REVIEW_REASON_PATTERN = "^[a-z0-9-]{1,60}$";
-const idPattern = new RegExp(REVIEW_ID_PATTERN);
-const actionPattern = new RegExp(REVIEW_ACTION_PATTERN);
-const reasonPattern = new RegExp(REVIEW_REASON_PATTERN);
+const idPattern = /^[A-Za-z0-9_.:-]{1,80}$/;
+const actionPattern = /^[A-Za-z0-9_.-]{1,40}$/;
+const reasonPattern = /^[a-z0-9-]{1,60}$/;
 const phases = { checking: 0, evaluating: 1, completed: 2 };
 const record = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
@@ -177,4 +174,21 @@ export function reviewLines(status: ReviewStatus, narrow = false): string[] {
     ...(status.contextWarnings?.compacted ? ["Compacted context"] : []),
     ...(status.contextWarnings?.outside_project ? ["Outside-project access"] : []),
   ];
+}
+
+/** Snapshot outcome: undefined while pending, otherwise success or a fixed failure code. */
+export type ReviewAvailability = { ok: true } | { ok: false; code: string } | undefined;
+
+/**
+ * Sidebar text; empty hides the section. With nothing to show, pending and
+ * `rpc.unavailable` stay hidden, because a reviewer that is off registers no RPC.
+ */
+export function panelText(state: ReviewStatus[], availability: ReviewAvailability): string {
+  const failure = availability?.ok === false ? availability.code : undefined;
+  if (state.length === 0 && (availability === undefined || failure === "rpc.unavailable")) return "";
+  const lines = ["JEV PERMISSION REVIEW"];
+  if (failure !== undefined) lines.push(`Review status unavailable (${failure}).${state.length ? " Cached results below." : ""}`);
+  if (state.length) lines.push(state.map((status) => reviewLines(status, true).join("\n")).join("\n\n"));
+  else if (failure === undefined) lines.push("No reviews recorded for this session.");
+  return lines.join("\n");
 }
