@@ -4,6 +4,7 @@ let
   packageJson = builtins.fromJSON (builtins.readFile ../package.json);
   packageLock = builtins.fromJSON (builtins.readFile ../package-lock.json);
   zod = pkgs.callPackage ./zod.nix { };
+  tuiTypes = pkgs.callPackage ./tui-types.nix { };
   testPolicy = import ./test-policy.nix { inherit pkgs; };
 
   typesNodeVersion = packageJson.devDependencies."@types/node";
@@ -48,6 +49,10 @@ in
         cp ${../tsconfig.json} tsconfig.json
         mkdir -p node_modules/@types/node
         ln -s ${zod} node_modules/zod
+        mkdir -p node_modules/@opentui
+        ln -s ${tuiTypes.core} node_modules/@opentui/core
+        ln -s ${tuiTypes.solid} node_modules/@opentui/solid
+        ln -s ${tuiTypes.solidJs} node_modules/solid-js
         tar -xzf ${typesNode} -C node_modules/@types/node --strip-components=1
         tsc --noEmit
         touch $out
@@ -153,6 +158,7 @@ in
           "~/.config/secrets"
           "~/vault"
         ];
+        settings.permissionReview.confidenceThreshold = 0.95;
       };
       mergedFile = pkgs.writeText "merged-policy.json" (builtins.toJSON merged);
       # A settings.mode would disagree with the shell the module wires up.
@@ -187,6 +193,8 @@ in
         assert(config.relaxationGroups.vault.binaries[0] === "vault", "new group not created");
         assert(config.relaxationGroups.vault.allowEnvironment.length === 0, "new group missing defaults");
         assert(config.denyRoots.length === 2 && config.denyRoots[1] === "/home/example/vault", "settings override not applied");
+        const review = config.permissionReview;
+        assert(review.mode === "off" && review.confidenceThreshold === 0.95 && review.logPayloads === false, "permissionReview settings not decoded");
       '
       touch $out
     '';
@@ -218,6 +226,12 @@ in
     test -f ${package}/lib/index.ts
     test -f ${package}/lib/cli.ts
     test -f ${package}/lib/cleanup.ts
+    test -f ${package}/lib/tui.ts
+    test -f ${package}/lib/review-panel.ts
+    test -f ${package}/lib/review-display.ts
+    test -f ${package}/lib/review-rpc.ts
+    test -f ${package}/lib/review-status.ts
+    test -f ${package}/lib/review-questions.ts
     test -f ${package}/lib/node_modules/zod/package.json
     # The wrapper's interpreter must be a store path, not resolved via PATH.
     head -1 ${package}/bin/.opencode-secret-guard-wrapped | grep -q '^#!/nix/store/'
@@ -227,6 +241,11 @@ in
       const { default: plugin } = await import("${package}/lib/index.ts");
       if (typeof plugin.id !== "string" || typeof plugin.setup !== "function" || typeof plugin.server !== "function") {
         throw new Error("lib/index.ts must default-export { id, setup, server }");
+      }
+      // V2 TUI loads <plugin directory>/tui beside the server entry.
+      const { default: tui } = await import("${package}/lib/tui.ts");
+      if (tui.id !== "opencode-secret-guard.tui" || typeof tui.setup !== "function") {
+        throw new Error("lib/tui.ts must default-export { id, setup }");
       }
       const { expectedShell } = await import("${package}/lib/shell.ts");
       const expected = expectedShell("${package}/lib");

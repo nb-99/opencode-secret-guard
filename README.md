@@ -154,7 +154,7 @@ with a leading `~`, expanded at runtime, so a policy is portable between hosts.
 
 | Key                         | Meaning                                                                                 |
 | --------------------------- | --------------------------------------------------------------------------------------- |
-| `configVersion`             | File format; rejected if unsupported                                                    |
+| `configVersion`             | File format, currently 4; 1 to 3 still load; anything else is rejected                  |
 | `mode`                      | `shell+files` or `files-only`                                                           |
 | `cleanupRoot`               | Opt-in root for `cleanup_temp`, may start with `~` or `$TMPDIR`; `null` disables it and files-only mode cannot enable it |
 | `tools.git`                 | Absolute path of the git the guard spawns; never resolved through `PATH`                |
@@ -168,6 +168,9 @@ with a leading `~`, expanded at runtime, so a policy is portable between hosts.
 | `secretEnvironment`         | Variable names scrubbed before a command runs, always                                   |
 | `secretEnvironmentPatterns` | Regexes; every inherited variable whose name matches is scrubbed                        |
 | `cacheTtlMs`                | How often a profile is regenerated                                                      |
+| `permissionReview.mode`     | `off` (default), `observe`, or `auto`; optional, approval-only Jev review of OpenCode V2 shell `ask` prompts; requires `configVersion` 4. See [docs/permission-review.md](docs/permission-review.md) |
+| `permissionReview.logPayloads` | `false` (default) or `true`; also logs review request and response bodies to a private local file |
+| `permissionReview.confidenceThreshold` | `0.9` (default); t above 0.5 and at most 1. Authorization and scope answers must reach t; confirmation and impact answers must stay at or below 1 − t. The scores are uncalibrated; see [docs/permission-review.md](docs/permission-review.md#how-a-request-is-approved) |
 
 Validation fails closed: an unsupported version, a wrong type, a non-absolute
 root, an `allowPaths` entry that is not `$HOME`-relative, or a pattern that does
@@ -227,8 +230,8 @@ See [the supported grammar and decision](docs/adr/0001-case-alias-policy.md)
 and [the WSL verification and limits](docs/wsl-case-matching.md). This does not
 add shell isolation to `files-only` mode.
 
-The current policy format is version 3. Version-1 and version-2 policies still
-load: `tools.git` defaults to `/usr/bin/git`, and `secretEnvironmentPatterns`,
+The current policy format is version 4. Version-1 to version-3 policies still
+load, with permission review off: `tools.git` defaults to `/usr/bin/git`, and `secretEnvironmentPatterns`,
 `secretPrintingCommands` and `allowEnvironment` default to empty. Home Manager
 writes the current version automatically.
 

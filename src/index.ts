@@ -30,7 +30,7 @@ export default {
 
   setup: async (ctx: V2Context) => {
     try {
-      await setupV2(ctx, loadPluginPolicy(), MODULE_DIRECTORY);
+      return await setupV2(ctx, loadPluginPolicy(), MODULE_DIRECTORY);
     } catch (error) {
       await setupRefusingV2(ctx, startupFailure(error));
     }
