@@ -443,7 +443,8 @@ The requested working directory can be outside the project in either mode.
 The model receives:
 
 - `permission_action`: the current check, `shell` or `external_directory`
-- `requested_command`: the command from the original tool input
+- `requested_command`: the command from the tool input, after host rewrites
+  such as `rtk`
 - `requested_cwd`: the directory that input asked for, resolved against the
   project directory; not proof of where the command finally runs
 - `project_directory`
@@ -489,6 +490,21 @@ These are qualitative instructions, not a fixed score penalty.
 The same approval threshold applies with either warning.
 The warnings do not prove danger or guarantee
 that Jev will detect missing context.
+
+Every question also includes two fixed notes:
+
+- `message_order`: `user_messages` is oldest first. A later message can lift or
+  narrow an earlier restriction, for example `keep the changes local for now`
+  followed by `commit and push`. It lifts only the restriction it clearly addresses.
+- `command_rewrites`: a command rewriter such as the `rtk` OpenCode plugin can
+  prefix commands with `rtk` before review. `rtk <tool> <arguments>` runs that tool,
+  and `rtk read` replaces `cat`, `head` and `tail`. Jev judges the command that
+  `rtk` runs, and the prefix alone does not lower trust.
+  The reviewer sends the rewritten command unchanged, because `rtk` renames some
+  commands and their flags. Removing the prefix would show a command that does not run.
+
+Neither note changes the approval rules. A `git push` still changes a remote
+system, so its high-impact score keeps it a manual approval.
 
 OpenCode checks external-directory access before shell permission for the same
 call. The reviewer evaluates each permission action separately. In `auto`, each

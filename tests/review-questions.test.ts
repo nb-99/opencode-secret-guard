@@ -16,7 +16,7 @@ for (const [mode, questions] of [
       for (const judgment of Object.values(questions)) {
         expect(Object.keys(judgment)).toEqual(["type", "instructions", "criteria"]);
         expect(judgment.type).toBe("noul");
-        expect(Object.keys(judgment.instructions)).toEqual(["question", "boundary", "context_quality"]);
+        expect(Object.keys(judgment.instructions)).toEqual(["question", "boundary", "message_order", "command_rewrites", "context_quality"]);
         expect(Object.keys(judgment.criteria)).toEqual(["true", "false"]);
       }
     });
@@ -56,6 +56,24 @@ for (const [mode, questions] of [
       expect(question).toContain("Prior user confirmation that names this exact action can satisfy a textual ask requirement.");
       expect(question).toContain("A bare 'yes' or 'ok' does not verify authorization for this exact action.");
       expect(question).toContain("Prior confirmation does not cancel a refusal.");
+    });
+
+    test("tells the reviewer that later user messages can lift earlier restrictions", () => {
+      for (const judgment of Object.values(questions)) {
+        const order = judgment.instructions.message_order;
+        expect(order).toContain("chronological order, oldest first");
+        expect(order).toContain("A later user message can lift or narrow a restriction from an earlier one.");
+        expect(order).toContain("A later message lifts only the restriction it clearly addresses.");
+      }
+    });
+
+    test("explains the host's rtk rewrite without granting it trust", () => {
+      for (const judgment of Object.values(questions)) {
+        const rewrites = judgment.instructions.command_rewrites;
+        expect(rewrites).toContain("`rtk <tool> <arguments>` runs that tool with those arguments.");
+        expect(rewrites).toContain("`rtk read` shows files, like `cat`, `head` or `tail`.");
+        expect(rewrites).toContain("Judge the command that `rtk` runs.");
+      }
     });
 
     test("retains the data boundary and context safeguards", () => {
