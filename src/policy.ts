@@ -9,10 +9,10 @@ import { supportsAliasPattern } from "./path-pattern.ts";
  * reader refuses anything else, so a newer policy paired with an older plugin
  * fails by name instead of silently ignoring fields it does not know.
  */
-export const SUPPORTED_CONFIG_VERSION = 3;
+export const SUPPORTED_CONFIG_VERSION = 4;
 
 /** Older formats that still load, with defaults for the fields they predate. */
-export const ACCEPTED_CONFIG_VERSIONS: readonly number[] = [1, 2, 3];
+export const ACCEPTED_CONFIG_VERSIONS: readonly number[] = [1, 2, 3, 4];
 
 /** Overrides the policy location; otherwise the XDG default path is used. */
 export const CONFIG_ENVIRONMENT = "OPENCODE_SECRET_GUARD_CONFIG";
@@ -61,7 +61,36 @@ export interface GuardConfig {
   secretEnvironment: string[];
   secretEnvironmentPatterns: string[];
   cacheTtlMs: number;
+  permissionReview: PermissionReviewSettings;
 }
+
+/**
+ * Optional approval-only review of V2 permission prompts; see
+ * permission-review.ts. "observe" reviews and reports but leaves every prompt;
+ * "auto" may turn an eligible prompt into a one-time allow. The endpoint and
+ * model are fixed so a project cannot redirect them.
+ */
+export type PermissionReviewMode = "off" | "observe" | "auto";
+
+export const PERMISSION_REVIEW_MODES: readonly PermissionReviewMode[] = ["off", "observe", "auto"];
+
+export interface PermissionReviewSettings {
+  mode: PermissionReviewMode;
+  /** Opt-in copy of every System One request and response body; see review-log.ts. */
+  logPayloads: boolean;
+  /**
+   * t in (0.5, 1]: the positive answers must reach t and the negative ones
+   * stay at or below 1 - t. Applies to the model's yes-probabilities, which
+   * are not calibrated confidence.
+   */
+  confidenceThreshold: number;
+}
+
+export const DEFAULT_PERMISSION_REVIEW: Readonly<PermissionReviewSettings> = {
+  mode: "off",
+  logPayloads: false,
+  confidenceThreshold: 0.9,
+};
 
 /**
  * "shell+files" is the real boundary: the kernel enforces it, so it covers
@@ -249,6 +278,44 @@ export function requireEnvironmentNames(value: unknown, key: string, source: str
   return names;
 }
 
+export function requirePermissionReview(
+  value: unknown,
+  configVersion: number,
+  source: string,
+): PermissionReviewSettings {
+  // Policies older than version 4 predate the reviewer, so it stays off.
+  if (value === undefined) return { ...DEFAULT_PERMISSION_REVIEW };
+  if (configVersion < 4) throw configError(source, '"permissionReview" requires configVersion 4 or later');
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw configError(source, '"permissionReview" must be an object');
+  }
+  const record = value as Record<string, unknown>;
+  const unknown = Object.keys(record).filter((key) => !Object.hasOwn(DEFAULT_PERMISSION_REVIEW, key));
+  if (unknown.length > 0) {
+    throw configError(source, `"permissionReview" has unknown keys: ${unknown.join(", ")}`);
+  }
+  const mode = record.mode === undefined ? DEFAULT_PERMISSION_REVIEW.mode : record.mode;
+  if (!PERMISSION_REVIEW_MODES.includes(mode as PermissionReviewMode)) {
+    throw configError(
+      source,
+      `"permissionReview.mode" must be one of ${PERMISSION_REVIEW_MODES.join(", ")}, not ${JSON.stringify(record.mode)}`,
+    );
+  }
+  const logPayloads = record.logPayloads === undefined ? DEFAULT_PERMISSION_REVIEW.logPayloads : record.logPayloads;
+  if (typeof logPayloads !== "boolean") {
+    throw configError(source, `"permissionReview.logPayloads" must be true or false, not ${JSON.stringify(logPayloads)}`);
+  }
+  const confidenceThreshold = record.confidenceThreshold === undefined ? DEFAULT_PERMISSION_REVIEW.confidenceThreshold : record.confidenceThreshold;
+  // 0.5 would approve an answer the model is undecided about.
+  if (typeof confidenceThreshold !== "number" || !Number.isFinite(confidenceThreshold) || confidenceThreshold <= 0.5 || confidenceThreshold > 1) {
+    throw configError(
+      source,
+      `"permissionReview.confidenceThreshold" must be a number above 0.5 and at most 1, not ${JSON.stringify(confidenceThreshold)}`,
+    );
+  }
+  return { mode: mode as PermissionReviewMode, logPayloads, confidenceThreshold };
+}
+
 export function validateConfig(
   raw: unknown,
   source: string,
@@ -307,6 +374,7 @@ export function validateConfig(
     }
   }
 
+  const permissionReview = requirePermissionReview(record.permissionReview, record.configVersion, source);
   const relaxationGroups = requireRelaxationGroups(record.relaxationGroups, source);
   const denyRoots = requireRoots(record.denyRoots, "denyRoots", source, home);
   const exemptRoots = requireRoots(record.exemptRoots, "exemptRoots", source, home);
@@ -331,6 +399,7 @@ export function validateConfig(
       ? []
       : requireRegexArray(record.secretEnvironmentPatterns, "secretEnvironmentPatterns", source),
     cacheTtlMs: record.cacheTtlMs,
+    permissionReview,
   };
 
   // An exemption above a guarded root would reopen renaming that guarded root.

@@ -417,7 +417,10 @@ to print a private-key file. The resolver prevents unrelated shell segments,
 expansions, filters, and injected environment options from inheriting that
 access, but it cannot prove the semantic intent of every argument accepted by
 git, kubectl, helm, and the other credential clients. User intent and OpenCode
-ask permissions remain the control for deliberately dangerous invocations.
+ask permissions remain the control for deliberately dangerous invocations. The
+opt-in `auto` [permission reviewer](permission-review.md) can replace an
+eligible ask confirmation with a model-based approval; it cannot override a
+deterministic deny or the sandbox.
 
 A group applies **only when every segment of the command invokes one of its
 binaries, a skippable builtin, or a filter that cannot open a file**. This closes

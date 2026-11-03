@@ -106,6 +106,9 @@ export function createRefusingV1Hooks(message: string) {
  */
 export function createV1Hooks(guardConfig: GuardConfig, moduleDirectory: string, directory: string | undefined) {
   validatePlatform(guardConfig);
+  if (guardConfig.permissionReview.mode !== "off") {
+    process.stderr.write("secret-guard: permission review is only available on OpenCode V2; prompts are unchanged.\n");
+  }
   let shellError: unknown = new Error("secret-guard: the shell has not been validated.");
 
   return {

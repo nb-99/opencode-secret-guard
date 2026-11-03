@@ -22,8 +22,8 @@ describe("cleanup policy", () => {
     expect(validateConfig({ ...base, cleanupRoot: undefined }, "test", fixture).cleanupRoot).toBeNull();
   });
   test("legacy policies remain usable without cleanup", () => {
-    expect(validateConfig({ ...base, configVersion: 1, cleanupRoot: null }, "test", fixture).cleanupRoot).toBeNull();
-    expect(() => validateConfig({ ...base, configVersion: 1, cleanupRoot: root }, "test", fixture))
+    expect(validateConfig({ ...base, configVersion: 1, cleanupRoot: null, permissionReview: undefined }, "test", fixture).cleanupRoot).toBeNull();
+    expect(() => validateConfig({ ...base, configVersion: 1, cleanupRoot: root, permissionReview: undefined }, "test", fixture))
       .toThrow("requires configVersion 2");
   });
   test.each([42, "", "relative", "/", "/tmp/..", "$TMPDIRX/scratch", "$HOME/scratch"])("rejects invalid root %j", (cleanupRoot) => {

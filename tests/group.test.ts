@@ -4,7 +4,7 @@ import type { GuardConfig } from "../src/policy.ts";
 import { loadConfig } from "../src/policy.ts";
 
 const config: GuardConfig = {
-  configVersion: 3,
+  configVersion: 4,
   mode: "shell+files",
   cleanupRoot: null,
   tools: { git: "/usr/bin/git" },
@@ -23,6 +23,7 @@ const config: GuardConfig = {
   secretEnvironment: [],
   secretEnvironmentPatterns: [],
   cacheTtlMs: 0,
+  permissionReview: { mode: "off", logPayloads: false, confidenceThreshold: 0.9 },
 };
 
 const group = (command: string) => resolveGroup(command, config);
