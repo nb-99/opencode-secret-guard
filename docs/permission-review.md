@@ -121,14 +121,39 @@ The section mounts with the session sidebar; you may need to scroll to see it.
 It is plugin UI, not a slot inside the native permission prompt.
 Hiding the sidebar hides the section, but does not stop reviews or notifications.
 
-The section shows up to four reviews for the current project-scoped session.
-Active reviews appear first; within each group, newer reviews appear first.
-Each entry shows the mode, permission action, phase and available context warnings.
-Completed entries also show the reason, `proposed` verdict and `applied` effect.
+The section summarizes the current project-scoped session since the server started:
+
+```text
+JEV REVIEW  11 reviews · auto · ≥90%
+7 approved · 2 manual · 2 skipped
+
+Authorization ━━━━━━━━━━  96%  8/9
+Within scope  ━━━━━━━━━━  95%  9/9
+Confirmation  ━─────────   7%  8/9
+High impact   ──────────   4%  8/9
+
+Latest – shell · skipped · 14:04
+  context-rejected
+```
+
+- The header shows the number of completed reviews, the mode and the threshold once.
+- The next line counts completed reviews by outcome and omits outcomes with no reviews:
+  - `approved` (`would approve` in `observe`): Jev passed every check, and the reason is `model-approved`.
+  - `manual`: Jev scored the request, but approval did not apply. This includes
+    negative judgments and passing judgments cancelled by a context change.
+  - `skipped`: the reviewer did not call Jev, for example `context-rejected`.
+  - `failed`: Jev was called but returned no valid judgment.
+- Each category row shows the average score over scored reviews and how many of
+  them passed that check at their own threshold. The bar and the percentage are
+  green when every scored review passed. Otherwise, they are amber.
+  Skipped and failed reviews have no scores, so they do not affect the rows.
+- `Latest` shows the newest review in progress, otherwise the newest completed review.
+  It also shows the reason when it is not `model-approved`, a `Next:` remedy and context warnings.
+
+Colours come from the host theme's text and feedback colours.
 Every incoming `ask` gets checking and completion status, including skipped
-edit, read, MCP and delegated-session requests. These entries also occupy the
-four-review list. Only eligible `shell` and `external_directory` checks from
-the shell tool reach Jev.
+edit, read, MCP and delegated-session requests. Only eligible `shell` and
+`external_directory` checks from the shell tool reach Jev.
 
 OpenCode also offers the selectable `session.panel` slot, opened explicitly in
 side or fullscreen mode. This plugin uses the sidebar instead.
@@ -157,7 +182,7 @@ Automatic approvals and negative `auto` judgments therefore have notifications,
 even when no permission prompt appears. The reviewer emits completion status
 for skipped and failed reviews too.
 
-When Jev returns a valid judgment, the sidebar and phase toast show all four
+When Jev returns a valid judgment, the phase toast shows all four
 raw yes-probabilities. Each row shows its threshold, comparison direction and
 pass/fail result:
 
@@ -175,20 +200,24 @@ It does not prove that a command ran or that later hooks kept that effect.
 If context changes after a passing judgment, the review keeps all four scores
 and proposed `allow`, but applies `ask` with the invalidation reason.
 In `observe`, even a valid proposed `allow` leaves manual approval in place.
-For reasons with a remedy, the sidebar and toast also show a `Next:` line.
+For reasons with a remedy, the sidebar's latest review and the toast also show a `Next:` line.
 `guidanceFor` selects fixed, safe text from a validated reason code.
 It covers credential problems, timeouts and `events-unavailable`.
 
 #### Reconnection and privacy
 
 The server keeps a bounded, in-memory store of 128 review statuses.
+It also keeps running totals for up to 128 sessions, which it updates once per completed review.
+The totals do not depend on the status store, so evicted statuses still count.
 Its read-only `JevRpc` definition has ID `opencode-secret-guard.jev`, a `snapshot`
-method and `review` events. Each session snapshot contains at most four reviews.
+method, `review` events and `summary` events. Each session snapshot contains at
+most four reviews and, after the first completed review, the session totals.
+Totals contain only counts, averages, the mode and the threshold.
 See the [plugin RPC documentation](https://opencode.ai/v2/docs/build/plugins/rpc).
 
 This state survives a TUI client disconnect, not a server restart or plugin unload.
 The TUI uses `ctx.data.listen` on the host's reconnecting event bus for
-`rpc.opencode-secret-guard.jev.review` and `server.connected`.
+`rpc.opencode-secret-guard.jev.review`, `rpc.opencode-secret-guard.jev.summary` and `server.connected`.
 It does not start a direct `client.rpc(JevRpc).events.on` loop, which does not reconnect.
 The generic RPC event is typed for `data.on`, but `data.listen` supports listening
 to all event types on that bus.
@@ -202,6 +231,7 @@ Unloading the plugin also cancels pending requests.
 
 Each snapshot replaces the retained session result and removes absent cached review IDs.
 The client preserves newer live updates received while the snapshot request runs.
+Totals only grow during one server run, so the client keeps the totals with the larger review count.
 Snapshots restore the display without replaying toasts.
 Separate live-only notification history prevents duplicate phase toasts.
 A snapshot cannot consume a subsequent live completion notification.
@@ -218,7 +248,7 @@ With review `off`, the server registers no review RPC, and snapshots fail with `
 The sidebar probes once on mounting, without polling.
 Its contribution stays empty while that probe is pending, and when it fails with
 `rpc.unavailable` and no cached status exists. An off reviewer therefore produces no panel.
-Other failures show `Review status unavailable (<code>)` with a fixed code, such as
+Other failures show `Status unavailable (<code>)` with a fixed code, such as
 `rpc.invalid_input`, `timeout` or `invalid-response`. The panel never shows host error text.
 
 The RPC schemas contain no JSON Schema `pattern` keyword. OpenCode 2.2.5 builds RPC

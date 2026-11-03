@@ -4,7 +4,6 @@ import {
   MAX_SESSION_REVIEWS,
   createReviewStatusStore,
   negativeThreshold,
-  panelText,
   parseReviewStatus,
   reviewHeading,
   reviewLines,
@@ -501,43 +500,9 @@ describe("reviewHeading and reviewLines", () => {
     expect(reviewHeading(completed({ mode: "observe", proposed: "ask", applied: "allow", reason: "model-not-authorized", scores: scores() }))).toBe("Permission allowed; observe mode did not apply approval");
   });
 
-  test("renders a narrow sidebar layout and keeps fixed remedy text", () => {
-    expect(reviewLines(completed({ reason: "model-confirmation-required", scores: scores() }), true)).toEqual([
-      "Manual approval required", "bash · auto · call-1", "Proposed: ask", "Applied: ask",
-      "Reason: model-confirmation-required", "Authorization", "  98%  ≥90%  PASS",
-      "Within scope", "  95%  ≥90%  PASS", "Confirmation required", "  22%  ≤10%  FAIL",
-      "High impact", "  5%  ≤10%  PASS",
-    ]);
+  test("keeps fixed remedy text", () => {
     expect(reviewLines(completed({ modelCalled: false, reason: "auth-no-connection" }))).toContain(
       "Next: no active OpenCode Zen connection; connect OpenCode Zen with an API key in OpenCode, then retry.",
-    );
-  });
-});
-
-describe("panelText", () => {
-  const review = completed({ reason: "model-confirmation-required" });
-  const reviewText = reviewLines(review, true).join("\n");
-
-  test("hides the section while pending or when no review RPC is registered", () => {
-    expect(panelText([], undefined)).toBe("");
-    expect(panelText([], { ok: false, code: "rpc.unavailable" })).toBe("");
-  });
-
-  test("shows an empty session after a successful snapshot", () => {
-    expect(panelText([], { ok: true })).toBe("JEV PERMISSION REVIEW\nNo reviews recorded for this session.");
-  });
-
-  test("shows other snapshot failures with their code instead of hiding the section", () => {
-    expect(panelText([], { ok: false, code: "rpc.invalid_input" })).toBe(
-      "JEV PERMISSION REVIEW\nReview status unavailable (rpc.invalid_input).",
-    );
-    expect(panelText([], { ok: false, code: "timeout" })).toBe("JEV PERMISSION REVIEW\nReview status unavailable (timeout).");
-  });
-
-  test("keeps cached reviews visible beside a failure code", () => {
-    expect(panelText([review], undefined)).toBe(`JEV PERMISSION REVIEW\n${reviewText}`);
-    expect(panelText([review], { ok: false, code: "rpc.unavailable" })).toBe(
-      `JEV PERMISSION REVIEW\nReview status unavailable (rpc.unavailable). Cached results below.\n${reviewText}`,
     );
   });
 });

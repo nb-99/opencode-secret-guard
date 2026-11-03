@@ -130,18 +130,30 @@ function percent(value: number): string {
   return `${Math.abs(rounded / 100 - value) > Number.EPSILON ? "≈" : ""}${rounded}%`;
 }
 
+/** Whether each score is on the passing side of its limit at this threshold. */
+export function scorePasses(scores: ReviewScores, threshold: number): Record<keyof ReviewScores, boolean> {
+  const low = negativeThreshold(threshold);
+  return {
+    explicitly_authorized: scores.explicitly_authorized >= threshold,
+    within_scope: scores.within_scope >= threshold,
+    confirmation_required: scores.confirmation_required <= low,
+    high_impact: scores.high_impact <= low,
+  };
+}
+
 export function scoreRows(scores: ReviewScores, threshold: number) {
   const low = negativeThreshold(threshold);
+  const passes = scorePasses(scores, threshold);
   return [
-    { label: "Authorization", value: scores.explicitly_authorized, limit: threshold, positive: true },
-    { label: "Within scope", value: scores.within_scope, limit: threshold, positive: true },
-    { label: "Confirmation required", value: scores.confirmation_required, limit: low, positive: false },
-    { label: "High impact", value: scores.high_impact, limit: low, positive: false },
+    { key: "explicitly_authorized", label: "Authorization", limit: threshold, positive: true },
+    { key: "within_scope", label: "Within scope", limit: threshold, positive: true },
+    { key: "confirmation_required", label: "Confirmation required", limit: low, positive: false },
+    { key: "high_impact", label: "High impact", limit: low, positive: false },
   ].map((row) => ({
     label: row.label,
-    score: percent(row.value),
+    score: percent(scores[row.key as keyof ReviewScores]),
     required: `${row.positive ? "≥" : "≤"}${percent(row.limit)}`,
-    pass: row.positive ? row.value >= row.limit : row.value <= row.limit,
+    pass: passes[row.key as keyof ReviewScores],
   }));
 }
 
@@ -157,18 +169,15 @@ export function reviewHeading(status: ReviewStatus): string {
   return "Manual approval required";
 }
 
-export function reviewLines(status: ReviewStatus, narrow = false): string[] {
+export function reviewLines(status: ReviewStatus): string[] {
   const guidance = status.reason ? guidanceFor(status.reason) : undefined;
   return [
     reviewHeading(status),
-    narrow ? `${status.action} · ${status.mode} · ${status.callID ?? status.reviewID}` :
-      `${status.mode === "auto" ? "Auto" : "Observe"} mode · ${status.action}`,
-    ...(status.phase === "completed" ? narrow ? [`Proposed: ${status.proposed}`, `Applied: ${status.applied}`] :
-      [`Proposed: ${status.proposed} · Applied: ${status.applied}`] : []),
+    `${status.mode === "auto" ? "Auto" : "Observe"} mode · ${status.action}`,
+    ...(status.phase === "completed" ? [`Proposed: ${status.proposed} · Applied: ${status.applied}`] : []),
     ...(status.reason ? [`Reason: ${status.reason}`] : []),
-    ...(status.scores ? scoreRows(status.scores, status.threshold).flatMap((row) => narrow ?
-      [row.label, `  ${row.score}  ${row.required}  ${row.pass ? "PASS" : "FAIL"}`] :
-      [`${row.label}: ${row.score} (${row.required}; ${row.pass ? "pass" : "fail"})`]) :
+    ...(status.scores ? scoreRows(status.scores, status.threshold).map((row) =>
+      `${row.label}: ${row.score} (${row.required}; ${row.pass ? "pass" : "fail"})`) :
       [status.phase === "evaluating" ? "Scores: pending" : status.modelCalled ? "Scores: unavailable" : "Scores: not evaluated"]),
     ...(guidance ? [`Next: ${guidance}`] : []),
     ...(status.contextWarnings?.compacted ? ["Compacted context"] : []),
@@ -178,17 +187,3 @@ export function reviewLines(status: ReviewStatus, narrow = false): string[] {
 
 /** Snapshot outcome: undefined while pending, otherwise success or a fixed failure code. */
 export type ReviewAvailability = { ok: true } | { ok: false; code: string } | undefined;
-
-/**
- * Sidebar text; empty hides the section. With nothing to show, pending and
- * `rpc.unavailable` stay hidden, because a reviewer that is off registers no RPC.
- */
-export function panelText(state: ReviewStatus[], availability: ReviewAvailability): string {
-  const failure = availability?.ok === false ? availability.code : undefined;
-  if (state.length === 0 && (availability === undefined || failure === "rpc.unavailable")) return "";
-  const lines = ["JEV PERMISSION REVIEW"];
-  if (failure !== undefined) lines.push(`Review status unavailable (${failure}).${state.length ? " Cached results below." : ""}`);
-  if (state.length) lines.push(state.map((status) => reviewLines(status, true).join("\n")).join("\n\n"));
-  else if (failure === undefined) lines.push("No reviews recorded for this session.");
-  return lines.join("\n");
-}

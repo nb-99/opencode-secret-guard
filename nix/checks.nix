@@ -231,6 +231,7 @@ in
     test -f ${package}/lib/review-display.ts
     test -f ${package}/lib/review-rpc.ts
     test -f ${package}/lib/review-status.ts
+    test -f ${package}/lib/review-summary.ts
     test -f ${package}/lib/review-questions.ts
     test -f ${package}/lib/node_modules/zod/package.json
     # The wrapper's interpreter must be a store path, not resolved via PATH.

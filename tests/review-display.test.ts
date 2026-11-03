@@ -1,6 +1,6 @@
 import { describe, expect, mock, test } from "bun:test";
 import { createReviewDisplay, type RefreshResult, type ReviewDisplayContext } from "../src/review-display.ts";
-import { JevRpc, setupReviewStatus, type ReviewRpcContext, type ReviewRpcRegistration } from "../src/review-rpc.ts";
+import { JevRpc, setupReviewStatus, type ReviewEvent, type ReviewRpcContext, type ReviewRpcRegistration, type ReviewSnapshot } from "../src/review-rpc.ts";
 import { type ReviewStatus } from "../src/review-status.ts";
 
 function status(overrides: Partial<ReviewStatus> = {}): ReviewStatus {
@@ -31,7 +31,7 @@ const reviewedScoreLines = [
   "High impact: 5% (≤10%; pass)",
 ];
 
-type SnapshotHandler = (input: unknown) => Promise<{ reviews: ReviewStatus[] }>;
+type SnapshotHandler = (input: unknown) => Promise<ReviewSnapshot>;
 function rpcHarness(options: {
   emit?: ReviewRpcRegistration["events"]["emit"];
   dispose?: ReviewRpcRegistration["dispose"];
@@ -39,7 +39,7 @@ function rpcHarness(options: {
 } = {}) {
   let definition: typeof JevRpc | undefined;
   let handlers: { snapshot: SnapshotHandler } | undefined;
-  const emitted: { name: string; data: ReviewStatus }[] = [];
+  const emitted: ReviewEvent[] = [];
   const unregister = mock(options.dispose ?? (async () => {}));
   const permissionHook = mock(() => { throw new Error("Display must not register permission hooks"); });
   const toolHook = mock(() => { throw new Error("Display must not invoke tools"); });
@@ -56,7 +56,7 @@ function rpcHarness(options: {
           dispose: unregister,
           events: {
             emit(name, data) {
-              emitted.push({ name, data });
+              emitted.push({ name, data } as ReviewEvent);
               return options.emit?.(name, data) ?? Promise.resolve();
             },
           },
@@ -139,7 +139,7 @@ function deferred<T>() {
 }
 
 describe("review RPC boundary", () => {
-  test("registers a portable definition with only snapshot and the review event", async () => {
+  test("registers a portable definition with only snapshot and the review and summary events", async () => {
     const rpc = rpcHarness();
     const publisher = await setupReviewStatus(rpc.ctx);
     expect(rpc.definition).toBe(JevRpc);
@@ -147,7 +147,10 @@ describe("review RPC boundary", () => {
     expect(JevRpc.id).toBe("opencode-secret-guard.jev");
     expect(Object.keys(JevRpc.methods)).toEqual(["snapshot"]);
     expect(Object.keys(rpc.handlers)).toEqual(["snapshot"]);
-    expect(Object.keys(JevRpc.events)).toEqual(["review"]);
+    expect(Object.keys(JevRpc.events)).toEqual(["review", "summary"]);
+    expect(JevRpc.methods.snapshot.output.required).toEqual(["reviews"]);
+    expect(JevRpc.events.summary.schema.additionalProperties).toBe(false);
+    expect(JevRpc.events.summary.schema.required).not.toContain("average");
     expect(JevRpc.methods.snapshot.input).toEqual({
       type: "object", properties: { sessionID: { type: "string", minLength: 1, maxLength: 80 } },
       required: ["sessionID"], additionalProperties: false,
@@ -192,8 +195,14 @@ describe("review RPC boundary", () => {
       scores: { ...reviewedScores, explanation: "synthetic-private-explanation" },
       contextWarnings: { compacted: true, outside_project: false, token: "synthetic-private-token" },
     } as ReviewStatus);
-    expect(rpc.emitted).toEqual([{ name: "review", data: safe }]);
-    expect(await rpc.snapshot({ sessionID: "session-1" })).toEqual({ reviews: [safe] });
+    const summary = {
+      sessionID: "session-1", workspaceID: "workspace-1", mode: "auto", threshold: 0.9,
+      reviews: 1, approved: 0, manual: 1, skipped: 0, failed: 0, scored: 1,
+      average: { ...reviewedScores },
+      passed: { explicitly_authorized: 1, within_scope: 1, confirmation_required: 0, high_impact: 1 },
+    };
+    expect(rpc.emitted).toEqual([{ name: "review", data: safe }, { name: "summary", data: summary }]);
+    expect(await rpc.snapshot({ sessionID: "session-1" })).toEqual({ reviews: [safe], summary });
     expect(JSON.stringify(rpc.emitted)).not.toContain("synthetic-private");
     publisher.dispose();
   });
@@ -204,13 +213,16 @@ describe("review RPC boundary", () => {
     const decision = completed({ mode: "observe", proposed: "allow", applied: "ask", reason: "model-approved" });
     publisher.publish(decision);
     const result = await rpc.snapshot({ sessionID: "session-1", action: "allow", command: "synthetic-command" });
-    expect(result).toEqual({ reviews: [decision] });
+    expect(result.reviews).toEqual([decision]);
     result.reviews[0]!.applied = "allow";
-    expect(await rpc.snapshot({ sessionID: "session-1" })).toEqual({ reviews: [decision] });
+    result.summary!.approved = 5;
+    const again = await rpc.snapshot({ sessionID: "session-1" });
+    expect(again.reviews).toEqual([decision]);
+    expect(again.summary).toMatchObject({ reviews: 1, approved: 0, failed: 1 });
     for (const input of [null, undefined, [], "session-1", {}, { sessionID: 1 }, { sessionID: "other-session" }]) {
       expect(await rpc.snapshot(input)).toEqual({ reviews: [] });
     }
-    expect(rpc.emitted).toEqual([{ name: "review", data: decision }]);
+    expect(rpc.emitted.map((event) => event.name)).toEqual(["review", "summary"]);
     expect(rpc.permissionHook).not.toHaveBeenCalled();
     expect(rpc.toolHook).not.toHaveBeenCalled();
     publisher.dispose();
@@ -256,7 +268,7 @@ describe("review RPC boundary", () => {
       const decision = completed({ applied: "deny", reason: "permission-denied" });
       expect(() => publisher.publish(decision)).not.toThrow();
       await Promise.resolve();
-      expect(await rpc.snapshot({ sessionID: "session-1" })).toEqual({ reviews: [decision] });
+      expect((await rpc.snapshot({ sessionID: "session-1" })).reviews).toEqual([decision]);
       expect(decision.applied).toBe("deny");
       expect(rpc.permissionHook).not.toHaveBeenCalled();
       expect(rpc.toolHook).not.toHaveBeenCalled();
@@ -871,5 +883,60 @@ describe("review display boundary", () => {
     expect(ui.toasts).toHaveLength(1);
     expect(await ui.display.refresh("session-1")).toMatchObject({ ok: false });
     expect(ui.snapshotCalls).toHaveLength(1);
+  });
+});
+
+describe("review summary display", () => {
+  const summaryEventType = "rpc.opencode-secret-guard.jev.summary";
+  const totals = (reviews: number, overrides: Record<string, unknown> = {}) => ({
+    sessionID: "session-1", workspaceID: "workspace-1", mode: "auto", threshold: 0.9,
+    reviews, approved: reviews, manual: 0, skipped: 0, failed: 0, scored: reviews,
+    average: { ...reviewedScores },
+    passed: { explicitly_authorized: reviews, within_scope: reviews, confirmation_required: 0, high_impact: reviews },
+    ...overrides,
+  });
+
+  test("live summary events replace older totals for their session only", () => {
+    const ui = displayHarness();
+    const updates: Array<string | undefined> = [];
+    ui.display.subscribe((sessionID) => updates.push(sessionID));
+    const send = (data: unknown, directory = project.directory) =>
+      ui.event({ type: summaryEventType, location: { directory }, data });
+    send(totals(2));
+    send(totals(1));
+    send(totals(5), "/synthetic/other");
+    send(totals(6, { workspaceID: "workspace-2" }));
+    send(totals(7, { approved: 1 }));
+    expect(ui.display.summary("session-1")).toEqual(totals(2));
+    expect(ui.display.summary("session-2")).toBeUndefined();
+    expect(updates).toEqual(["session-1"]);
+    expect(ui.toasts).toEqual([]);
+    ui.event({ type: "server.connected" });
+    expect(ui.display.summary("session-1")).toBeUndefined();
+    ui.display.dispose();
+  });
+
+  test("a snapshot restores totals without regressing newer live totals", async () => {
+    const pending = deferred<unknown>();
+    const ui = displayHarness({ snapshot: () => pending.promise });
+    const restored = ui.display.refresh("session-1");
+    ui.event({ type: summaryEventType, location: { directory: project.directory }, data: totals(3) });
+    pending.resolve({ reviews: [], summary: totals(2) });
+    expect(await restored).toEqual({ ok: true });
+    expect(ui.display.summary("session-1")).toEqual(totals(3));
+    const fresh = displayHarness({ snapshot: async () => ({ reviews: [], summary: totals(4) }) });
+    expect(await fresh.display.refresh("session-1")).toEqual({ ok: true });
+    expect(fresh.display.summary("session-1")).toEqual(totals(4));
+    ui.display.dispose();
+    fresh.display.dispose();
+  });
+
+  test("a snapshot with invalid or foreign totals fails without changing state", async () => {
+    for (const summary of [totals(2, { reviews: 9 }), totals(2, { sessionID: "session-2" }), totals(2, { workspaceID: null }), "totals"]) {
+      const ui = displayHarness({ snapshot: async () => ({ reviews: [], summary }) });
+      expect(await ui.display.refresh("session-1")).toEqual({ ok: false, code: "invalid-response" });
+      expect(ui.display.summary("session-1")).toBeUndefined();
+      ui.display.dispose();
+    }
   });
 });

@@ -1,5 +1,6 @@
 import { JevRpc } from "./review-rpc.ts";
-import { createReviewStatusStore, MAX_SESSION_REVIEWS, parseReviewStatus, reviewLines, type ReviewAvailability, type ReviewStatus } from "./review-status.ts";
+import { createReviewStatusStore, MAX_REVIEW_STATUSES, MAX_SESSION_REVIEWS, parseReviewStatus, reviewLines, type ReviewAvailability, type ReviewStatus } from "./review-status.ts";
+import { parseReviewSummary, type ReviewSummary } from "./review-summary.ts";
 
 type Location = { directory: string; workspaceID?: string };
 export interface ReviewDisplayContext {
@@ -33,6 +34,16 @@ const rpcErrorCode = (error: unknown) =>
 export function createReviewDisplay(ctx: ReviewDisplayContext, refreshTimeoutMs = 4_000) {
   const store = createReviewStatusStore();
   const notified = createReviewStatusStore();
+  const summaries = new Map<string, ReviewSummary>();
+  // Totals only grow during one server run, so the larger count is the newer one.
+  const keepSummary = (summary: ReviewSummary) => {
+    const previous = summaries.get(summary.sessionID);
+    if (previous && previous.reviews > summary.reviews) return false;
+    summaries.delete(summary.sessionID);
+    summaries.set(summary.sessionID, summary);
+    if (summaries.size > MAX_REVIEW_STATUSES) summaries.delete(summaries.keys().next().value!);
+    return true;
+  };
   const listeners = new Set<(sessionID?: string) => void>();
   const reconnectListeners = new Set<() => void>();
   const requests = new Set<{ controller: AbortController; sessionID: string; live: ReturnType<typeof createReviewStatusStore> }>();
@@ -49,16 +60,23 @@ export function createReviewDisplay(ctx: ReviewDisplayContext, refreshTimeoutMs 
     if (event.type === "server.connected") {
       for (const request of requests) request.controller.abort();
       store.clear();
+      summaries.clear();
       changed();
       for (const listener of reconnectListeners) {
         try { listener(); } catch { /* Display only. */ }
       }
       return;
     }
-    if (event.type !== `rpc.${JevRpc.id}.review`) return;
+    const summaryEvent = event.type === `rpc.${JevRpc.id}.summary`;
+    if (!summaryEvent && event.type !== `rpc.${JevRpc.id}.review`) return;
     const current = location();
     if (!current || event.location?.directory !== current.directory) return;
     // Public event locations omit workspaceID. The server includes it in the validated payload.
+    if (summaryEvent) {
+      const summary = parseReviewSummary(event.data);
+      if (summary && summary.workspaceID === (current.workspaceID ?? null) && keepSummary(summary)) changed(summary.sessionID);
+      return;
+    }
     const status = parseReviewStatus(event.data);
     if (!status || status.workspaceID !== (current.workspaceID ?? null)) return;
     for (const request of requests) {
@@ -79,6 +97,10 @@ export function createReviewDisplay(ctx: ReviewDisplayContext, refreshTimeoutMs 
   });
   return {
     snapshot(sessionID: string): ReviewStatus[] { return store.snapshot(sessionID); },
+    summary(sessionID: string): ReviewSummary | undefined {
+      const summary = summaries.get(sessionID);
+      return summary && structuredClone(summary);
+    },
     async refresh(sessionID: string): Promise<RefreshResult> {
       const current = location();
       if (disposed) return failed("disposed");
@@ -106,6 +128,14 @@ export function createReviewDisplay(ctx: ReviewDisplayContext, refreshTimeoutMs 
           if (status.workspaceID !== (current.workspaceID ?? null)) return failed("invalid-response");
           statuses.push(status);
         }
+        let summary: ReviewSummary | undefined;
+        if (result.summary !== undefined) {
+          summary = parseReviewSummary(result.summary);
+          if (!summary || summary.sessionID !== sessionID || summary.workspaceID !== (current.workspaceID ?? null)) {
+            return failed("invalid-response");
+          }
+        }
+        if (summary) keepSummary(summary);
         store.reconcile(sessionID, [...statuses, ...request.live.snapshot(sessionID)]);
         changed(sessionID);
         return { ok: true };
@@ -131,6 +161,7 @@ export function createReviewDisplay(ctx: ReviewDisplayContext, refreshTimeoutMs 
       listeners.clear();
       reconnectListeners.clear();
       store.clear();
+      summaries.clear();
       notified.clear();
     },
   };

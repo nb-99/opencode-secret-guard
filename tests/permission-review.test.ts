@@ -5,7 +5,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { decide, REVIEW_QUESTIONS, SYSTEM_ONE_ENDPOINT, SYSTEM_ONE_MODEL } from "../src/permission-review.ts";
 import type { ReviewDependencies, ReviewFetch } from "../src/permission-review.ts";
-import { JevRpc } from "../src/review-rpc.ts";
+import { JevRpc, type ReviewSnapshot } from "../src/review-rpc.ts";
 import type { ReviewStatus } from "../src/review-status.ts";
 import { fileReviewLog, MAX_LOG_BYTES, PAYLOAD_LOG_LIMITS, payloadLogPath, reviewLogPath } from "../src/review-log.ts";
 import { loadConfig } from "../src/policy.ts";
@@ -108,7 +108,7 @@ async function started(
   const counts = { session: 0, context: 0, active: 0, resolve: 0, fetch: 0 };
   const registrations: Array<{
     definition: typeof JevRpc;
-    handlers: { snapshot(input: unknown): Promise<{ reviews: ReviewStatus[] }> };
+    handlers: { snapshot(input: unknown): Promise<ReviewSnapshot> };
     active: boolean;
     disposed: boolean;
   }> = [];
@@ -155,7 +155,8 @@ async function started(
           const transport = {
             events: {
               emit: (name: string, data: ReviewStatus) => {
-                lifecycleEvents.push({ name, data: structuredClone(data) });
+                // Summary totals are covered by the review display tests.
+                if (name === "review") lifecycleEvents.push({ name, data: structuredClone(data) });
                 if (world.rpc === "emit-throws") throw new Error("display delivery failed");
                 if (world.rpc === "emit-rejects") return Promise.reject(new Error("display delivery failed"));
                 if (world.rpc === "emit-hangs") return new Promise<void>(() => {});
@@ -1334,7 +1335,14 @@ describe("lifecycle", () => {
       expect(data.elapsedMs).toBeGreaterThanOrEqual(0);
       expect(data.startedAt).toBe(fake.rpc.events[0]!.data.startedAt);
     }
-    expect(await registration.handlers.snapshot({ sessionID: "ses_1" })).toEqual({ reviews: [fake.rpc.events[2]!.data] });
+    expect(await registration.handlers.snapshot({ sessionID: "ses_1" })).toEqual({
+      reviews: [fake.rpc.events[2]!.data],
+      summary: {
+        sessionID: "ses_1", workspaceID: null, mode: "auto", threshold: 0.9,
+        reviews: 1, approved: 1, manual: 0, skipped: 0, failed: 0, scored: 1, average: APPROVE,
+        passed: { explicitly_authorized: 1, within_scope: 1, confirmation_required: 1, high_impact: 1 },
+      },
+    });
     expect(await registration.handlers.snapshot({ sessionID: "ses_other" })).toEqual({ reviews: [] });
     for (const content of ["bun test", HUMAN[0]!.text, "test-key", repo, "requested_command", "headers", "body"]) {
       expect(JSON.stringify(fake.rpc.events)).not.toContain(content);
@@ -1422,7 +1430,12 @@ describe("lifecycle", () => {
       reason: "model-confirmation-required", modelCalled: true, threshold: 0.9,
     });
     expect(completed.scores).toEqual(scores);
-    expect(await fake.rpc.registrations[0]!.handlers.snapshot({ sessionID: "ses_1" })).toEqual({ reviews: [completed] });
+    const snapshot = await fake.rpc.registrations[0]!.handlers.snapshot({ sessionID: "ses_1" });
+    expect(snapshot.reviews).toEqual([completed]);
+    expect(snapshot.summary).toMatchObject({
+      mode, reviews: 1, approved: 0, manual: 1, scored: 1, average: scores,
+      passed: { explicitly_authorized: 1, within_scope: 1, confirmation_required: 0, high_impact: 1 },
+    });
     fake.cleanup!();
   });
 
@@ -1558,9 +1571,10 @@ describe("lifecycle", () => {
         modelCalled: true, scores: APPROVE,
       }) },
     ]);
-    expect(await fake.rpc.registrations[0]!.handlers.snapshot({ sessionID: "ses_1" })).toEqual({
-      reviews: [fake.rpc.events.at(-1)!.data],
-    });
+    const snapshot = await fake.rpc.registrations[0]!.handlers.snapshot({ sessionID: "ses_1" });
+    expect(snapshot.reviews).toEqual([fake.rpc.events.at(-1)!.data]);
+    // Passing scores whose approval was cancelled are not counted as approved.
+    expect(snapshot.summary).toMatchObject({ reviews: 1, approved: 0, manual: 1, scored: 1 });
     expect(JSON.stringify([fake.records, fake.rpc.events, fake.lines])).not.toContain("display-private-detail");
     fake.cleanup!();
   });
