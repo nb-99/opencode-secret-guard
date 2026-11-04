@@ -14,7 +14,6 @@
 import { randomUUID } from "node:crypto";
 import * as os from "node:os";
 import * as path from "node:path";
-import { z } from "zod";
 import { matchesAny } from "./paths.ts";
 import { DEFAULT_PERMISSION_REVIEW, type PermissionReviewMode, type PermissionReviewSettings } from "./policy.ts";
 import { formatNote, LOG_UNAVAILABLE_NOTE, PAYLOAD_LOG_UNAVAILABLE_NOTE } from "./review-notes.ts";
@@ -22,10 +21,17 @@ import { fileReviewLog, PAYLOAD_LOG_LIMITS, payloadLogPath, reviewLogPath, type 
 import { negativeThreshold, type ReviewScores } from "./review-status.ts";
 import { setupReviewStatus, type ReviewRpcContext } from "./review-rpc.ts";
 import { COMPACTED_QUESTIONS, REVIEW_QUESTIONS } from "./review-questions.ts";
+import {
+  createReviewBackend,
+  Ineligible,
+  within,
+  type ReviewAnswers,
+  type ReviewFetch,
+  type ReviewRequest,
+} from "./review-backends.ts";
 export { REVIEW_QUESTIONS } from "./review-questions.ts";
-
-export const SYSTEM_ONE_ENDPOINT = "https://opencode.ai/zen/v1/systemone";
-export const SYSTEM_ONE_MODEL = "jev-1.13-free";
+export { SYSTEM_ONE_ENDPOINT, SYSTEM_ONE_MODEL } from "./review-backends.ts";
+export type { ReviewFetch } from "./review-backends.ts";
 
 /** Covers session lookup, context, credential resolution and the request. */
 const REVIEW_DEADLINE_MS = 10_000;
@@ -39,8 +45,6 @@ const MAX_COMMAND_CHARS = 4_000;
 const MAX_FIELD_CHARS = 1_000;
 const MAX_RESOURCES = 16;
 const MAX_HUMAN_CHARS = 12_000;
-const MAX_REQUEST_BYTES = 48_000;
-const MAX_RESPONSE_BYTES = 64_000;
 
 
 type MaybePromise = void | Promise<void>;
@@ -92,29 +96,16 @@ export interface ReviewContext extends ReviewRpcContext {
   readonly event?: {
     subscribe(input: { signal: AbortSignal }): AsyncIterable<unknown> | Promise<AsyncIterable<unknown>>;
   };
+  /** v2.2.5+: stateless generation. Hosts without `decisions` make the `opencode` backend fail closed. */
+  readonly experimental?: {
+    readonly generate?: {
+      decisions(input: unknown): Promise<unknown>;
+    };
+  };
 }
 
 /** v2.0.20 plugin `Cleanup`. */
 export type ReviewCleanup = () => void;
-
-/**
- * The fetch subset used. The hermetic typecheck has no DOM or undici types,
- * so the global is described structurally.
- */
-interface ReviewResponseLike {
-  readonly ok: boolean;
-  readonly status: number;
-  readonly headers: { get(name: string): string | null };
-  readonly body: {
-    getReader(): { read(): Promise<{ done: boolean; value?: Uint8Array }>; cancel(): Promise<void> };
-    cancel(): Promise<void>;
-  } | null;
-}
-
-export type ReviewFetch = (
-  url: string,
-  init: { method: string; headers: Record<string, string>; body: string; signal: AbortSignal; redirect: "error" },
-) => Promise<ReviewResponseLike>;
 
 export interface ReviewDependencies {
   fetch: ReviewFetch;
@@ -197,8 +188,6 @@ type ContextWarnings = { compacted: boolean; outside_project: boolean };
 export type ReviewOutcome = { allow: boolean; proposed?: "allow" | "ask"; reason: string; score?: number; scores?: ReviewScores; contextWarnings?: ContextWarnings };
 
 const ask = (reason: string): ReviewOutcome => ({ allow: false, reason });
-
-class Ineligible extends Error {}
 
 /**
  * The action as the reviewer sees it: the tool call's own command and the
@@ -339,23 +328,6 @@ function userMessages(
   return { texts, compactions, identity: JSON.stringify([ids, texts, compactions]) };
 }
 
-type ReviewState = {
-  pending_action: ActionEvidence;
-  user_messages: string[];
-  compaction_context: CompactionEvidence[];
-  context_warnings: ContextWarnings;
-};
-
-const NoulAnswer = z.object({ type: z.literal("noul"), noul: z.number().min(0).max(1) });
-const ReviewResponse = z.object({
-  answers: z.object({
-    explicitly_authorized: NoulAnswer,
-    confirmation_required: NoulAnswer,
-    high_impact: NoulAnswer,
-    within_scope: NoulAnswer,
-  }),
-});
-
 /**
  * `threshold` is validated by the policy: 0.5 < t <= 1. A negative answer
  * must stay at or below 1 - t, computed in decimal at t's own precision, so
@@ -363,7 +335,7 @@ const ReviewResponse = z.object({
  * 0 and any positive p asks. A JSON number in (0.5, 1] prints without an
  * exponent, so its decimal digits are its precision.
  */
-export function decide(answers: z.infer<typeof ReviewResponse>["answers"], threshold = DEFAULT_PERMISSION_REVIEW.confidenceThreshold): ReviewOutcome {
+export function decide(answers: ReviewAnswers, threshold = DEFAULT_PERMISSION_REVIEW.confidenceThreshold): ReviewOutcome {
   const negativeLimit = negativeThreshold(threshold);
   const scores: ReviewScores = {
     explicitly_authorized: answers.explicitly_authorized.noul,
@@ -386,16 +358,6 @@ export function decide(answers: z.infer<typeof ReviewResponse>["answers"], thres
   return { allow: true, reason: "model-approved", score, scores };
 }
 
-/** Rejects with Ineligible("deadline") once `signal` aborts. */
-function within<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
-  if (signal.aborted) return Promise.reject(new Ineligible("deadline"));
-  return new Promise<T>((resolve, reject) => {
-    const abort = () => reject(new Ineligible("deadline"));
-    signal.addEventListener("abort", abort, { once: true });
-    promise.then(resolve, reject).finally(() => signal.removeEventListener("abort", abort));
-  });
-}
-
 async function apiKey(ctx: ReviewContext, signal: AbortSignal): Promise<string> {
   const connection = ctx.integration?.connection;
   if (!connection) throw new Ineligible("auth-unsupported");
@@ -412,104 +374,6 @@ async function apiKey(ctx: ReviewContext, signal: AbortSignal): Promise<string> 
   if (credential.type !== "key") throw new Ineligible("auth-not-key");
   if (typeof credential.key !== "string" || !credential.key.trim()) throw new Ineligible("auth-empty-key");
   return credential.key.trim();
-}
-
-/** At most MAX_RESPONSE_BYTES of the body; `omitted` says why the rest is missing. */
-async function readBounded(response: ReviewResponseLike): Promise<{ text: string; omitted?: "declared-oversize" | "oversize" }> {
-  const declared = Number(response.headers.get("content-length"));
-  if (Number.isFinite(declared) && declared > MAX_RESPONSE_BYTES) {
-    response.body?.cancel().catch(() => {});
-    return { text: "", omitted: "declared-oversize" };
-  }
-  if (!response.body) return { text: "" };
-  const reader = response.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let size = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done || !value) break;
-    if (size + value.byteLength > MAX_RESPONSE_BYTES) {
-      // Not awaited: cancellation must not extend the deadline. No prefix is
-      // kept: a cut could split the key and defeat the payload log's scrub.
-      reader.cancel().catch(() => {});
-      return { text: "", omitted: "oversize" };
-    }
-    size += value.byteLength;
-    chunks.push(value);
-  }
-  return { text: new TextDecoder().decode(Buffer.concat(chunks)) };
-}
-
-/** Payload log fields for one System One exchange; see `logPayloads`. */
-type Trace = (fields: ReviewRecord) => void;
-
-async function askSystemOne(
-  key: string,
-  state: ReviewState,
-  signal: AbortSignal,
-  dependencies: ReviewDependencies,
-  threshold: number,
-  trace: Trace | undefined,
-  onRequest: () => void,
-): Promise<ReviewOutcome> {
-  const questions = state.context_warnings.compacted ? COMPACTED_QUESTIONS : REVIEW_QUESTIONS;
-  const body = JSON.stringify({ model: SYSTEM_ONE_MODEL, state, questions });
-  if (Buffer.byteLength(body) > MAX_REQUEST_BYTES) throw new Ineligible("request-oversize");
-  // The key travels only in the header; an exact copy in a body, raw or
-  // JSON-escaped, is still removed. Other encodings are not.
-  const scrub = (text: string) =>
-    [key, JSON.stringify(key).slice(1, -1)].reduce((out, form) => out.split(form).join("[redacted]"), text);
-  // The reviewer aborts with a reason code: "deadline" or why it was cancelled.
-  const aborted = () => (typeof signal.reason === "string" ? signal.reason : "request-aborted");
-  trace?.({ phase: "request", endpoint: SYSTEM_ONE_ENDPOINT, body: scrub(body) });
-  let response: ReviewResponseLike;
-  try {
-    if (signal.aborted) throw new Ineligible("deadline");
-    onRequest();
-    response = await within(
-      dependencies.fetch(SYSTEM_ONE_ENDPOINT, {
-        method: "POST",
-        headers: { authorization: `Bearer ${key}`, "content-type": "application/json" },
-        body,
-        signal,
-        redirect: "error",
-      }),
-      signal,
-    );
-  } catch (error) {
-    // The error's text can carry anything; only a code is kept.
-    trace?.({ phase: "failure", reason: signal.aborted ? aborted() : "network" });
-    throw error;
-  }
-  if (!response.ok) {
-    const reason = response.status === 401 ? "auth-rejected" : `http-${response.status}`;
-    if (!trace) {
-      response.body?.cancel().catch(() => {});
-      throw new Ineligible(reason);
-    }
-    // Read for the log only, within the same bounds and deadline.
-    const read = await within(readBounded(response), signal).catch(() => ({ text: "", omitted: signal.aborted ? aborted() : "unreadable" }));
-    trace({ phase: "response", status: response.status, body: scrub(read.text), omitted: read.omitted ?? null });
-    throw new Ineligible(reason);
-  }
-  let read: Awaited<ReturnType<typeof readBounded>>;
-  try {
-    read = await within(readBounded(response), signal);
-  } catch (error) {
-    trace?.({ phase: "failure", reason: signal.aborted ? aborted() : "response-read" });
-    throw error instanceof Ineligible ? error : new Ineligible("response-json");
-  }
-  trace?.({ phase: "response", status: response.status, body: scrub(read.text), omitted: read.omitted ?? null });
-  if (read.omitted) throw new Ineligible("response-oversize");
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(read.text);
-  } catch {
-    throw new Ineligible("response-json");
-  }
-  const result = ReviewResponse.safeParse(parsed);
-  if (!result.success) throw new Ineligible("response-shape");
-  return decide(result.data.answers, threshold);
 }
 
 interface PendingCall {
@@ -638,6 +502,14 @@ export async function setupPermissionReview(
     return undefined;
   }
 
+  const generate = ctx.experimental?.generate;
+  const backend = createReviewBackend(settings, {
+    fetch: dependencies.fetch,
+    apiKey: (signal) => apiKey(ctx, signal),
+    decisions: generate ? (input) => generate.decisions(input) : undefined,
+  });
+  // A local endpoint can need longer than the 10 second default; see review-backends.ts.
+  const deadlineMs = settings.endpoint?.deadlineMs ?? dependencies.deadlineMs;
   const hasCredential = credentialCheck(secrets);
   const statuses = await setupReviewStatus(ctx);
   const pending = new Map<string, PendingCall>();
@@ -716,7 +588,7 @@ export async function setupPermissionReview(
     const active: ActiveReview = { sessionID: evaluation.sessionID, controller: new AbortController() };
     reviews.add(active);
     const signal = active.controller.signal;
-    const timer = setTimeout(() => active.controller.abort("deadline"), dependencies.deadlineMs);
+    const timer = setTimeout(() => active.controller.abort("deadline"), deadlineMs);
     const sessionID = evaluation.sessionID;
     const state = async () => rootSession(await within(sessions.get({ sessionID }), signal), sessionID, location);
     let contextWarnings: ContextWarnings | undefined;
@@ -731,9 +603,9 @@ export async function setupPermissionReview(
       const action = actionEvidence(evaluation, before.tool, before.input, location, hasCredential);
       const cwdExternal = !inside(location, action.requested_cwd);
       const where = await state();
-      // The key comes before the transcript, so a missing or OAuth credential
-      // never causes the context to be read.
-      const key = await apiKey(ctx, signal);
+      // Credentials come before the transcript, so a missing credential never
+      // causes the context to be read.
+      const send = await backend.prepare(signal);
       const human = userMessages(await within(sessions.context({ sessionID }), signal), hasCredential);
       contextWarnings = { compacted: human.compactions.length > 0, outside_project: cwdExternal || call.externalAccess === true };
       const correlation = {
@@ -742,18 +614,14 @@ export async function setupPermissionReview(
         sessionID: safeID(sessionID),
         messageID: safeID(source.messageID),
         callID: safeID(source.id),
-        model: SYSTEM_ONE_MODEL,
+        model: backend.model,
       };
       const trace = settings.logPayloads ? (fields: ReviewRecord) => recordPayload({ ...correlation, ...fields }) : undefined;
-      const outcome = judged = await askSystemOne(
-        key,
-        { pending_action: action, user_messages: human.texts, compaction_context: human.compactions, context_warnings: contextWarnings },
-        signal,
-        dependencies,
-        threshold,
-        trace,
-        onRequest,
-      );
+      const request: ReviewRequest = {
+        state: { pending_action: action, user_messages: human.texts, compaction_context: human.compactions, context_warnings: contextWarnings },
+        questions: contextWarnings.compacted ? COMPACTED_QUESTIONS : REVIEW_QUESTIONS,
+      };
+      const outcome = judged = decide(await send(request, { signal, trace, onRequest }), threshold);
       if (!outcome.allow) return withWarnings(outcome);
       // What was reviewed must still be what runs, in the same session state:
       // events can be missed, so the session and its review context are read
@@ -910,8 +778,8 @@ export async function setupPermissionReview(
   // The stream can end while the hooks register; that was reported instead.
   if (!live) return () => { stop("unloaded"); statuses.dispose(); };
   // The path stays out of the record, which holds no user paths.
-  record({ event: "start", model: SYSTEM_ONE_MODEL, threshold, logPayloads: settings.logPayloads });
-  say(`${mode} with ${SYSTEM_ONE_MODEL}, threshold ${threshold}; decision log: ${dependencies.logPath}`);
+  record({ event: "start", backend: settings.backend, model: backend.model, threshold, logPayloads: settings.logPayloads });
+  say(`${mode} with ${backend.model}, threshold ${threshold}; decision log: ${dependencies.logPath}`);
   if (settings.logPayloads) say(`request and response bodies are logged to ${dependencies.payloadLogPath}`);
   return () => { stop("unloaded"); statuses.dispose(); };
 }

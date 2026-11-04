@@ -24,7 +24,7 @@ const config: GuardConfig = {
   secretEnvironment: [],
   secretEnvironmentPatterns: [],
   cacheTtlMs: 0,
-  permissionReview: { mode: "off", logPayloads: false, confidenceThreshold: 0.9 },
+  permissionReview: { mode: "off", logPayloads: false, confidenceThreshold: 0.9, backend: "jev" },
 };
 
 const group = (command: string) => resolveGroup(command, config);

@@ -69,16 +69,35 @@ export interface GuardConfig {
 /**
  * Optional approval-only review of V2 permission prompts; see
  * permission-review.ts. "observe" reviews and reports but leaves every prompt;
- * "auto" may turn an eligible prompt into a one-time allow. The endpoint and
- * model are fixed so a project cannot redirect them.
+ * "auto" may turn an eligible prompt into a one-time allow. The backend is
+ * fixed per configuration; see review-backends.ts.
  */
 export type PermissionReviewMode = "off" | "observe" | "auto";
 
 export const PERMISSION_REVIEW_MODES: readonly PermissionReviewMode[] = ["off", "observe", "auto"];
 
+/** `jev` is TypeSafe's System One through OpenCode Zen; the default. */
+export type PermissionReviewBackend = "jev" | "opencode" | "endpoint";
+
+export const PERMISSION_REVIEW_BACKENDS: readonly PermissionReviewBackend[] = ["jev", "opencode", "endpoint"];
+
+/** A model OpenCode can reach, as `provider/model` with an optional `#variant`. */
+export interface OpencodeReviewSettings {
+  model: string;
+}
+
+export interface EndpointReviewSettings {
+  /** An OpenAI-compatible base URL: HTTPS, or HTTP on a loopback host. */
+  baseURL: string;
+  model: string;
+  /** A file that holds the key, or null when the server needs none. Never the key itself. */
+  apiKeyFile: string | null;
+  deadlineMs: number;
+}
+
 export interface PermissionReviewSettings {
   mode: PermissionReviewMode;
-  /** Opt-in copy of every System One request and response body; see review-log.ts. */
+  /** Opt-in copy of every review request and response body; see review-log.ts. */
   logPayloads: boolean;
   /**
    * t in (0.5, 1]: the positive answers must reach t and the negative ones
@@ -86,13 +105,25 @@ export interface PermissionReviewSettings {
    * are not calibrated confidence.
    */
   confidenceThreshold: number;
+  backend: PermissionReviewBackend;
+  /** Required when `backend` is "opencode", and rejected otherwise. */
+  opencode?: OpencodeReviewSettings;
+  /** Required when `backend` is "endpoint", and rejected otherwise. */
+  endpoint?: EndpointReviewSettings;
 }
 
 export const DEFAULT_PERMISSION_REVIEW: Readonly<PermissionReviewSettings> = {
   mode: "off",
   logPayloads: false,
   confidenceThreshold: 0.9,
+  backend: "jev",
 };
+
+const PERMISSION_REVIEW_KEYS = ["mode", "logPayloads", "confidenceThreshold", "backend", "opencode", "endpoint"];
+const ENDPOINT_DEFAULT_DEADLINE_MS = 20_000;
+const ENDPOINT_MAX_DEADLINE_MS = 30_000;
+const OPENCODE_MODEL = /^[^/\s#]+\/[^/\s#]+(#[^/\s#]+)?$/;
+const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
 
 /**
  * "shell+files" is the real boundary: the kernel enforces it, so it covers
@@ -284,6 +315,7 @@ export function requirePermissionReview(
   value: unknown,
   configVersion: number,
   source: string,
+  home: string,
 ): PermissionReviewSettings {
   // Policies older than version 5 predate the reviewer, so it stays off.
   if (value === undefined) return { ...DEFAULT_PERMISSION_REVIEW };
@@ -292,7 +324,7 @@ export function requirePermissionReview(
     throw configError(source, '"permissionReview" must be an object');
   }
   const record = value as Record<string, unknown>;
-  const unknown = Object.keys(record).filter((key) => !Object.hasOwn(DEFAULT_PERMISSION_REVIEW, key));
+  const unknown = Object.keys(record).filter((key) => !PERMISSION_REVIEW_KEYS.includes(key));
   if (unknown.length > 0) {
     throw configError(source, `"permissionReview" has unknown keys: ${unknown.join(", ")}`);
   }
@@ -315,7 +347,87 @@ export function requirePermissionReview(
       `"permissionReview.confidenceThreshold" must be a number above 0.5 and at most 1, not ${JSON.stringify(confidenceThreshold)}`,
     );
   }
-  return { mode: mode as PermissionReviewMode, logPayloads, confidenceThreshold };
+  const backend = record.backend === undefined ? DEFAULT_PERMISSION_REVIEW.backend : record.backend;
+  if (!PERMISSION_REVIEW_BACKENDS.includes(backend as PermissionReviewBackend)) {
+    throw configError(
+      source,
+      `"permissionReview.backend" must be one of ${PERMISSION_REVIEW_BACKENDS.join(", ")}, not ${JSON.stringify(record.backend)}`,
+    );
+  }
+  // A block for a backend that does not run is an error, so a stale block cannot look active.
+  if (backend !== "opencode" && record.opencode !== undefined) {
+    throw configError(source, '"permissionReview.opencode" requires backend "opencode"');
+  }
+  if (backend !== "endpoint" && record.endpoint !== undefined) {
+    throw configError(source, '"permissionReview.endpoint" requires backend "endpoint"');
+  }
+  const settings = {
+    mode: mode as PermissionReviewMode,
+    logPayloads,
+    confidenceThreshold,
+    backend: backend as PermissionReviewBackend,
+  };
+  if (backend === "opencode") return { ...settings, opencode: requireOpencodeReview(record.opencode, source) };
+  if (backend === "endpoint") return { ...settings, endpoint: requireEndpointReview(record.endpoint, source, home) };
+  return settings;
+}
+
+function requireOpencodeReview(value: unknown, source: string): OpencodeReviewSettings {
+  const key = "permissionReview.opencode";
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw configError(source, `"${key}" must be an object`);
+  const record = value as Record<string, unknown>;
+  const unknown = Object.keys(record).filter((name) => name !== "model");
+  if (unknown.length > 0) throw configError(source, `"${key}" has unknown keys: ${unknown.join(", ")}`);
+  if (typeof record.model !== "string" || !OPENCODE_MODEL.test(record.model)) {
+    throw configError(
+      source,
+      `"${key}.model" must be "provider/model" with an optional "#variant", not ${JSON.stringify(record.model)}`,
+    );
+  }
+  return { model: record.model };
+}
+
+function requireEndpointReview(value: unknown, source: string, home: string): EndpointReviewSettings {
+  const key = "permissionReview.endpoint";
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw configError(source, `"${key}" must be an object`);
+  const record = value as Record<string, unknown>;
+  const fields = ["baseURL", "model", "apiKeyFile", "deadlineMs"];
+  const unknown = Object.keys(record).filter((name) => !fields.includes(name));
+  if (unknown.length > 0) throw configError(source, `"${key}" has unknown keys: ${unknown.join(", ")}`);
+  if (typeof record.baseURL !== "string" || !validEndpointURL(record.baseURL)) {
+    throw configError(
+      source,
+      `"${key}.baseURL" must be an HTTPS URL, or an HTTP URL on localhost, 127.0.0.1 or [::1], without credentials`,
+    );
+  }
+  if (typeof record.model !== "string" || !record.model.trim()) {
+    throw configError(source, `"${key}.model" must be a non-empty string`);
+  }
+  let apiKeyFile: string | null = null;
+  if (record.apiKeyFile !== undefined && record.apiKeyFile !== null) {
+    if (typeof record.apiKeyFile !== "string" || !record.apiKeyFile.trim()) {
+      throw configError(source, `"${key}.apiKeyFile" must be a path or null`);
+    }
+    apiKeyFile = expandHome(record.apiKeyFile, home);
+    if (!path.isAbsolute(apiKeyFile)) throw configError(source, `"${key}.apiKeyFile" must be an absolute path or start with "~"`);
+  }
+  const deadlineMs = record.deadlineMs === undefined ? ENDPOINT_DEFAULT_DEADLINE_MS : record.deadlineMs;
+  if (typeof deadlineMs !== "number" || !Number.isInteger(deadlineMs) || deadlineMs <= 0 || deadlineMs > ENDPOINT_MAX_DEADLINE_MS) {
+    throw configError(source, `"${key}.deadlineMs" must be a whole number from 1 to ${ENDPOINT_MAX_DEADLINE_MS}, not ${JSON.stringify(deadlineMs)}`);
+  }
+  return { baseURL: record.baseURL, model: record.model, apiKeyFile, deadlineMs };
+}
+
+function validEndpointURL(text: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(text);
+  } catch {
+    return false;
+  }
+  if (url.username || url.password) return false;
+  if (url.protocol === "https:") return true;
+  return url.protocol === "http:" && LOOPBACK_HOSTS.has(url.hostname);
 }
 
 export function validateConfig(
@@ -376,7 +488,7 @@ export function validateConfig(
     }
   }
 
-  const permissionReview = requirePermissionReview(record.permissionReview, record.configVersion, source);
+  const permissionReview = requirePermissionReview(record.permissionReview, record.configVersion, source, home);
   const relaxationGroups = requireRelaxationGroups(record.relaxationGroups, source);
   const denyRoots = requireRoots(record.denyRoots, "denyRoots", source, home);
   const exemptRoots = requireRoots(record.exemptRoots, "exemptRoots", source, home);

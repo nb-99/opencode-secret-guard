@@ -219,26 +219,26 @@ describe("configuration loading", () => {
     expect(loaded.tools.git).toBe("/usr/bin/git");
     expect(loaded.secretEnvironmentPatterns).toEqual([]);
     expect(loaded.writeProtectedRoots).toEqual([]);
-    expect(loaded.permissionReview).toEqual({ mode: "off", logPayloads: false, confidenceThreshold: 0.9 });
+    expect(loaded.permissionReview).toEqual({ mode: "off", logPayloads: false, confidenceThreshold: 0.9, backend: "jev" });
     expect(loaded.configVersion).toBe(5);
   });
 
   test("permissionReview needs configVersion 5 and defaults to off", () => {
     expect(loadConfig(policy("review-off.json", { ...valid(), permissionReview: undefined })).permissionReview)
-      .toEqual({ mode: "off", logPayloads: false, confidenceThreshold: 0.9 });
+      .toEqual({ mode: "off", logPayloads: false, confidenceThreshold: 0.9, backend: "jev" });
     expect(loadConfig(policy("review-auto.json", { ...valid(), permissionReview: { mode: "auto" } })).permissionReview)
-      .toEqual({ mode: "auto", logPayloads: false, confidenceThreshold: 0.9 });
+      .toEqual({ mode: "auto", logPayloads: false, confidenceThreshold: 0.9, backend: "jev" });
     expect(
       loadConfig(policy("review-full.json", { ...valid(), permissionReview: { mode: "observe", logPayloads: true, confidenceThreshold: 1 } }))
         .permissionReview,
-    ).toEqual({ mode: "observe", logPayloads: true, confidenceThreshold: 1 });
+    ).toEqual({ mode: "observe", logPayloads: true, confidenceThreshold: 1, backend: "jev" });
     for (const [name, permissionReview, expected] of [
       ["empty", {}, {}],
       ["threshold", { confidenceThreshold: 0.95 }, { confidenceThreshold: 0.95 }],
       ["payloads", { logPayloads: true }, { logPayloads: true }],
     ] as const) {
       expect(loadConfig(policy(`review-${name}.json`, { ...valid(), permissionReview })).permissionReview)
-        .toEqual({ mode: "off", logPayloads: false, confidenceThreshold: 0.9, ...expected });
+        .toEqual({ mode: "off", logPayloads: false, confidenceThreshold: 0.9, backend: "jev", ...expected });
     }
     expect(() => loadConfig(policy("review-v4.json", { ...valid(), configVersion: 4, permissionReview: { mode: "auto" } })))
       .toThrow(/requires configVersion 5/);

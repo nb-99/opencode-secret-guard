@@ -85,6 +85,8 @@ interface World {
   events?: false;
   workspaceID?: string;
   permissionHookRefused?: boolean;
+  /** The v2.2.5 `experimental.generate.decisions` call the `opencode` backend makes. */
+  decisions?: (input: unknown) => Promise<unknown>;
   rpc?: false | "register-throws" | "register-rejects" | "register-hangs" | "register-late" | "emit-throws" | "emit-rejects" | "emit-hangs";
   hang?: string;
 }
@@ -142,6 +144,7 @@ async function started(
   };
   const fake = host(repo, undefined, {
     ...(world.workspaceID === undefined ? {} : { location: { directory: repo, workspaceID: world.workspaceID } }),
+    ...(world.decisions ? { experimental: { generate: { decisions: world.decisions } } } : {}),
     ...(world.permissionHookRefused ? {
       permission: { hook: async () => { throw new Error("hook refusal display-private-detail"); } },
     } : {}),
@@ -1983,7 +1986,7 @@ describe("observability", () => {
     const fake = await started("observe");
     await reviewed(fake);
     expect(fake.startup).toBe(`observe with ${SYSTEM_ONE_MODEL}, threshold 0.9; decision log: /state/review.jsonl`);
-    expect(fake.records[0]).toEqual({ time: expect.any(String), pid: process.pid, mode: "observe", event: "start", model: SYSTEM_ONE_MODEL, threshold: 0.9, logPayloads: false });
+    expect(fake.records[0]).toEqual({ time: expect.any(String), pid: process.pid, mode: "observe", event: "start", backend: "jev", model: SYSTEM_ONE_MODEL, threshold: 0.9, logPayloads: false });
     const entry = fake.records.at(-1)!;
     expect(entry).toMatchObject({
       event: "review",
@@ -2611,5 +2614,126 @@ describe("observe score warnings", () => {
     { score: 0, threshold: 1 },
   ])("score and threshold round-trip exactly: %o", (observed) => {
     expect(parseNote(formatNote("manual approval", "model-high-impact", observed))?.observed).toEqual(observed);
+  });
+});
+
+describe("opencode backend", () => {
+  const OPENCODE = { backend: "opencode", opencode: { model: "github-copilot/gpt-6-luna#low" } } as const;
+  const NEGATIVE: Answers = { explicitly_authorized: 0.97, confirmation_required: 0.02, high_impact: 0.97, within_scope: 0.96 };
+  const predicates = (values: Answers, overrides: Record<string, unknown> = {}) => ({
+    answers: Object.entries(values).map(([name, probability]) => ({
+      type: "predicate",
+      name,
+      probability,
+      ...(overrides[name] as object | undefined),
+    })),
+  });
+
+  test("asks one predicate per question and applies the same decision", async () => {
+    const inputs: any[] = [];
+    const fake = await started("auto", { decisions: async (input) => (inputs.push(input), predicates(APPROVE)) }, {}, OPENCODE);
+    expect((await reviewed(fake)).effect).toBe("allow");
+    expect(fake.requests).toHaveLength(0);
+    const [input] = inputs;
+    expect(input.model).toEqual({ providerID: "github-copilot", id: "gpt-6-luna", variant: "low" });
+    expect(input.input).toEqual([{ type: "json", value: expect.objectContaining({ pending_action: expect.anything() }) }]);
+    expect(input.questions.map((question: any) => question.name).sort()).toEqual(Object.keys(REVIEW_QUESTIONS).sort());
+    for (const question of input.questions) {
+      expect(question.type).toBe("predicate");
+      expect(question.instructions).toContain((REVIEW_QUESTIONS as Record<string, any>)[question.name].criteria.true);
+    }
+  });
+
+  test("asks the user when the host has no decision API", async () => {
+    const fake = await started("auto", {}, {}, OPENCODE);
+    expect((await reviewed(fake)).effect).toBe("ask");
+    expect(fake.records.find((entry) => entry.event === "review")).toMatchObject({ reason: "opencode-unsupported", applied: "ask" });
+  });
+
+  test("ignores an answer that arrives after the deadline", async () => {
+    const late = () => new Promise<unknown>((resolve) => setTimeout(() => resolve(predicates(APPROVE)), 200));
+    const fake = await started("auto", { decisions: late }, { deadlineMs: 20 }, OPENCODE);
+    expect((await reviewed(fake)).effect).toBe("ask");
+    expect(fake.records.find((entry) => entry.event === "review")).toMatchObject({ reason: "deadline", applied: "ask" });
+  });
+
+  test("treats an error answer for any question as no answer", async () => {
+    const answers = { answers: [
+      ...predicates(APPROVE).answers.filter((answer) => answer.name !== "high_impact"),
+      { type: "error", name: "high_impact", reason: "refusal" },
+    ] };
+    const fake = await started("auto", { decisions: async () => answers }, {}, OPENCODE);
+    expect((await reviewed(fake)).effect).toBe("ask");
+    expect(fake.records.find((entry) => entry.event === "review")).toMatchObject({ reason: "decision-error" });
+  });
+
+  test("keeps the same deny-side decision for a negative answer", async () => {
+    const fake = await started("auto", { decisions: async () => predicates(NEGATIVE) }, {}, OPENCODE);
+    expect((await reviewed(fake)).effect).toBe("ask");
+    expect(fake.records.find((entry) => entry.event === "review")).toMatchObject({ reason: "model-high-impact" });
+  });
+});
+
+describe("endpoint backend", () => {
+  const dir = () => fs.mkdtempSync(path.join(fixture, "endpoint-"));
+  const LOCAL = {
+    backend: "endpoint",
+    endpoint: { baseURL: "http://127.0.0.1:11434/v1", model: "local-judge", apiKeyFile: null, deadlineMs: 20_000 },
+  } as const;
+  const completion = (content: string) =>
+    response(200, JSON.stringify({ choices: [{ message: { content } }] }));
+  const judged = (values: Answers) =>
+    completion(JSON.stringify({ answers: Object.fromEntries(Object.entries(values).map(([name, noul]) => [name, { type: "noul", noul }])) }));
+
+  test("posts the questions to the local server without a key", async () => {
+    const fake = await started("auto", { fetch: async () => judged(APPROVE) }, {}, LOCAL);
+    expect((await reviewed(fake)).effect).toBe("allow");
+    const { url, init } = fake.requests[0]!;
+    expect(url).toBe("http://127.0.0.1:11434/v1/chat/completions");
+    expect(init.redirect).toBe("error");
+    expect(init.headers).toEqual({ "content-type": "application/json" });
+    const body = JSON.parse(init.body);
+    expect(body).toMatchObject({ model: "local-judge", temperature: 0, response_format: { type: "json_schema" } });
+    expect(JSON.parse(body.messages[1].content).state.pending_action).toMatchObject({ requested_command: "bun test" });
+  });
+
+  test("sends the key from its file and keeps it out of every log", async () => {
+    const keyFile = path.join(dir(), "judge-key");
+    fs.writeFileSync(keyFile, "endpoint-secret-value\n");
+    const fake = await started(
+      "auto",
+      { fetch: async () => judged(APPROVE) },
+      {},
+      { ...LOCAL, logPayloads: true, endpoint: { ...LOCAL.endpoint, apiKeyFile: keyFile } },
+    );
+    expect((await reviewed(fake)).effect).toBe("allow");
+    expect(fake.requests[0]!.init.headers.authorization).toBe("Bearer endpoint-secret-value");
+    expect(fake.payloads.length).toBeGreaterThan(0);
+    expect(JSON.stringify([fake.records, fake.payloads, fake.lines])).not.toContain("endpoint-secret-value");
+  });
+
+  test("asks the user when the key file is missing", async () => {
+    const fake = await started(
+      "auto",
+      {},
+      {},
+      { ...LOCAL, endpoint: { ...LOCAL.endpoint, apiKeyFile: path.join(dir(), "missing") } },
+    );
+    expect((await reviewed(fake)).effect).toBe("ask");
+    expect(fake.records.find((entry) => entry.event === "review")).toMatchObject({ reason: "key-unreadable" });
+    expect(fake.requests).toHaveLength(0);
+  });
+
+  test("rejects prose around the answer object", async () => {
+    const fake = await started("auto", { fetch: async () => completion(`Sure. ${JSON.stringify({ answers: {} })}`) }, {}, LOCAL);
+    expect((await reviewed(fake)).effect).toBe("ask");
+    expect(fake.records.find((entry) => entry.event === "review")).toMatchObject({ reason: "response-json" });
+  });
+
+  test("uses its own deadline", async () => {
+    const hang = () => new Promise<never>(() => {});
+    const fake = await started("auto", { fetch: hang }, {}, { ...LOCAL, endpoint: { ...LOCAL.endpoint, deadlineMs: 20 } });
+    expect((await reviewed(fake)).effect).toBe("ask");
+    expect(fake.records.find((entry) => entry.event === "review")).toMatchObject({ reason: "deadline" });
   });
 });

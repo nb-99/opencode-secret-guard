@@ -1,14 +1,15 @@
-# Optional permission review with Jev
+# Optional permission review
 
 Status: approval-only. Off by default.
 
 The secret guard decides deterministically what a command or file tool may
 touch. Permission review is a separate, optional step: when OpenCode V2 is
-about to show you an `ask` prompt, the plugin can send that one request to the
-Jev model (TypeSafe System One) and approve it automatically. The model answers
-four narrow questions, and code combines the answers (see
-[How a request is approved](#how-a-request-is-approved)). Anything else still
-reaches you as a normal prompt.
+about to show you an `ask` prompt, the plugin can send that one request to a
+model and approve it automatically. The default model is Jev (TypeSafe System
+One). You can also choose an OpenCode model or an OpenAI-compatible endpoint;
+see [Backends](#backends). The model answers four narrow questions, and code
+combines the answers (see [How a request is approved](#how-a-request-is-approved)).
+Anything else still reaches you as a normal prompt.
 
 ## What it does and does not do
 
@@ -25,9 +26,10 @@ reaches you as a normal prompt.
 - In `auto` it applies to every in-scope `ask`, including rules you set to
   `ask` explicitly. There is no per-rule exclusion. A deterministic deny is
   still final.
-- In both `observe` and `auto`, the prompt waits for the review, up to 10
-  seconds. `observe` is synchronous on purpose.
-- It requires OpenCode V2.0.20 or later. The V2 plugin and credential
+- In both `observe` and `auto`, the prompt waits for the review, up to the
+  backend's deadline: 10 seconds, or `deadlineMs` for `endpoint`. `observe` is synchronous on purpose.
+- It requires OpenCode V2.0.20 or later. The `opencode` backend requires
+  2.2.5 or later ([Backends](#backends)). The V2 plugin and credential
   contracts it relies on were checked against the 2.0.20 and 2.0.23 source
   ([details](v2-migration.md#permission-review-dependencies)). The TUI contracts
   described below were checked against the V2.1.4 source.
@@ -61,8 +63,9 @@ reaches you as a normal prompt.
 ## Configuration
 
 `permissionReview` requires `configVersion` 5. Its keys are `mode`,
-`logPayloads` and `confidenceThreshold`; each is optional. Without
-`permissionReview` the mode is `off`. An invalid `permissionReview` is
+`logPayloads`, `confidenceThreshold`, `backend`, `opencode` and `endpoint`;
+each is optional. `backend` defaults to `jev`. Without `permissionReview` the
+mode is `off`. An invalid `permissionReview` is
 a policy validation error, so the guard refuses to start as for any invalid
 policy. Problems at runtime, such as a missing host API, no credential, or a
 failed call, only leave the normal prompt.
@@ -85,6 +88,9 @@ This fragment shows only the relevant keys; merge it into your existing policy.
 | `mode`                | `off`   | `off`, `observe` or `auto`; see below.                                  |
 | `logPayloads`         | `false` | `true` also writes every request and response body to the [payload log](#payload-log). |
 | `confidenceThreshold` | `0.9`   | A number above 0.5 and at most 1; see [How a request is approved](#how-a-request-is-approved). |
+| `backend`             | `jev`   | `jev`, `opencode` or `endpoint`; see [Backends](#backends).             |
+| `opencode`            | none    | `{ "model": "provider/model" }` with an optional `#variant`. Required with `backend` `opencode`, an error otherwise. |
+| `endpoint`            | none    | `{ "baseURL", "model", "apiKeyFile", "deadlineMs" }`. Required with `backend` `endpoint`, an error otherwise. |
 
 Values are not coerced: `"true"` or `"0.9"` is a validation error. The guard
 reads the policy at startup, so restart OpenCode after a change.
@@ -331,7 +337,7 @@ tail -n 20 "$log" | jq -c '{time, mode, proposed, applied, reason, modelCalled, 
 
 Records have one of three `event` values:
 
-- `start`: `time`, `pid`, `mode`, `model`, `threshold` and `logPayloads`.
+- `start`: `time`, `pid`, `mode`, `backend`, `model`, `threshold` and `logPayloads`.
 - `review`: also `action`, `proposed` (Jev's verdict from a valid judgment,
   otherwise `ask`), `applied` (the effect when the reviewer's hook returned; a later
   plugin can still change it, so this is not a record of what ran),
@@ -395,6 +401,11 @@ visible only as described above.
 | `auth-rejected`      | OpenCode Zen answered HTTP 401 for the saved key. Replace the key. |
 | `auth-error`         | OpenCode failed while looking up the connection. |
 | `auth-unsupported`   | Defensive: this OpenCode does not expose saved credentials to plugins. V2.0.20 does. |
+| `key-unreadable`    | `endpoint` backend: the `apiKeyFile` cannot be read. Check the path and its permissions. |
+| `key-empty`         | `endpoint` backend: the `apiKeyFile` is empty. Write the key to it. |
+| `opencode-unsupported` | `opencode` backend: this OpenCode has no `experimental.generate.decisions`. Use OpenCode 2.2.5 or later, or another backend. |
+| `opencode-error`    | `opencode` backend: the generation call failed. |
+| `decision-error`    | `opencode` backend: the model returned an error answer for one question. |
 
 Use `observe` to record judgments without applying approvals. Use `auto` to
 apply judgments that pass every approval check. Both modes use the same scope
@@ -417,22 +428,56 @@ their defaults.
 Do not put API keys or other secret literals in Nix: they would end up in the
 world-readable Nix store.
 
-## Model and credentials
+## Backends
 
-- Endpoint: `https://opencode.ai/zen/v1/systemone`, model `jev-1.13-free`,
-  called directly with the runtime's `fetch`. Neither is configurable.
-- Credentials: the OpenCode API key you already saved in OpenCode, obtained
-  through the plugin integration API, as source-verified on 2.0.20 and
-  2.0.23. The plugin stores no key itself. The key is resolved before the
-  session's messages are read.
-- If no saved credential is active, or it is not a usable API key (for
-  example OAuth), the reviewer is skipped and you are asked normally; see
-  [Credential reasons](#credential-reasons).
-- There is no paid fallback. Jev is currently offered free on OpenCode Zen;
-  that offer may end, in which case review fails and prompts return.
+`backend` selects the model call. One backend runs per configuration.
 
-See the [Jev model documentation](https://opencode.ai/v2/docs/console/models#jev)
-and the [OpenCode plugin documentation](https://opencode.ai/v2/docs/build/plugins).
+| `backend` | Call | Key | Data goes to |
+| --------- | ---- | --- | ------------ |
+| `jev` (default) | `https://opencode.ai/zen/v1/systemone`, model `jev-1.13-free`, through the runtime's `fetch`. Neither is configurable. | The OpenCode API key you saved for the `opencode` provider, read through the plugin integration API. The plugin stores no key. | OpenCode Zen. |
+| `opencode` | OpenCode's `experimental.generate.decisions`, with the model in `opencode.model`. | Your OpenCode connections. No extra key. | The provider of that model, as OpenCode routes it. |
+| `endpoint` | `POST {baseURL}/chat/completions`, with a JSON-schema response format. | `apiKeyFile`: a file that holds the key, or `null` when the server needs none. | The host in `baseURL`. A loopback host keeps the data on this machine. |
+
+- `jev`: the same request, questions and answer contract as before this option existed.
+  The saved key is resolved before the session's messages are read.
+  If no saved credential is active, or it is not a usable API key (for example OAuth),
+  the reviewer is skipped and you are asked normally; see [Credential reasons](#credential-reasons).
+  Jev is currently offered free on OpenCode Zen; that offer may end, in which case
+  review fails and prompts return. There is no paid fallback. See the
+  [Jev model documentation](https://opencode.ai/v2/docs/console/models#jev).
+- `opencode`: needs OpenCode 2.2.5 or later, which provides `experimental.generate.decisions`.
+  On an older host each `ask` stays a prompt with reason `opencode-unsupported`.
+  The model gets the same evidence as Jev, asked as four predicate questions.
+  Each answer is the probability that the question's statement holds, the same
+  yes-probability that Jev returns. OpenCode cannot cancel a generation, so an answer
+  that arrives after the deadline is ignored; the reason is `deadline`.
+- `endpoint`: `baseURL` must use HTTPS. HTTP is allowed only for `localhost`,
+  `127.0.0.1` or `[::1]`. It must not contain credentials. `model` is the
+  server's model name. `apiKeyFile` is an absolute path, or starts with `~`.
+  The plugin reads it before each review and never logs it. `deadlineMs` is a
+  whole number from 1 to 30000, and defaults to 20000, because a local model can need
+  longer than the 10-second default. The server must reply with the same
+  answer object that Jev returns, `{"answers": {"<question>": {"type": "noul", "noul": <probability>}}}`,
+  with no other text. Other replies fail closed with `response-json` or `response-shape`.
+
+```json
+{
+  "configVersion": 5,
+  "permissionReview": {
+    "mode": "observe",
+    "backend": "endpoint",
+    "endpoint": {
+      "baseURL": "http://127.0.0.1:11434/v1",
+      "model": "example-local-model",
+      "apiKeyFile": null,
+      "deadlineMs": 20000
+    }
+  }
+}
+```
+
+The `endpoint` backend is not benchmarked. Choose a local model and its
+runtime from measured results, not from this example.
 
 ## Scope
 
@@ -608,19 +653,22 @@ Besides any unmet approval condition, the reviewer leaves the prompt when:
 - The command, working directory or a resource is missing or too long.
 - A recognized credential appears in the command, working directory, a
   resource, a user message or compaction text (see [What leaves your machine](#what-leaves-your-machine)).
-- No usable API key is available.
+- No usable key is available for the selected backend.
 - The session is interrupted, deleted or moved, or its inbox changes, while
   the review runs.
 - Before reporting a proposed approval, the reviewer reads the session again.
   A changed location, user message, compaction entry or tool call invalidates
   that result. A finished tool call also invalidates it.
-- The whole review takes longer than 10 seconds, or the call fails or returns
-  an unusable answer.
+- The whole review takes longer than its deadline: 10 seconds for `jev` and
+  `opencode`, or `deadlineMs` for `endpoint`. The call fails, or returns an
+  unusable answer.
 - Two reviews are already running.
 
 ## What leaves your machine
 
-Each review sends to OpenCode Zen the fields listed under [Scope](#scope),
+Each review sends to the selected backend's destination (see [Backends](#backends)):
+for `jev`, OpenCode Zen; for `opencode`, the provider of your chosen model; for `endpoint`,
+the host in `baseURL`. The fields listed under [Scope](#scope) are sent,
 including the available user messages and completed compaction
 summaries. Summaries can reproduce private text from earlier messages, tool
 results, reasoning or another project. The raw `recent` transcript and
@@ -650,7 +698,10 @@ Each record has `event: "payload"`, `time`, `pid`, the `reviewID` of its
 `review` record, the `sessionID`, `messageID` and `callID`, `model`, and a
 `phase`:
 
-- `request`: `endpoint` and `body`, the exact JSON sent. Written right
+- `request`: `endpoint` and `body`, the exact JSON sent. For `endpoint` the
+  endpoint is the host and port only, never the path or credentials. For
+  `opencode` it is the generation call name and the body holds the same evidence
+  as the other backends. Written right
   before the call, so a review that never reaches the network, for example
   without a key, writes nothing.
 - `response`: `status`, `body` and `omitted`. The body is read only up to
@@ -688,7 +739,6 @@ These are ideas, not commitments, and none is implemented:
 - Per-question or per-action thresholds calibrated against a labeled
   evaluation corpus.
 - OAuth credentials, once their contract is verified.
-- Other model backends or paid routes, only if you explicitly choose them.
 - Excluding specific `ask` rules from review.
 - Backing off during a System One outage.
 - Reviewing the final shell command and working directory, if OpenCode adds
