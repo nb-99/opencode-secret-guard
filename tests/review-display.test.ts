@@ -417,15 +417,15 @@ describe("review display boundary", () => {
     expect(updates).toEqual([[checking], [evaluating], [done]]);
     expect(ui.toasts).toEqual([
       {
-        title: "Jev permission review", sessionID: "session-1", variant: "info", duration: 4_000,
+        title: "Permission review", sessionID: "session-1", variant: "info", duration: 4_000,
         message: "Review triggered: checking eligibility\nAuto mode · bash\nScores: not evaluated",
       },
       {
-        title: "Jev permission review", sessionID: "session-1", variant: "info", duration: 4_000,
-        message: "Jev is evaluating\nAuto mode · bash\nScores: pending",
+        title: "Permission review", sessionID: "session-1", variant: "info", duration: 4_000,
+        message: "The reviewer is evaluating\nAuto mode · bash\nScores: pending",
       },
       {
-        title: "Jev permission review", sessionID: "session-1", variant: "warning", duration: 10_000,
+        title: "Permission review", sessionID: "session-1", variant: "warning", duration: 10_000,
         message: [
           "Manual approval required", "Auto mode · bash", "Proposed: ask · Applied: ask",
           "Reason: confirmation-required", ...reviewedScoreLines, "Compacted context", "Outside-project access",
@@ -492,7 +492,7 @@ describe("review display boundary", () => {
       scores: { ...reviewedScores, confirmation_required: 0.02 },
     }));
     expect(ui.toasts[0]).toEqual({
-      title: "Jev permission review", sessionID: "session-1", variant: "warning", duration: 10_000,
+      title: "Permission review", sessionID: "session-1", variant: "warning", duration: 10_000,
       message: [
         "Would approve; manual approval required", "Observe mode · bash", "Proposed: allow · Applied: ask",
         "Reason: model-approved", "Authorization: 98% (≥90%; pass)", "Within scope: 95% (≥90%; pass)",
@@ -543,12 +543,12 @@ describe("review display boundary", () => {
     }
     expect(ui.toasts.map((toast) => toast.message)).toEqual([
       [
-        "Jev scores passed; approval cancelled", "Auto mode · bash", "Proposed: allow · Applied: ask",
+        "Review scores passed; approval cancelled", "Auto mode · bash", "Proposed: allow · Applied: ask",
         "Reason: approval-cancelled", "Authorization: 98% (≥90%; pass)", "Within scope: 95% (≥90%; pass)",
         "Confirmation required: 2% (≤10%; pass)", "High impact: 5% (≤10%; pass)",
       ].join("\n"),
       [
-        "Jev scores passed; approval cancelled", "Observe mode · bash", "Proposed: allow · Applied: ask",
+        "Review scores passed; approval cancelled", "Observe mode · bash", "Proposed: allow · Applied: ask",
         "Reason: approval-cancelled", "Authorization: 98% (≥90%; pass)", "Within scope: 95% (≥90%; pass)",
         "Confirmation required: 2% (≤10%; pass)", "High impact: 5% (≤10%; pass)",
       ].join("\n"),
@@ -617,7 +617,7 @@ describe("review display boundary", () => {
     expect(ui.display.snapshot("session-1")).toEqual([done]);
     expect(ui.toasts.map((toast) => toast.message)).toEqual([
       "Review triggered: checking eligibility\nAuto mode · bash\nScores: not evaluated",
-      "Jev is evaluating\nAuto mode · bash\nScores: pending",
+      "The reviewer is evaluating\nAuto mode · bash\nScores: pending",
       [
         "Manual approval required", "Auto mode · bash", "Proposed: ask · Applied: ask",
         "Reason: confirmation-required", ...reviewedScoreLines,

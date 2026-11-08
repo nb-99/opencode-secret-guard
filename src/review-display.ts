@@ -87,7 +87,7 @@ export function createReviewDisplay(ctx: ReviewDisplayContext, refreshTimeoutMs 
     if (!notified.update(status)) return;
     try {
       ctx.ui.toast.show({
-        title: "Jev permission review",
+        title: "Permission review",
         message: reviewLines(status).join("\n"),
         variant: status.phase !== "completed" ? "info" : status.applied === "allow" ? "success" : "warning",
         duration: status.phase === "completed" ? 10_000 : 4_000,

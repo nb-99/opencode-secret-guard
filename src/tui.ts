@@ -80,7 +80,7 @@ export function createTuiListener(ui: TuiContext["ui"], now: () => number = Date
       if (warningsOnly) return;
       if (!note) return;
       if (note.proposal === "would allow") {
-        ui.toast.show({ title: TITLE, message: "Observe mode: Jev would allow this request. You are still asked.", variant: "info", duration: 4_000, sessionID });
+        ui.toast.show({ title: TITLE, message: "Observe mode: the reviewer would allow this request. You are still asked.", variant: "info", duration: 4_000, sessionID });
         return;
       }
       const judgment =
@@ -89,7 +89,7 @@ export function createTuiListener(ui: TuiContext["ui"], now: () => number = Date
         const [score, threshold] = percents(note.observed.score, note.observed.threshold);
         ui.toast.show({
           title: TITLE,
-          message: `Observe mode: Jev would not auto-approve (reason: ${judgment}). Approval score: ${score}; threshold: ${threshold}. Manual approval required.`,
+          message: `Observe mode: the reviewer would not auto-approve (reason: ${judgment}). Approval score: ${score}; threshold: ${threshold}. Manual approval required.`,
           variant: "warning",
           duration: 8_000,
           sessionID,
@@ -117,7 +117,7 @@ export function setupTui(ctx: DisplayContext, loadPanel = () => import("./review
   void loadPanel().then(({ registerReviewPanel }) => {
     if (!disposed) unregister = registerReviewPanel(ctx as ReviewPanelContext, display);
   }).catch(() => {
-    if (!disposed) ctx.ui.toast.show({ title: TITLE, message: "The Jev sidebar could not load. Review notifications and decision logs remain available.", variant: "warning", duration: 8_000 });
+    if (!disposed) ctx.ui.toast.show({ title: TITLE, message: "The review sidebar could not load. Review notifications and decision logs remain available.", variant: "warning", duration: 8_000 });
   });
   return () => {
     disposed = true;

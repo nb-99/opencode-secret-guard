@@ -98,7 +98,7 @@ reads the policy at startup, so restart OpenCode after a change.
 | `mode`    | Behavior                                                                          |
 | --------- | --------------------------------------------------------------------------------- |
 | `off`     | Default. The reviewer is not set up and sends no model traffic.                   |
-| `observe` | Each `ask` is logged and noted; eligible `shell`-tool asks (`shell` and `external_directory`) are sent to Jev. You still decide. |
+| `observe` | Each `ask` is logged and noted; eligible `shell`-tool asks (`shell` and `external_directory`) are sent to the review model. You still decide. |
 | `auto`    | A request that meets every approval condition is allowed once; otherwise asked.   |
 
 When review leaves a prompt in place, in `observe` and in `auto`, the
@@ -130,7 +130,7 @@ Hiding the sidebar hides the section, but does not stop reviews or notifications
 The section summarizes the current project-scoped session since the server started:
 
 ```text
-JEV REVIEW  11 reviews · auto · ≥90%
+GUARD REVIEW  11 reviews · auto · ≥90%
 7 approved · 2 manual · 2 skipped
 
 Authorization ━━━━━━━━━━  96%  8/9
@@ -144,11 +144,11 @@ Latest – shell · skipped · 14:04
 
 - The header shows the number of completed reviews, the mode and the threshold once.
 - The next line counts completed reviews by outcome and omits outcomes with no reviews:
-  - `approved` (`would approve` in `observe`): Jev passed every check, and the reason is `model-approved`.
-  - `manual`: Jev scored the request, but approval did not apply. This includes
+  - `approved` (`would approve` in `observe`): the model passed every check, and the reason is `model-approved`.
+  - `manual`: the model scored the request, but approval did not apply. This includes
     negative judgments and passing judgments cancelled by a context change.
-  - `skipped`: the reviewer did not call Jev, for example `context-rejected`.
-  - `failed`: Jev was called but returned no valid judgment.
+  - `skipped`: the reviewer did not call the model, for example `context-rejected`.
+  - `failed`: the model was called but returned no valid judgment.
 - Each category row shows the average score over scored reviews and how many of
   them passed that check at their own threshold. The bar and the percentage are
   green when every scored review passed. Otherwise, they are amber.
@@ -159,7 +159,7 @@ Latest – shell · skipped · 14:04
 Colours come from the host theme's text and feedback colours.
 Every incoming `ask` gets checking and completion status, including skipped
 edit, read, MCP and delegated-session requests. Only eligible `shell` and
-`external_directory` checks from the shell tool reach Jev.
+`external_directory` checks from the shell tool reach the model.
 
 OpenCode also offers the selectable `session.panel` slot, opened explicitly in
 side or fullscreen mode. This plugin uses the sidebar instead.
@@ -180,7 +180,7 @@ Every unique live phase update produces a toast, in both `auto` and `observe`:
 | Phase | Meaning | Toast |
 | ----- | ------- | ----- |
 | `checking` | Review started; eligibility checks run before a model call. | Informational. |
-| `evaluating` | The reviewer starts the Jev request. Skipped reviews do not reach this phase. | Informational. |
+| `evaluating` | The reviewer starts the model request. Skipped reviews do not reach this phase. | Informational. |
 | `completed` | Review ended, including approvals, negative judgments, skipped requests and failures. | Success for applied `allow`; warning otherwise. |
 
 Duplicate or older live phase updates do not produce another toast.
@@ -188,7 +188,7 @@ Automatic approvals and negative `auto` judgments therefore have notifications,
 even when no permission prompt appears. The reviewer emits completion status
 for skipped and failed reviews too.
 
-When Jev returns a valid judgment, the phase toast shows all four
+When the model returns a valid judgment, the phase toast shows all four
 raw yes-probabilities. Each row shows its threshold, comparison direction and
 pass/fail result:
 
@@ -200,7 +200,7 @@ The display does not replace the [per-answer approval rules](#how-a-request-is-a
 It does not invent missing scores. It shows `not evaluated` before a model call,
 `pending` during evaluation, and `unavailable` after a call without a valid judgment.
 
-`proposed` records Jev's verdict when Jev returns a valid judgment; otherwise it is `ask`.
+`proposed` records the model's verdict when it returns a valid judgment; otherwise it is `ask`.
 `applied` records the permission effect at the reviewer's hook exit.
 It does not prove that a command ran or that later hooks kept that effect.
 If context changes after a passing judgment, the review keeps all four scores
@@ -338,7 +338,7 @@ tail -n 20 "$log" | jq -c '{time, mode, proposed, applied, reason, modelCalled, 
 Records have one of three `event` values:
 
 - `start`: `time`, `pid`, `mode`, `backend`, `model`, `threshold` and `logPayloads`.
-- `review`: also `action`, `proposed` (Jev's verdict from a valid judgment,
+- `review`: also `action`, `proposed` (the model's verdict from a valid judgment,
   otherwise `ask`), `applied` (the effect when the reviewer's hook returned; a later
   plugin can still change it, so this is not a record of what ran),
   `reason`, `threshold`, and `modelCalled` (a boolean recording whether the
@@ -355,7 +355,7 @@ Records have one of three `event` values:
   tool call. These identify the call in the session's data; the prompt does
   not display them.
   After context validation, records also include `contextCompacted` and
-  `outsideProject` booleans. They identify the warnings sent to Jev without
+  `outsideProject` booleans. They identify the warnings sent to the model without
   recording paths or summary text. Exits before context validation omit both fields.
   `outsideProject` covers the requested working directory and external access
   reported by OpenCode for the shell call. Both flags can be true in either mode.
@@ -481,7 +481,7 @@ runtime from measured results, not from this example.
 
 ## Scope
 
-Only eligible `ask` requests from the `shell` tool are sent to Jev.
+Only eligible `ask` requests from the `shell` tool are sent to the review model.
 Supported permission actions are `shell` and `external_directory`. The session must be a root
 session, not a fork, at the plugin's project directory, without a subpath.
 The requested working directory can be outside the project in either mode.
@@ -521,20 +521,20 @@ plugin runs, even if compaction removes their history.
 Every question includes guidance for these warnings:
 
 - Compaction can omit earlier restrictions. Summaries are generated evidence,
-  not direct user consent. The questions tell Jev to reduce authorization and
+  not direct user consent. The questions tell the model to reduce authorization and
   scope scores when original consent or limits are unclear. Missing restrictions
   do not show that confirmation is unnecessary.
   The restriction and scope questions explicitly include summaries. Recorded
   restrictions apply to the action. Summaries can repeat untrusted tool output
   or assistant claims; consent attributed to you is not verified.
 - Project-local consent does not authorize another target. The questions require
-  evidence for the exact external target and side effects. They tell Jev to
+  evidence for the exact external target and side effects. They tell the model to
   reduce authorization and scope scores when that evidence is missing.
 
 These are qualitative instructions, not a fixed score penalty.
 The same approval threshold applies with either warning.
 The warnings do not prove danger or guarantee
-that Jev will detect missing context.
+that the model will detect missing context.
 
 Every question also includes two fixed notes:
 
@@ -543,7 +543,7 @@ Every question also includes two fixed notes:
   followed by `commit and push`. It lifts only the restriction it clearly addresses.
 - `command_rewrites`: a command rewriter such as the `rtk` OpenCode plugin can
   prefix commands with `rtk` before review. `rtk <tool> <arguments>` runs that tool,
-  and `rtk read` replaces `cat`, `head` and `tail`. Jev judges the command that
+  and `rtk read` replaces `cat`, `head` and `tail`. The model judges the command that
   `rtk` runs, and the prefix alone does not lower trust.
   The reviewer sends the rewritten command unchanged, because `rtk` renames some
   commands and their flags. Removing the prefix would show a command that does not run.

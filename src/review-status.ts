@@ -159,11 +159,11 @@ export function scoreRows(scores: ReviewScores, threshold: number) {
 
 export function reviewHeading(status: ReviewStatus): string {
   if (status.phase === "checking") return "Review triggered: checking eligibility";
-  if (status.phase === "evaluating") return "Jev is evaluating";
+  if (status.phase === "evaluating") return "The reviewer is evaluating";
   if (status.applied === "deny") return "Permission denied; review did not override it";
   if (status.applied === "allow") return status.mode === "auto" ?
     "Automatically approved" : "Permission allowed; observe mode did not apply approval";
-  if (status.proposed === "allow" && status.reason !== "model-approved") return "Jev scores passed; approval cancelled";
+  if (status.proposed === "allow" && status.reason !== "model-approved") return "Review scores passed; approval cancelled";
   if (status.mode === "observe" && status.proposed === "allow") return "Would approve; manual approval required";
   if (!status.scores) return status.modelCalled ? "Review failed; manual approval required" : "Review skipped; manual approval required";
   return "Manual approval required";

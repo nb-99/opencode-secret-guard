@@ -136,14 +136,14 @@ describe("panelLines", () => {
   });
 
   test("shows an empty session and other failures", () => {
-    expect(text(panelLines(undefined, undefined, { ok: true }))).toEqual(["JEV REVIEW", "No reviews in this session yet."]);
-    expect(text(panelLines(undefined, undefined, { ok: false, code: "timeout" }))).toEqual(["JEV REVIEW", "Status unavailable (timeout)"]);
+    expect(text(panelLines(undefined, undefined, { ok: true }))).toEqual(["GUARD REVIEW", "No reviews in this session yet."]);
+    expect(text(panelLines(undefined, undefined, { ok: false, code: "timeout" }))).toEqual(["GUARD REVIEW", "Status unavailable (timeout)"]);
   });
 
   test("shows the threshold once, outcome totals, one row per category and the latest review", () => {
     const latest = completed({ modelCalled: false, reason: "context-rejected" });
     expect(text(panelLines(summary(), latest, { ok: true }, clock))).toEqual([
-      "JEV REVIEW  4 reviews · auto · ≥90%",
+      "GUARD REVIEW  4 reviews · auto · ≥90%",
       "2 approved · 1 manual · 1 skipped",
       "",
       "Authorization ━━━━━━━━━━  96%  2/3",
@@ -164,7 +164,7 @@ describe("panelLines", () => {
 
   test("keeps cached totals visible beside a failure code", () => {
     expect(text(panelLines(summary(), undefined, { ok: false, code: "rpc.unavailable" }, clock)).slice(0, 2)).toEqual([
-      "JEV REVIEW  4 reviews · auto · ≥90%",
+      "GUARD REVIEW  4 reviews · auto · ≥90%",
       "Status unavailable (rpc.unavailable); showing cached data",
     ]);
   });
@@ -174,20 +174,20 @@ describe("panelLines", () => {
       passed: { explicitly_authorized: 1, within_scope: 1, confirmation_required: 1, high_impact: 1 } });
     const latest = completed({ mode: "observe", proposed: "allow", reason: "model-approved", scores: scores(0.96, 0.95, 0.07, 0.04) });
     const lines = text(panelLines(observed, latest, { ok: true }, clock));
-    expect(lines.slice(0, 2)).toEqual(["JEV REVIEW  1 review · observe · ≥90%", "1 would approve"]);
+    expect(lines.slice(0, 2)).toEqual(["GUARD REVIEW  1 review · observe · ≥90%", "1 would approve"]);
     expect(lines.at(-1)).toBe("Latest ✓ bash · would approve · 14:04");
     const unscored = summary({ reviews: 1, approved: 0, manual: 0, skipped: 1, scored: 0,
       passed: { explicitly_authorized: 0, within_scope: 0, confirmation_required: 0, high_impact: 0 } });
     delete unscored.average;
     expect(text(panelLines(unscored, undefined, { ok: true }, clock))).toEqual([
-      "JEV REVIEW  1 review · auto · ≥90%", "1 skipped", "", "No scored reviews yet.",
+      "GUARD REVIEW  1 review · auto · ≥90%", "1 skipped", "", "No scored reviews yet.",
     ]);
   });
 
   test("shows a review in progress, remedy text and context warnings", () => {
     const evaluating = completed({ phase: "evaluating", proposed: undefined, applied: undefined, reason: undefined });
     expect(text(panelLines(undefined, evaluating, undefined, clock))).toEqual([
-      "JEV REVIEW  auto · ≥90%",
+      "GUARD REVIEW  auto · ≥90%",
       "Latest … bash · evaluating · 14:04",
     ]);
     const failing = completed({ modelCalled: false, reason: "auth-no-connection", contextWarnings: { compacted: true, outside_project: true } });

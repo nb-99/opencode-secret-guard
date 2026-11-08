@@ -412,8 +412,8 @@ describe("reviewHeading and reviewLines", () => {
       "Scores: not evaluated",
     ]);
     const evaluating = status({ mode: "observe", action: "read", phase: "evaluating", modelCalled: true });
-    expect(reviewHeading(evaluating)).toBe("Jev is evaluating");
-    expect(reviewLines(evaluating)).toEqual(["Jev is evaluating", "Observe mode · read", "Scores: pending"]);
+    expect(reviewHeading(evaluating)).toBe("The reviewer is evaluating");
+    expect(reviewLines(evaluating)).toEqual(["The reviewer is evaluating", "Observe mode · read", "Scores: pending"]);
   });
 
   test("includes every score, mode, action, reason and context warning", () => {
@@ -494,7 +494,7 @@ describe("reviewHeading and reviewLines", () => {
 
   test("does not present a cancelled passing judgment as an observe approval", () => {
     const cancelled = completed({ mode: "observe", proposed: "allow", applied: "ask", reason: "context-changed", scores: scores({ confirmation_required: 0.02 }) });
-    expect(reviewHeading(cancelled)).toBe("Jev scores passed; approval cancelled");
+    expect(reviewHeading(cancelled)).toBe("Review scores passed; approval cancelled");
     expect(reviewLines(cancelled)).toContain("Proposed: allow · Applied: ask");
     expect(reviewLines(cancelled)).toContain("Reason: context-changed");
     expect(reviewHeading(completed({ mode: "observe", proposed: "ask", applied: "allow", reason: "model-not-authorized", scores: scores() }))).toBe("Permission allowed; observe mode did not apply approval");

@@ -189,7 +189,7 @@ export function panelLines(
   const source = summary ?? latest;
   const reviews = summary ? `${summary.reviews} ${summary.reviews === 1 ? "review" : "reviews"} · ` : "";
   const lines: PanelLine[] = [[
-    { text: "JEV REVIEW", tone: "title" },
+    { text: "GUARD REVIEW", tone: "title" },
     ...(source ? [{ text: `  ${reviews}${source.mode} · ≥${percent(source.threshold)}`, tone: "muted" as const }] : []),
   ]];
   if (failure !== undefined) {

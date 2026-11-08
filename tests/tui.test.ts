@@ -42,7 +42,7 @@ const completedMessage = [
 ].join("\n");
 const loaderWarning: Toast = {
   title: "Secret guard review",
-  message: "The Jev sidebar could not load. Review notifications and decision logs remain available.",
+  message: "The review sidebar could not load. Review notifications and decision logs remain available.",
   variant: "warning", duration: 8_000,
 };
 
@@ -122,7 +122,7 @@ describe("supported TUI setup", () => {
     expect(typeof ui.slots[0]!.render).toBe("function");
     expect(ui.display.snapshot("session-1")).toEqual([status()]);
     expect(ui.toasts).toEqual([{
-      title: "Jev permission review", sessionID: "session-1", variant: "info", duration: 4_000,
+      title: "Permission review", sessionID: "session-1", variant: "info", duration: 4_000,
       message: "Review triggered: checking eligibility\nAuto mode · bash\nScores: not evaluated",
     }]);
     expect(ui.rpc).not.toHaveBeenCalled();
@@ -144,15 +144,15 @@ describe("supported TUI setup", () => {
     ui.emit(done);
     expect(ui.toasts).toEqual([
       {
-        title: "Jev permission review", sessionID: "session-1", variant: "info", duration: 4_000,
+        title: "Permission review", sessionID: "session-1", variant: "info", duration: 4_000,
         message: "Review triggered: checking eligibility\nAuto mode · bash\nScores: not evaluated",
       },
       {
-        title: "Jev permission review", sessionID: "session-1", variant: "info", duration: 4_000,
-        message: "Jev is evaluating\nAuto mode · bash\nScores: pending",
+        title: "Permission review", sessionID: "session-1", variant: "info", duration: 4_000,
+        message: "The reviewer is evaluating\nAuto mode · bash\nScores: pending",
       },
       {
-        title: "Jev permission review", sessionID: "session-1", variant: "warning", duration: 10_000,
+        title: "Permission review", sessionID: "session-1", variant: "warning", duration: 10_000,
         message: completedMessage,
       },
     ]);
@@ -214,7 +214,7 @@ describe("supported TUI setup", () => {
     expect(ui.slots).toEqual([]);
     ui.emit(completed({ scores }));
     expect(ui.toasts).toEqual([loaderWarning, {
-      title: "Jev permission review", sessionID: "session-1", variant: "warning", duration: 10_000,
+      title: "Permission review", sessionID: "session-1", variant: "warning", duration: 10_000,
       message: completedMessage,
     }]);
     expect(ui.rpc).not.toHaveBeenCalled();
@@ -276,7 +276,7 @@ describe("supported TUI setup", () => {
     ui.permission("secret-guard review: manual approval (auth-no-connection)");
     ui.emit(done);
     expect(ui.toasts).toEqual([{
-      title: "Jev permission review", sessionID: "session-1", variant: "warning", duration: 10_000,
+      title: "Permission review", sessionID: "session-1", variant: "warning", duration: 10_000,
       message: [
         "Review skipped; manual approval required", "Auto mode · bash", "Proposed: ask · Applied: ask",
         "Reason: auth-no-connection", "Scores: not evaluated",

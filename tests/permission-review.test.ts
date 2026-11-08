@@ -2439,7 +2439,7 @@ describe("TUI companion", () => {
     listen(asked(message));
     listen(asked(message, "per_2"));
     expect(shown.map((toast) => toast.variant)).toEqual(["info", "info"]);
-    expect(shown[0].message).toBe("Observe mode: Jev would allow this request. You are still asked.");
+    expect(shown[0].message).toBe("Observe mode: the reviewer would allow this request. You are still asked.");
   });
 
   test("a repeated auth warning is quiet for a while, then returns", () => {
@@ -2514,7 +2514,7 @@ describe("observe score warnings", () => {
     expect(shown).toEqual([
       {
         title: expect.any(String),
-        message: `Observe mode: Jev would not auto-approve (reason: ${label}). Approval score: ${score}; threshold: 90%. Manual approval required.`,
+        message: `Observe mode: the reviewer would not auto-approve (reason: ${label}). Approval score: ${score}; threshold: 90%. Manual approval required.`,
         variant: "warning",
         duration: 8_000,
         sessionID: "ses_1",
@@ -2604,7 +2604,7 @@ describe("observe score warnings", () => {
     const { shown, listen } = toasts();
     listen(asked(event.message));
     expect(shown.map((toast) => toast.message)).toEqual([
-      "Observe mode: Jev would not auto-approve (reason: scope). Approval score: 49%; threshold: 50%. Manual approval required.",
+      "Observe mode: the reviewer would not auto-approve (reason: scope). Approval score: 49%; threshold: 50%. Manual approval required.",
     ]);
   });
 
