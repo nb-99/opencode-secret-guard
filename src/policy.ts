@@ -9,10 +9,10 @@ import { supportsAliasPattern } from "./path-pattern.ts";
  * reader refuses anything else, so a newer policy paired with an older plugin
  * fails by name instead of silently ignoring fields it does not know.
  */
-export const SUPPORTED_CONFIG_VERSION = 5;
+export const SUPPORTED_CONFIG_VERSION = 6;
 
 /** Older formats that still load, with defaults for the fields they predate. */
-export const ACCEPTED_CONFIG_VERSIONS: readonly number[] = [1, 2, 3, 4, 5];
+export const ACCEPTED_CONFIG_VERSIONS: readonly number[] = [1, 2, 3, 4, 5, 6];
 
 /** Overrides the policy location; otherwise the XDG default path is used. */
 export const CONFIG_ENVIRONMENT = "OPENCODE_SECRET_GUARD_CONFIG";
@@ -81,9 +81,21 @@ export type PermissionReviewBackend = "jev" | "opencode" | "endpoint";
 
 export const PERMISSION_REVIEW_BACKENDS: readonly PermissionReviewBackend[] = ["jev", "opencode", "endpoint"];
 
-/** A model OpenCode can reach, as `provider/model` with an optional `#variant`. */
+/**
+ * How a backend asks its model. "decisions" asks a decision model for one
+ * probability per question. "text" asks a chat model to write the answers
+ * object itself.
+ */
+export type ReviewApi = "decisions" | "text";
+
+export const REVIEW_APIS: readonly ReviewApi[] = ["decisions", "text"];
+
 export interface OpencodeReviewSettings {
+  /** A model OpenCode can reach, as `provider/model` with an optional `#variant`. */
   model: string;
+  /** "decisions" by default; "text" for a chat model. */
+  api: ReviewApi;
+  deadlineMs: number;
 }
 
 export interface EndpointReviewSettings {
@@ -93,6 +105,8 @@ export interface EndpointReviewSettings {
   /** A file that holds the key, or null when the server needs none. Never the key itself. */
   apiKeyFile: string | null;
   deadlineMs: number;
+  /** "text" (`/chat/completions`) by default; "decisions" for `/decisions`. */
+  api: ReviewApi;
 }
 
 export interface PermissionReviewSettings {
@@ -120,8 +134,9 @@ export const DEFAULT_PERMISSION_REVIEW: Readonly<PermissionReviewSettings> = {
 };
 
 const PERMISSION_REVIEW_KEYS = ["mode", "logPayloads", "confidenceThreshold", "backend", "opencode", "endpoint"];
+const OPENCODE_DEFAULT_DEADLINE_MS = 10_000;
 const ENDPOINT_DEFAULT_DEADLINE_MS = 20_000;
-const ENDPOINT_MAX_DEADLINE_MS = 30_000;
+const MAX_DEADLINE_MS = 30_000;
 const OPENCODE_MODEL = /^[^/\s#]+\/[^/\s#]+(#[^/\s#]+)?$/;
 const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
 
@@ -367,33 +382,61 @@ export function requirePermissionReview(
     confidenceThreshold,
     backend: backend as PermissionReviewBackend,
   };
-  if (backend === "opencode") return { ...settings, opencode: requireOpencodeReview(record.opencode, source) };
-  if (backend === "endpoint") return { ...settings, endpoint: requireEndpointReview(record.endpoint, source, home) };
+  if (backend === "opencode") return { ...settings, opencode: requireOpencodeReview(record.opencode, configVersion, source) };
+  if (backend === "endpoint") return { ...settings, endpoint: requireEndpointReview(record.endpoint, configVersion, source, home) };
   return settings;
 }
 
-function requireOpencodeReview(value: unknown, source: string): OpencodeReviewSettings {
+/** Rejects keys this format does not know, and keys added after the policy's own version. */
+function requireBlockKeys(record: Record<string, unknown>, key: string, fields: Record<string, number>, configVersion: number, source: string) {
+  const unknown = Object.keys(record).filter((name) => !Object.hasOwn(fields, name));
+  if (unknown.length > 0) throw configError(source, `"${key}" has unknown keys: ${unknown.join(", ")}`);
+  for (const [name, since] of Object.entries(fields)) {
+    if (record[name] !== undefined && configVersion < since) {
+      throw configError(source, `"${key}.${name}" requires configVersion ${since} or later`);
+    }
+  }
+}
+
+function requireApi(value: unknown, key: string, fallback: ReviewApi, source: string): ReviewApi {
+  const api = value === undefined ? fallback : value;
+  if (!REVIEW_APIS.includes(api as ReviewApi)) {
+    throw configError(source, `"${key}.api" must be one of ${REVIEW_APIS.join(", ")}, not ${JSON.stringify(value)}`);
+  }
+  return api as ReviewApi;
+}
+
+function requireDeadline(value: unknown, key: string, fallback: number, source: string): number {
+  const deadlineMs = value === undefined ? fallback : value;
+  if (typeof deadlineMs !== "number" || !Number.isInteger(deadlineMs) || deadlineMs <= 0 || deadlineMs > MAX_DEADLINE_MS) {
+    throw configError(source, `"${key}.deadlineMs" must be a whole number from 1 to ${MAX_DEADLINE_MS}, not ${JSON.stringify(deadlineMs)}`);
+  }
+  return deadlineMs;
+}
+
+function requireOpencodeReview(value: unknown, configVersion: number, source: string): OpencodeReviewSettings {
   const key = "permissionReview.opencode";
   if (!value || typeof value !== "object" || Array.isArray(value)) throw configError(source, `"${key}" must be an object`);
   const record = value as Record<string, unknown>;
-  const unknown = Object.keys(record).filter((name) => name !== "model");
-  if (unknown.length > 0) throw configError(source, `"${key}" has unknown keys: ${unknown.join(", ")}`);
+  requireBlockKeys(record, key, { model: 5, api: 6, deadlineMs: 6 }, configVersion, source);
   if (typeof record.model !== "string" || !OPENCODE_MODEL.test(record.model)) {
     throw configError(
       source,
       `"${key}.model" must be "provider/model" with an optional "#variant", not ${JSON.stringify(record.model)}`,
     );
   }
-  return { model: record.model };
+  return {
+    model: record.model,
+    api: requireApi(record.api, key, "decisions", source),
+    deadlineMs: requireDeadline(record.deadlineMs, key, OPENCODE_DEFAULT_DEADLINE_MS, source),
+  };
 }
 
-function requireEndpointReview(value: unknown, source: string, home: string): EndpointReviewSettings {
+function requireEndpointReview(value: unknown, configVersion: number, source: string, home: string): EndpointReviewSettings {
   const key = "permissionReview.endpoint";
   if (!value || typeof value !== "object" || Array.isArray(value)) throw configError(source, `"${key}" must be an object`);
   const record = value as Record<string, unknown>;
-  const fields = ["baseURL", "model", "apiKeyFile", "deadlineMs"];
-  const unknown = Object.keys(record).filter((name) => !fields.includes(name));
-  if (unknown.length > 0) throw configError(source, `"${key}" has unknown keys: ${unknown.join(", ")}`);
+  requireBlockKeys(record, key, { baseURL: 5, model: 5, apiKeyFile: 5, deadlineMs: 5, api: 6 }, configVersion, source);
   if (typeof record.baseURL !== "string" || !validEndpointURL(record.baseURL)) {
     throw configError(
       source,
@@ -411,11 +454,13 @@ function requireEndpointReview(value: unknown, source: string, home: string): En
     apiKeyFile = expandHome(record.apiKeyFile, home);
     if (!path.isAbsolute(apiKeyFile)) throw configError(source, `"${key}.apiKeyFile" must be an absolute path or start with "~"`);
   }
-  const deadlineMs = record.deadlineMs === undefined ? ENDPOINT_DEFAULT_DEADLINE_MS : record.deadlineMs;
-  if (typeof deadlineMs !== "number" || !Number.isInteger(deadlineMs) || deadlineMs <= 0 || deadlineMs > ENDPOINT_MAX_DEADLINE_MS) {
-    throw configError(source, `"${key}.deadlineMs" must be a whole number from 1 to ${ENDPOINT_MAX_DEADLINE_MS}, not ${JSON.stringify(deadlineMs)}`);
-  }
-  return { baseURL: record.baseURL, model: record.model, apiKeyFile, deadlineMs };
+  return {
+    baseURL: record.baseURL,
+    model: record.model,
+    apiKeyFile,
+    deadlineMs: requireDeadline(record.deadlineMs, key, ENDPOINT_DEFAULT_DEADLINE_MS, source),
+    api: requireApi(record.api, key, "text", source),
+  };
 }
 
 function validEndpointURL(text: string): boolean {

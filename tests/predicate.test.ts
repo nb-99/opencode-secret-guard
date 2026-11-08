@@ -154,7 +154,7 @@ describe("configuration loading", () => {
   });
 
   test("the generated policy validates", () => {
-    expect(baseConfig.configVersion).toBe(5);
+    expect(baseConfig.configVersion).toBe(6);
     expect(baseConfig.secretPatterns.length).toBeGreaterThan(0);
   });
 
@@ -175,7 +175,7 @@ describe("configuration loading", () => {
   });
 
   test.each([
-    ["a newer configVersion", { configVersion: 6 }, /unsupported configVersion 6/],
+    ["a newer configVersion", { configVersion: 7 }, /unsupported configVersion 7/],
     ["an unknown permissionReview mode", { permissionReview: { mode: "on" } }, /"permissionReview.mode" must be one of/],
     ["a null permissionReview mode", { permissionReview: { mode: null } }, /"permissionReview.mode" must be one of/],
     ["an unknown permissionReview key", { permissionReview: { mode: "auto", model: "x" } }, /unknown keys: model/],
@@ -220,7 +220,7 @@ describe("configuration loading", () => {
     expect(loaded.secretEnvironmentPatterns).toEqual([]);
     expect(loaded.writeProtectedRoots).toEqual([]);
     expect(loaded.permissionReview).toEqual({ mode: "off", logPayloads: false, confidenceThreshold: 0.9, backend: "jev" });
-    expect(loaded.configVersion).toBe(5);
+    expect(loaded.configVersion).toBe(6);
   });
 
   test("permissionReview needs configVersion 5 and defaults to off", () => {

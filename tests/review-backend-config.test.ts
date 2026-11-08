@@ -52,3 +52,48 @@ describe("permission review backend selection", () => {
     expect(() => withReview({ mode: "auto", ...review })).toThrow(message);
   });
 });
+
+describe("permission review API selection", () => {
+  const withVersion = (configVersion: number, permissionReview: unknown) =>
+    validateConfig({ ...raw, configVersion, permissionReview }, "test-policy", HOME, "/tmp").permissionReview;
+  const OPENCODE = { model: "github-copilot/gpt-6-luna#low" };
+
+  test("resolves each block's default API and the opencode deadline", () => {
+    expect(withReview({ backend: "opencode", opencode: OPENCODE }).permissionReview.opencode)
+      .toEqual({ ...OPENCODE, api: "decisions", deadlineMs: 10_000 });
+    expect(withReview({ backend: "endpoint", endpoint: ENDPOINT }).permissionReview.endpoint)
+      .toEqual({ ...ENDPOINT, apiKeyFile: null, deadlineMs: 20_000, api: "text" });
+  });
+
+  test("keeps explicit values", () => {
+    expect(withReview({ backend: "opencode", opencode: { ...OPENCODE, api: "text", deadlineMs: 25_000 } }).permissionReview.opencode)
+      .toEqual({ ...OPENCODE, api: "text", deadlineMs: 25_000 });
+    expect(withReview({ backend: "endpoint", endpoint: { ...ENDPOINT, api: "decisions" } }).permissionReview.endpoint)
+      .toMatchObject({ api: "decisions" });
+  });
+
+  test("loads a version 5 policy without the new keys, with the same defaults", () => {
+    expect(withVersion(5, { backend: "opencode", opencode: OPENCODE }).opencode).toEqual({ ...OPENCODE, api: "decisions", deadlineMs: 10_000 });
+    expect(withVersion(5, { backend: "endpoint", endpoint: ENDPOINT }).endpoint).toMatchObject({ api: "text", deadlineMs: 20_000 });
+    expect(withVersion(6, { backend: "endpoint", endpoint: { ...ENDPOINT, api: "decisions" } }).endpoint).toMatchObject({ api: "decisions" });
+  });
+
+  test.each([
+    ["opencode.api", { backend: "opencode", opencode: { ...OPENCODE, api: "text" } }],
+    ["opencode.deadlineMs", { backend: "opencode", opencode: { ...OPENCODE, deadlineMs: 5_000 } }],
+    ["endpoint.api", { backend: "endpoint", endpoint: { ...ENDPOINT, api: "decisions" } }],
+  ])("rejects %s in a version 5 policy", (key, review) => {
+    expect(() => withVersion(5, review)).toThrow(`"permissionReview.${key}" requires configVersion 6 or later`);
+  });
+
+  test.each([
+    ["an unknown opencode API", { backend: "opencode", opencode: { ...OPENCODE, api: "chat" } }, /"permissionReview.opencode.api" must be one of decisions, text, not "chat"/],
+    ["a null endpoint API", { backend: "endpoint", endpoint: { ...ENDPOINT, api: null } }, /"permissionReview.endpoint.api" must be one of decisions, text, not null/],
+    ["an opencode deadline above 30 seconds", { backend: "opencode", opencode: { ...OPENCODE, deadlineMs: 30_001 } }, /"permissionReview.opencode.deadlineMs" must be a whole number from 1 to 30000/],
+    ["a fractional opencode deadline", { backend: "opencode", opencode: { ...OPENCODE, deadlineMs: 1.5 } }, /"permissionReview.opencode.deadlineMs"/],
+    ["a zero opencode deadline", { backend: "opencode", opencode: { ...OPENCODE, deadlineMs: 0 } }, /"permissionReview.opencode.deadlineMs"/],
+    ["an unknown opencode key", { backend: "opencode", opencode: { ...OPENCODE, temperature: 0 } }, /"permissionReview.opencode" has unknown keys: temperature/],
+  ])("rejects %s", (_, review, message) => {
+    expect(() => withReview({ mode: "auto", ...review })).toThrow(message);
+  });
+});

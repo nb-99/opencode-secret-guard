@@ -96,11 +96,16 @@ export interface ReviewContext extends ReviewRpcContext {
   readonly event?: {
     subscribe(input: { signal: AbortSignal }): AsyncIterable<unknown> | Promise<AsyncIterable<unknown>>;
   };
-  /** v2.2.5+: stateless generation. Hosts without `decisions` make the `opencode` backend fail closed. */
+  /** v2.2.5+: stateless generation. A missing method makes the `opencode` API that needs it fail closed. */
   readonly experimental?: {
     readonly generate?: {
-      decisions(input: unknown): Promise<unknown>;
+      decisions?(input: unknown): Promise<unknown>;
+      text?(input: unknown): Promise<unknown>;
     };
+  };
+  /** v2.2.6: stateless chat generation outside `experimental`, preferred when present. */
+  readonly generate?: {
+    text?(input: unknown): Promise<unknown>;
   };
 }
 
@@ -503,13 +508,16 @@ export async function setupPermissionReview(
   }
 
   const generate = ctx.experimental?.generate;
+  // The name outside `experimental` first.
+  const textHost = ctx.generate?.text ? ctx.generate : generate;
   const backend = createReviewBackend(settings, {
     fetch: dependencies.fetch,
     apiKey: (signal) => apiKey(ctx, signal),
-    decisions: generate ? (input) => generate.decisions(input) : undefined,
+    decisions: generate?.decisions ? (input) => generate.decisions!(input) : undefined,
+    text: textHost?.text ? (input) => textHost.text!(input) : undefined,
   });
   // A local endpoint can need longer than the 10 second default; see review-backends.ts.
-  const deadlineMs = settings.endpoint?.deadlineMs ?? dependencies.deadlineMs;
+  const deadlineMs = settings.endpoint?.deadlineMs ?? settings.opencode?.deadlineMs ?? dependencies.deadlineMs;
   const hasCredential = credentialCheck(secrets);
   const statuses = await setupReviewStatus(ctx);
   const pending = new Map<string, PendingCall>();
@@ -778,7 +786,10 @@ export async function setupPermissionReview(
   // The stream can end while the hooks register; that was reported instead.
   if (!live) return () => { stop("unloaded"); statuses.dispose(); };
   // The path stays out of the record, which holds no user paths.
-  record({ event: "start", backend: settings.backend, model: backend.model, threshold, logPayloads: settings.logPayloads });
+  record({
+    event: "start", backend: settings.backend, ...(backend.api ? { api: backend.api } : {}),
+    model: backend.model, threshold, logPayloads: settings.logPayloads,
+  });
   say(`${mode} with ${backend.model}, threshold ${threshold}; decision log: ${dependencies.logPath}`);
   if (settings.logPayloads) say(`request and response bodies are logged to ${dependencies.payloadLogPath}`);
   return () => { stop("unloaded"); statuses.dispose(); };

@@ -87,6 +87,10 @@ interface World {
   permissionHookRefused?: boolean;
   /** The v2.2.5 `experimental.generate.decisions` call the `opencode` backend makes. */
   decisions?: (input: unknown) => Promise<unknown>;
+  /** The v2.2.6 `generate.text` call the `opencode` backend makes with `api: "text"`. */
+  text?: (input: unknown) => Promise<unknown>;
+  /** The same call under `experimental.generate.text`. */
+  experimentalText?: (input: unknown) => Promise<unknown>;
   rpc?: false | "register-throws" | "register-rejects" | "register-hangs" | "register-late" | "emit-throws" | "emit-rejects" | "emit-hangs";
   hang?: string;
 }
@@ -144,7 +148,13 @@ async function started(
   };
   const fake = host(repo, undefined, {
     ...(world.workspaceID === undefined ? {} : { location: { directory: repo, workspaceID: world.workspaceID } }),
-    ...(world.decisions ? { experimental: { generate: { decisions: world.decisions } } } : {}),
+    ...(world.decisions || world.experimentalText ? {
+      experimental: { generate: {
+        ...(world.decisions ? { decisions: world.decisions } : {}),
+        ...(world.experimentalText ? { text: world.experimentalText } : {}),
+      } },
+    } : {}),
+    ...(world.text ? { generate: { text: world.text } } : {}),
     ...(world.permissionHookRefused ? {
       permission: { hook: async () => { throw new Error("hook refusal display-private-detail"); } },
     } : {}),
@@ -2771,5 +2781,235 @@ describe("endpoint backend", () => {
     const fake = await started("auto", { fetch: hang }, {}, { ...LOCAL, endpoint: { ...LOCAL.endpoint, deadlineMs: 20 } });
     expect((await reviewed(fake)).effect).toBe("ask");
     expect(fake.records.find((entry) => entry.event === "review")).toMatchObject({ reason: "deadline" });
+  });
+});
+
+const answersJSON = (values: Answers) =>
+  JSON.stringify({ answers: Object.fromEntries(Object.entries(values).map(([name, noul]) => [name, { type: "noul", noul }])) });
+const predicateAnswers = (values: Answers) =>
+  Object.entries(values).map(([name, probability]) => ({ type: "predicate", name, probability }));
+const reviewRecord = (fake: Fake) => fake.records.find((entry) => entry.event === "review");
+
+describe("opencode backend with the text API", () => {
+  const TEXT = { backend: "opencode", opencode: { model: "github-copilot/gpt-6-luna#low", api: "text" } } as const;
+  const hostError = (tag: string, message: string) => Object.assign(new Error(message), { _tag: tag });
+
+  test("sends one prompt with the evidence and approves a valid answer", async () => {
+    const inputs: any[] = [];
+    const fake = await started("auto", { text: async (input) => (inputs.push(input), { text: answersJSON(APPROVE) }) }, {}, { ...TEXT, logPayloads: true });
+    expect((await reviewed(fake)).effect).toBe("allow");
+    expect(fake.requests).toHaveLength(0);
+    expect(inputs).toHaveLength(1);
+    const [input] = inputs;
+    expect(Object.keys(input).sort()).toEqual(["model", "prompt"]);
+    expect(input.model).toEqual({ providerID: "github-copilot", id: "gpt-6-luna", variant: "low" });
+    expect(input.prompt).toContain('"requested_command":"bun test"');
+    expect(input.prompt).toContain(HUMAN[0]!.text);
+    for (const [name, question] of Object.entries(REVIEW_QUESTIONS as Record<string, any>)) {
+      expect(input.prompt).toContain(`"${name}"`);
+      expect(input.prompt).toContain(JSON.stringify(question.criteria.true));
+    }
+    expect(input.prompt).toContain('{"answers": {NAME: {"type": "noul", "noul": PROBABILITY}}}');
+    expect(fake.records[0]).toMatchObject({ event: "start", backend: "opencode", api: "text", model: "github-copilot/gpt-6-luna#low" });
+    expect(fake.payloads).toContainEqual(expect.objectContaining({ phase: "request", endpoint: "generate.text", body: JSON.stringify(input) }));
+    expect(fake.payloads).toContainEqual(expect.objectContaining({ phase: "response", status: 200, body: answersJSON(APPROVE), omitted: null }));
+  });
+
+  test("uses experimental.generate.text when generate.text is absent", async () => {
+    const fake = await started("auto", { experimentalText: async () => ({ text: answersJSON(APPROVE) }) }, {}, TEXT);
+    expect((await reviewed(fake)).effect).toBe("allow");
+  });
+
+  test("prefers generate.text over the experimental name", async () => {
+    const calls: string[] = [];
+    const fake = await started("auto", {
+      text: async () => (calls.push("generate"), { text: answersJSON(APPROVE) }),
+      experimentalText: async () => (calls.push("experimental"), { text: answersJSON(APPROVE) }),
+    }, {}, TEXT);
+    await reviewed(fake);
+    expect(calls).toEqual(["generate"]);
+  });
+
+  test.each([
+    ["a json fence", "```json\n" + answersJSON(APPROVE) + "\n```"],
+    ["a plain fence with surrounding whitespace", "\n  ```\n" + answersJSON(APPROVE) + "\n```  \n"],
+  ])("accepts the answer inside %s", async (_, text) => {
+    const fake = await started("auto", { text: async () => ({ text }) }, {}, TEXT);
+    expect((await reviewed(fake)).effect).toBe("allow");
+  });
+
+  test.each([
+    ["prose before the object", `Here is my judgment: ${answersJSON(APPROVE)}`],
+    ["prose after a fence", "```json\n" + answersJSON(APPROVE) + "\n```\nI hope this helps."],
+    ["two fences", "```json\n" + answersJSON(APPROVE) + "\n```\n```json\n" + answersJSON(APPROVE) + "\n```"],
+  ])("rejects %s", async (_, text) => {
+    const fake = await started("auto", { text: async () => ({ text }) }, {}, TEXT);
+    expect((await reviewed(fake)).effect).toBe("ask");
+    expect(reviewRecord(fake)).toMatchObject({ reason: "response-json", modelCalled: true });
+  });
+
+  test.each([
+    ["an answer object without one question", { text: answersJSON(Object.fromEntries(Object.entries(APPROVE).filter(([name]) => name !== "high_impact"))) }],
+    ["a probability above 1", { text: answersJSON({ ...APPROVE, within_scope: 1.2 }) }],
+    ["a result without text", { content: answersJSON(APPROVE) }],
+  ])("rejects %s with response-shape", async (_, result) => {
+    const fake = await started("auto", { text: async () => result }, {}, TEXT);
+    expect((await reviewed(fake)).effect).toBe("ask");
+    expect(reviewRecord(fake)).toMatchObject({ reason: "response-shape" });
+  });
+
+  test("asks the user when the host has no text API, even with the decision API", async () => {
+    const fake = await started("auto", { decisions: async () => ({ answers: predicateAnswers(APPROVE) }) }, {}, TEXT);
+    expect((await reviewed(fake)).effect).toBe("ask");
+    expect(reviewRecord(fake)).toMatchObject({ reason: "opencode-unsupported", modelCalled: false });
+  });
+
+  test("records the host's reason code, and its text only in the payload log", async () => {
+    const error = hostError("Generate.UnsupportedModelError", "opencode/jev-1.13-free is a decision model, not a chat model");
+    const fake = await started("auto", { text: async () => { throw error; } }, {}, { ...TEXT, logPayloads: true });
+    expect((await reviewed(fake)).effect).toBe("ask");
+    expect(reviewRecord(fake)).toMatchObject({ reason: "opencode-model-unsupported", applied: "ask" });
+    expect(JSON.stringify([fake.records, fake.lines])).not.toContain(error.message);
+    expect(fake.payloads).toContainEqual(expect.objectContaining({
+      phase: "failure", reason: "opencode-model-unsupported", error: `Generate.UnsupportedModelError: ${error.message}`,
+    }));
+  });
+
+  test("ignores an answer that arrives after the deadline", async () => {
+    const late = () => new Promise<unknown>((resolve) => setTimeout(() => resolve({ text: answersJSON(APPROVE) }), 200));
+    const fake = await started("auto", { text: late }, { deadlineMs: 20 }, TEXT);
+    expect((await reviewed(fake)).effect).toBe("ask");
+    expect(reviewRecord(fake)).toMatchObject({ reason: "deadline" });
+  });
+
+  test("uses its own deadlineMs", async () => {
+    const late = () => new Promise<unknown>((resolve) => setTimeout(() => resolve({ text: answersJSON(APPROVE) }), 200));
+    const fake = await started("auto", { text: late }, {}, { ...TEXT, opencode: { ...TEXT.opencode, deadlineMs: 20 } });
+    expect((await reviewed(fake)).effect).toBe("ask");
+    expect(reviewRecord(fake)).toMatchObject({ reason: "deadline" });
+    expect(reviewRecord(fake)!.elapsedMs as number).toBeLessThan(200);
+  });
+
+  test("sends nothing when the prompt is over the request limit", async () => {
+    let called = false;
+    const context = [{ type: "user", id: "m1", text: '"'.repeat(11_900) }];
+    const fake = await started("auto", { context, text: async () => ((called = true), { text: answersJSON(APPROVE) }) }, {}, TEXT);
+    expect((await reviewed(fake)).effect).toBe("ask");
+    expect(reviewRecord(fake)).toMatchObject({ reason: "request-oversize", modelCalled: false });
+    expect(called).toBe(false);
+  });
+
+  test("keeps no part of a reply over the response limit", async () => {
+    const text = " ".repeat(64_001) + answersJSON(APPROVE);
+    const fake = await started("auto", { text: async () => ({ text }) }, {}, { ...TEXT, logPayloads: true });
+    expect((await reviewed(fake)).effect).toBe("ask");
+    expect(reviewRecord(fake)).toMatchObject({ reason: "response-oversize" });
+    expect(fake.payloads).toContainEqual(expect.objectContaining({ phase: "response", body: "", omitted: "oversize" }));
+  });
+});
+
+describe("endpoint backend with the decisions API", () => {
+  const DECISIONS = {
+    backend: "endpoint",
+    endpoint: { baseURL: "https://judge.example.com/v1/", model: "decider-1", apiKeyFile: null, deadlineMs: 20_000, api: "decisions" },
+  } as const;
+  const decided = (answers: unknown[]) => response(200, JSON.stringify({ model: "decider-1", answers, usage: { input_tokens: 1 } }));
+
+  test("posts the state and one predicate per question to /decisions", async () => {
+    const fake = await started("auto", { fetch: async () => decided(predicateAnswers(APPROVE)) }, {}, DECISIONS);
+    expect((await reviewed(fake)).effect).toBe("allow");
+    const { url, init } = fake.requests[0]!;
+    expect(url).toBe("https://judge.example.com/v1/decisions");
+    expect(init.redirect).toBe("error");
+    const body = JSON.parse(init.body);
+    expect(Object.keys(body).sort()).toEqual(["input", "model", "questions"]);
+    expect(body.model).toBe("decider-1");
+    expect(body.input).toEqual([{ role: "user", content: [{ type: "input_json", data: expect.objectContaining({
+      pending_action: expect.objectContaining({ requested_command: "bun test" }),
+      user_messages: [HUMAN[0]!.text],
+    }) }] }]);
+    expect(body.questions.map((question: any) => question.name).sort()).toEqual(Object.keys(REVIEW_QUESTIONS).sort());
+    for (const question of body.questions) {
+      expect(Object.keys(question).sort()).toEqual(["instructions", "name", "type"]);
+      expect(question.type).toBe("predicate");
+      expect(question.instructions).toContain((REVIEW_QUESTIONS as Record<string, any>)[question.name].criteria.true);
+    }
+    expect(fake.records[0]).toMatchObject({ event: "start", backend: "endpoint", api: "decisions", model: "decider-1" });
+  });
+
+  test("treats a refusal for any question as no answer", async () => {
+    const answers = [
+      ...predicateAnswers(APPROVE).filter((answer) => answer.name !== "within_scope"),
+      { type: "refusal", name: "within_scope", message: "I cannot help with that." },
+    ];
+    const fake = await started("auto", { fetch: async () => decided(answers) }, {}, DECISIONS);
+    expect((await reviewed(fake)).effect).toBe("ask");
+    expect(reviewRecord(fake)).toMatchObject({ reason: "decision-error" });
+  });
+
+  test.each([
+    ["a missing answer", predicateAnswers(APPROVE).slice(1)],
+    ["a duplicate answer", [...predicateAnswers(APPROVE), predicateAnswers(APPROVE)[0]]],
+    ["an unknown answer type", predicateAnswers(APPROVE).map((answer) => ({ ...answer, type: "multiple_choice" }))],
+    ["a missing probability", predicateAnswers(APPROVE).map(({ probability: _, ...answer }) => answer)],
+  ])("rejects %s with response-shape", async (_, answers) => {
+    const fake = await started("auto", { fetch: async () => decided(answers) }, {}, DECISIONS);
+    expect((await reviewed(fake)).effect).toBe("ask");
+    expect(reviewRecord(fake)).toMatchObject({ reason: "response-shape" });
+  });
+
+  test("rejects a reply that is not JSON", async () => {
+    const fake = await started("auto", { fetch: async () => response(200, "ok") }, {}, DECISIONS);
+    expect((await reviewed(fake)).effect).toBe("ask");
+    expect(reviewRecord(fake)).toMatchObject({ reason: "response-json" });
+  });
+
+  test("sends the key from its file and keeps it out of every log", async () => {
+    const keyFile = path.join(fs.mkdtempSync(path.join(fixture, "decisions-")), "key");
+    fs.writeFileSync(keyFile, "decisions-secret-value\n");
+    const fake = await started(
+      "auto",
+      { fetch: async () => decided(predicateAnswers(APPROVE)) },
+      {},
+      { ...DECISIONS, logPayloads: true, endpoint: { ...DECISIONS.endpoint, apiKeyFile: keyFile } },
+    );
+    expect((await reviewed(fake)).effect).toBe("allow");
+    expect(fake.requests[0]!.init.headers.authorization).toBe("Bearer decisions-secret-value");
+    expect(fake.payloads).toContainEqual(expect.objectContaining({ phase: "request", endpoint: "judge.example.com" }));
+    expect(JSON.stringify([fake.records, fake.payloads, fake.lines])).not.toContain("decisions-secret-value");
+  });
+
+  test("reports a rejected key", async () => {
+    const fake = await started("auto", { fetch: async () => response(401, '{"error":"invalid key"}') }, {}, DECISIONS);
+    expect((await reviewed(fake)).effect).toBe("ask");
+    expect(reviewRecord(fake)).toMatchObject({ reason: "auth-rejected" });
+  });
+});
+
+describe("backend API defaults", () => {
+  test("an opencode block without api uses the decision API", async () => {
+    const calls: string[] = [];
+    const fake = await started("auto", {
+      decisions: async () => (calls.push("decisions"), { answers: predicateAnswers(APPROVE) }),
+      text: async () => (calls.push("text"), { text: answersJSON(APPROVE) }),
+    }, {}, { backend: "opencode", opencode: { model: "opencode/jev-1.13-free" } as any });
+    expect((await reviewed(fake)).effect).toBe("allow");
+    expect(calls).toEqual(["decisions"]);
+    expect(fake.records[0]).toMatchObject({ event: "start", backend: "opencode", api: "decisions" });
+  });
+
+  test("an endpoint block without api uses chat completions", async () => {
+    const endpoint = { baseURL: "http://127.0.0.1:11434/v1", model: "local-judge", apiKeyFile: null, deadlineMs: 20_000 };
+    const fake = await started("auto", {
+      fetch: async () => response(200, JSON.stringify({ choices: [{ message: { content: answersJSON(APPROVE) } }] })),
+    }, {}, { backend: "endpoint", endpoint: endpoint as any });
+    expect((await reviewed(fake)).effect).toBe("allow");
+    expect(fake.requests[0]!.url).toBe("http://127.0.0.1:11434/v1/chat/completions");
+    expect(fake.records[0]).toMatchObject({ event: "start", backend: "endpoint", api: "text" });
+  });
+
+  test("jev records no api", async () => {
+    const fake = await started("observe");
+    expect(fake.records[0]).not.toHaveProperty("api");
   });
 });
