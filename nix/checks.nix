@@ -153,6 +153,10 @@ in
           "~/.config/secrets"
           "~/vault"
         ];
+        extraWriteProtectedRoots = [
+          "/opt/homebrew/Cellar/opencode"
+          "~/Applications/OpenCode.app"
+        ];
       };
       mergedFile = pkgs.writeText "merged-policy.json" (builtins.toJSON merged);
       # A settings.mode would disagree with the shell the module wires up.
@@ -187,6 +191,9 @@ in
         assert(config.relaxationGroups.vault.binaries[0] === "vault", "new group not created");
         assert(config.relaxationGroups.vault.allowEnvironment.length === 0, "new group missing defaults");
         assert(config.denyRoots.length === 2 && config.denyRoots[1] === "/home/example/vault", "settings override not applied");
+        assert(JSON.stringify(config.writeProtectedRoots) ===
+          JSON.stringify(["/opt/homebrew/Cellar/opencode", "/home/example/Applications/OpenCode.app"]),
+          "extra write-protected roots not appended or not expanded");
       '
       touch $out
     '';

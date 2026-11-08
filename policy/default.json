@@ -1,5 +1,5 @@
 {
-  "configVersion": 3,
+  "configVersion": 4,
   "mode": "shell+files",
   "cleanupRoot": null,
   "tools": {
@@ -241,6 +241,7 @@
     "~/.config/secrets"
   ],
   "exemptRoots": [],
+  "writeProtectedRoots": [],
   "secretEnvironment": [],
   "secretEnvironmentPatterns": [
     "(^|_)(TOKEN|SECRET|PASSWORD|PASSWD|API_KEY|APIKEY|ACCESS_KEY|PRIVATE_KEY|CREDENTIALS?)(_|$)"

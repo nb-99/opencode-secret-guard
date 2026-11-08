@@ -154,7 +154,7 @@ describe("configuration loading", () => {
   });
 
   test("the generated policy validates", () => {
-    expect(baseConfig.configVersion).toBe(3);
+    expect(baseConfig.configVersion).toBe(4);
     expect(baseConfig.secretPatterns.length).toBeGreaterThan(0);
   });
 
@@ -175,12 +175,18 @@ describe("configuration loading", () => {
   });
 
   test.each([
-    ["a newer configVersion", { configVersion: 4 }, /unsupported configVersion 4/],
+    ["a newer configVersion", { configVersion: 5 }, /unsupported configVersion 5/],
     ["a missing configVersion", { configVersion: undefined }, /unsupported configVersion/],
     ["a non-string list entry", { artifactAllowlist: ["dist", 7] }, /must be an array of strings/],
     ["a negative cacheTtlMs", { cacheTtlMs: -1 }, /"cacheTtlMs"/],
     ["a non-numeric cacheTtlMs", { cacheTtlMs: "2000" }, /"cacheTtlMs"/],
     ["a relative deny root", { denyRoots: ["relative/secrets"] }, /absolute path/],
+    ["a relative write-protected root", { writeProtectedRoots: ["Applications/OpenCode.app"] }, /absolute path/],
+    [
+      "a write-protected root in a policy older than version 4",
+      { configVersion: 3, writeProtectedRoots: ["/Applications/OpenCode.app"] },
+      /"writeProtectedRoots" requires configVersion 4/,
+    ],
     ["a non-object relaxationGroups", { relaxationGroups: [] }, /must be an object/],
     ["a relative tools.git", { tools: { git: "git" } }, /"tools.git" must be an absolute path/],
     ["a non-object tools", { tools: "git" }, /"tools" must be an object/],
@@ -197,11 +203,12 @@ describe("configuration loading", () => {
   });
 
   test("a version-2 policy loads with the fixed git and no environment patterns", () => {
-    const { tools, secretEnvironmentPatterns, ...rest } = valid();
+    const { tools, secretEnvironmentPatterns, writeProtectedRoots, ...rest } = valid();
     const loaded = loadConfig(policy("v2.json", { ...rest, configVersion: 2 }));
     expect(loaded.tools.git).toBe("/usr/bin/git");
     expect(loaded.secretEnvironmentPatterns).toEqual([]);
-    expect(loaded.configVersion).toBe(3);
+    expect(loaded.writeProtectedRoots).toEqual([]);
+    expect(loaded.configVersion).toBe(4);
   });
 
   test("an uncompilable secret pattern is rejected", () => {
@@ -225,10 +232,12 @@ describe("configuration loading", () => {
       ...valid(),
       denyRoots: ["~/.config/secrets"],
       exemptRoots: ["~/.config/secrets/public"],
+      writeProtectedRoots: ["~/Applications/OpenCode.app"],
     });
     const loaded = loadConfig(source, "/fixture/home");
     expect(loaded.denyRoots).toEqual(["/fixture/home/.config/secrets"]);
     expect(loaded.exemptRoots).toEqual(["/fixture/home/.config/secrets/public"]);
+    expect(loaded.writeProtectedRoots).toEqual(["/fixture/home/Applications/OpenCode.app"]);
   });
 
   test("an exempt root above a deny root or a group's allowPaths is rejected", () => {

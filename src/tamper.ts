@@ -18,6 +18,8 @@ import { configPath, opencodeCacheDirectory, opencodeConfigDirectory, opencodeDa
  * unsandboxed resolver, OpenCode and its formatters spawn programs by name,
  * and a `git` planted in `/opt/homebrew/bin` runs with no profile at all. So
  * is `.zshenv`, which the interpreter every command runs under sources first.
+ * So are the trees the policy names in `writeProtectedRoots`: a PATH entry is
+ * protected as a link, but a Homebrew keg or an app bundle it leads to is not.
  *
  * Reads are never affected. `literals` are single files (or a directory node
  * that must not be renamed); `subpaths` are whole trees.
@@ -132,6 +134,8 @@ export function tamperTargets(options: {
   repoRoot: string | null;
   pathEnvironment: string | undefined;
   home: string;
+  /** The policy's `writeProtectedRoots`. Required, so no caller can omit them. */
+  writeProtectedRoots: readonly string[];
   policyPath?: string;
   packageDirectory?: string;
 }): TamperTargets {
@@ -148,6 +152,7 @@ export function tamperTargets(options: {
     path.join(opencodeDataDirectory(), "bin"),
     options.packageDirectory ?? PACKAGE_DIRECTORY,
     ...writablePathDirectories(options.pathEnvironment, options.repoRoot),
+    ...options.writeProtectedRoots,
   ]);
 
   if (options.repoRoot) {

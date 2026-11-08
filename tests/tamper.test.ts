@@ -7,6 +7,7 @@ import { createV1Hooks } from "../src/v1.ts";
 import { loadConfig } from "../src/policy.ts";
 import type { GuardConfig } from "../src/policy.ts";
 import { classifyPath } from "../src/predicate.ts";
+import { profilePath } from "../src/profile.ts";
 import { PACKAGE_DIRECTORY, isTamperProtected, protectedNodes, tamperTargets, writablePathDirectories } from "../src/tamper.ts";
 
 const policyPath = process.env.OPENCODE_SECRET_GUARD_CONFIG;
@@ -66,7 +67,7 @@ describe("writablePathDirectories", () => {
     fs.symlinkSync(real, link);
 
     expect(writablePathDirectories(link, null)).toEqual([link]);
-    expect(tamperTargets({ repoRoot: null, pathEnvironment: link, home: fixture, policyPath }).subpaths).toEqual(
+    expect(tamperTargets({ repoRoot: null, pathEnvironment: link, home: fixture, policyPath, writeProtectedRoots: [] }).subpaths).toEqual(
       expect.arrayContaining([link, real]),
     );
   });
@@ -74,7 +75,7 @@ describe("writablePathDirectories", () => {
 
 describe("tamperTargets", () => {
   test("names what OpenCode executes at startup, globally and per project", () => {
-    const targets = tamperTargets({ repoRoot: repo, pathEnvironment: "", home: fixture, policyPath });
+    const targets = tamperTargets({ repoRoot: repo, pathEnvironment: "", home: fixture, policyPath, writeProtectedRoots: [] });
     const configDirectory = path.join(fixture, "config", "opencode");
 
     expect(targets.literals).toContain(fs.realpathSync(policyPath));
@@ -90,7 +91,7 @@ describe("tamperTargets", () => {
   });
 
   test("leaves prompts and skills alone", () => {
-    const targets = tamperTargets({ repoRoot: repo, pathEnvironment: "", home: fixture, policyPath });
+    const targets = tamperTargets({ repoRoot: repo, pathEnvironment: "", home: fixture, policyPath, writeProtectedRoots: [] });
     const configDirectory = path.join(fixture, "config", "opencode");
 
     expect(isTamperProtected(path.join(configDirectory, "skills", "x", "SKILL.md"), targets)).toBe(false);
@@ -100,7 +101,7 @@ describe("tamperTargets", () => {
   });
 
   test("covers a file inside a protected tree and the tree itself", () => {
-    const targets = tamperTargets({ repoRoot: repo, pathEnvironment: "", home: fixture, policyPath });
+    const targets = tamperTargets({ repoRoot: repo, pathEnvironment: "", home: fixture, policyPath, writeProtectedRoots: [] });
     expect(isTamperProtected(path.join(repo, ".opencode", "plugins", "evil.ts"), targets)).toBe(true);
     expect(isTamperProtected(path.join(repo, ".opencode", "plugins"), targets)).toBe(true);
   });
@@ -116,13 +117,13 @@ describe("tamperTargets", () => {
     const link = path.join(fixture, "config", "opencode", "linked-policy.json");
     fs.symlinkSync(destination, link);
 
-    const targets = tamperTargets({ repoRoot: repo, pathEnvironment: "", home: fixture, policyPath: link });
+    const targets = tamperTargets({ repoRoot: repo, pathEnvironment: "", home: fixture, policyPath: link, writeProtectedRoots: [] });
     expect(isTamperProtected(link, targets)).toBe(true);
     expect(isTamperProtected(destination, targets)).toBe(true);
   });
 
   test("protects the file the command interpreter sources before every command", () => {
-    const targets = tamperTargets({ repoRoot: repo, pathEnvironment: "", home: fixture, policyPath });
+    const targets = tamperTargets({ repoRoot: repo, pathEnvironment: "", home: fixture, policyPath, writeProtectedRoots: [] });
     expect(isTamperProtected(path.join(fixture, ".zshenv"), targets)).toBe(true);
     // Read for interactive shells only, so the wrapper never runs them.
     expect(isTamperProtected(path.join(fixture, ".zshrc"), targets)).toBe(false);
@@ -131,7 +132,7 @@ describe("tamperTargets", () => {
 
   test("protects the directory nodes leading to every target, so none can be swapped for a symlink", () => {
     const bin = path.join(fixture, "path", "bin");
-    const targets = tamperTargets({ repoRoot: repo, pathEnvironment: bin, home: fixture, policyPath });
+    const targets = tamperTargets({ repoRoot: repo, pathEnvironment: bin, home: fixture, policyPath, writeProtectedRoots: [] });
 
     // The nodes themselves cannot be renamed or replaced...
     for (const node of [
@@ -146,6 +147,89 @@ describe("tamperTargets", () => {
     // ...while writing beside a protected child stays possible.
     expect(isTamperProtected(path.join(repo, ".opencode", "command", "x.md"), targets)).toBe(false);
     expect(isTamperProtected(path.join(fixture, "path", "notes.txt"), targets)).toBe(false);
+  });
+});
+
+describe("writeProtectedRoots", () => {
+  // A Homebrew-style layout: launcher and opt links into a versioned keg, and
+  // an app bundle outside PATH.
+  let brew: string;
+  let keg: string;
+  let bundle: string;
+  let roots: string[];
+
+  beforeAll(() => {
+    brew = path.join(fixture, "brew");
+    keg = path.join(brew, "Cellar", "tool");
+    fs.mkdirSync(path.join(keg, "1.0", "bin"), { recursive: true });
+    fs.writeFileSync(path.join(keg, "1.0", "bin", "tool"), "#!/bin/sh\n", { mode: 0o755 });
+    fs.mkdirSync(path.join(brew, "Cellar", "other"));
+    fs.mkdirSync(path.join(brew, "bin"));
+    fs.symlinkSync("../Cellar/tool/1.0/bin/tool", path.join(brew, "bin", "tool"));
+    fs.mkdirSync(path.join(brew, "opt"));
+    fs.symlinkSync("../Cellar/tool/1.0", path.join(brew, "opt", "tool"));
+    bundle = path.join(fixture, "Applications", "Tool.app");
+    fs.mkdirSync(path.join(bundle, "Contents", "Resources"), { recursive: true });
+    fs.writeFileSync(path.join(bundle, "Contents", "Resources", "app.asar"), "bundle\n");
+    roots = [keg, path.join(brew, "opt", "tool"), path.join(brew, "bin", "tool"), bundle];
+  });
+
+  const targets = () =>
+    tamperTargets({ repoRoot: repo, pathEnvironment: "", home: fixture, policyPath, writeProtectedRoots: roots });
+
+  test("protects the installation tree, including versions installed later", () => {
+    expect(isTamperProtected(path.join(keg, "1.0", "bin", "tool"), targets())).toBe(true);
+    expect(isTamperProtected(path.join(keg, "2.0", "bin", "tool"), targets())).toBe(true);
+    expect(isTamperProtected(path.join(bundle, "Contents", "Resources", "app.asar"), targets())).toBe(true);
+  });
+
+  test("protects launcher links and what they resolve to", () => {
+    expect(isTamperProtected(path.join(brew, "bin", "tool"), targets())).toBe(true);
+    expect(isTamperProtected(path.join(brew, "opt", "tool"), targets())).toBe(true);
+    expect(targets().subpaths).toContain(path.join(keg, "1.0"));
+  });
+
+  test("protects the directory nodes leading to a root, but not their siblings", () => {
+    expect(targets().literals).toEqual(expect.arrayContaining([path.join(brew, "Cellar"), brew, path.dirname(bundle)]));
+    expect(isTamperProtected(path.join(brew, "Cellar", "other", "note"), targets())).toBe(false);
+    expect(isTamperProtected(path.join(brew, "bin", "other"), targets())).toBe(false);
+  });
+
+  test("accepts a root that does not exist yet", () => {
+    const missing = path.join(fixture, "not-installed", "Tool.app");
+    const found = tamperTargets({ repoRoot: null, pathEnvironment: "", home: fixture, policyPath, writeProtectedRoots: [missing] });
+    expect(isTamperProtected(path.join(missing, "Contents", "MacOS", "Tool"), found)).toBe(true);
+  });
+
+  test("the file tools may read but not write below a root, even through a link or an exemption", () => {
+    const protectedConfig = { ...config, writeProtectedRoots: roots };
+    const binary = path.join(keg, "1.0", "bin", "tool");
+    expect(classifyPath(binary, protectedConfig, "read")).toBe("allow");
+    expect(classifyPath(binary, protectedConfig, "write")).toBe("deny");
+    expect(classifyPath(path.join(brew, "bin", "tool"), protectedConfig, "write")).toBe("deny");
+    expect(classifyPath(path.join(bundle, "Contents", "Resources", "app.asar"), protectedConfig, "write")).toBe("deny");
+    expect(classifyPath(binary, { ...protectedConfig, exemptRoots: [brew] }, "write")).toBe("deny");
+    expect(classifyPath(path.join(brew, "Cellar", "other", "note"), protectedConfig, "write")).toBe("allow");
+  });
+
+  test("an upgrade that re-points a protected link yields a new profile naming the new target", () => {
+    const link = path.join(brew, "opt", "upgraded");
+    fs.symlinkSync(path.join(keg, "1.0"), link);
+    const options = {
+      config: { ...config, writeProtectedRoots: [link] },
+      home: fixture,
+      cwd: repo,
+      group: null,
+      directory: path.join(fixture, "profiles"),
+    };
+    const before = profilePath(options);
+    fs.mkdirSync(path.join(keg, "2.0"));
+    fs.unlinkSync(link);
+    fs.symlinkSync(path.join(keg, "2.0"), link);
+    const after = profilePath(options);
+
+    expect(after).not.toBe(before);
+    expect(fs.readFileSync(after, "utf8")).toContain(`(subpath "${path.join(keg, "2.0")}")`);
   });
 });
 

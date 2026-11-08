@@ -13,7 +13,7 @@ overrides the location for tests.
 Nothing is substituted into the plugin source at build time, so the runtime
 contract does not depend on Nix. Validation is strict and fails closed:
 unsupported `configVersion`, wrong types, a non-absolute `denyRoots`/
-`exemptRoots` entry, an `allowPaths` entry that is not `$HOME`-relative, or a
+`exemptRoots`/`writeProtectedRoots` entry, an `allowPaths` entry that is not `$HOME`-relative, or a
 pattern that does not compile all abort startup. Patterns are compiled at load
 time specifically because the matcher treats an uncompilable pattern as "no
 match", so an unvalidated typo in a deny pattern would silently stop guarding.
@@ -321,6 +321,18 @@ per-project shells), so it is part of the profile cache key. The file-tool
 predicate mirrors it for `write`, `edit` and `patch` only; `read` is
 untouched. The kernel suite writes `TAMPER` at each target through the
 generated profile and asserts the file did not change.
+
+A protected `PATH` entry is a directory of links. A rule matches the file a
+write lands on, so writing through `/opt/homebrew/bin/opencode` changes the
+keg it points into, and no rule covers that keg. `writeProtectedRoots` names
+such trees: the stable Cellar directory (`/opt/homebrew/Cellar/opencode`, so
+versions installed later are covered), its `opt` and `bin` links, and an app
+bundle outside `PATH` such as `/Applications/OpenCode.app`. They join the set
+above unchanged: protected at both spellings, their ancestors made literal, and
+denied last. A root that does not exist yet is accepted, so the policy loads
+before the first installation. Only the configured trees are covered; other
+programs that a `PATH` link leads to, and the libraries and interpreters they
+load, are not. In `files-only` mode the roots bind the file tools only.
 
 The cost is that `brew install`, `npm i -g` and anything else that writes into
 a `PATH` directory fails from the agent shell. The denial reaches the command

@@ -84,6 +84,13 @@ in
     extraSecretExceptions = [ "/pkg/store/secrets/obfuscator\\.go$" ];
     # A shipped refusal this host does not want.
     removeSecretPrintingCommands = [ { binary = "sops"; } ];
+    # An OpenCode installed outside the read-only Nix store.
+    extraWriteProtectedRoots = [
+      "/opt/homebrew/Cellar/opencode"
+      "/opt/homebrew/opt/opencode"
+      "/opt/homebrew/bin/opencode"
+      "/Applications/OpenCode.app"
+    ];
     # Whole-key overrides.
     settings = {
       denyRoots = [ "~/.config/secrets" ];
@@ -106,7 +113,8 @@ settings, and reaching into another module's option tree invites merge conflicts
 over values this module cannot see.
 
 `extraSecretPatterns`, `extraSecretExceptions`, `extraArtifactAllowlist`,
-`extraSecretPrintingCommands` and `extraRelaxationGroups` append to the shipped
+`extraSecretPrintingCommands`, `extraRelaxationGroups` and
+`extraWriteProtectedRoots` append to the shipped
 default, so a host carries only its deltas. `removeSecretPrintingCommands` drops
 shipped refusal rules before the additions are appended, for a host that needs
 `sops -d` or a narrower `kubectl` rule without giving up the rest of the list.
@@ -165,6 +173,7 @@ with a leading `~`, expanded at runtime, so a policy is portable between hosts.
 | `secretPrintingCommands`    | Invocations refused outright because their output is the credential                    |
 | `denyRoots`                 | Never relaxed, never excepted                                                           |
 | `exemptRoots`               | Explicit subtree exemptions; file tools require an existing directory, and cache/write-tamper protection takes precedence |
+| `writeProtectedRoots`       | Trees no command or file tool may write, such as a Homebrew or app-bundle OpenCode install; reads and execution stay allowed (version 4) |
 | `secretEnvironment`         | Variable names scrubbed before a command runs, always                                   |
 | `secretEnvironmentPatterns` | Regexes; every inherited variable whose name matches is scrubbed                        |
 | `cacheTtlMs`                | How often a profile is regenerated                                                      |
@@ -271,7 +280,9 @@ it run `bun install`, the npm plugin cache, this package, the policy, `~/.zshenv
 directory on `PATH` outside the repository (`/opt/homebrew/bin`,
 `/usr/local/bin`, …). Each of those is protected at the path it is named by
 *and* at the path it resolves to, so replacing a Home Manager symlink is denied
-too. Reads are unaffected; prompts, skills, commands and `~/.zshrc` stay
+too. A `PATH` directory is protected as a set of links, not as the programs
+they lead to: name an OpenCode installed by Homebrew or as an app bundle in
+`writeProtectedRoots`. Reads are unaffected; prompts, skills, commands and `~/.zshrc` stay
 editable. Practically: `brew install` and `npm i -g` from the agent shell fail —
 install tools from your own terminal.
 
