@@ -184,6 +184,9 @@ with a leading `~`, expanded at runtime, so a policy is portable between hosts.
 Validation fails closed: an unsupported version, a wrong type, a non-absolute
 root, an `allowPaths` entry that is not `$HOME`-relative, or a pattern that does
 not compile all abort startup. Patterns are compiled at load time because the
+| `permissionReview.backend`  | `jev` (default, Jev through OpenCode Zen), `opencode` (a model OpenCode can reach; OpenCode 2.2.5 or later) or `endpoint` (an OpenAI-compatible server). See [Backends](docs/permission-review.md#backends) |
+| `permissionReview.opencode` | `{ "model": "provider/model" }`, optionally `#variant`; required with backend `opencode` and rejected otherwise |
+| `permissionReview.endpoint` | `{ "baseURL", "model", "apiKeyFile", "deadlineMs" }`; HTTPS, or HTTP on loopback only; required with backend `endpoint` and rejected otherwise |
 matcher treats an uncompilable pattern as "no match" — an unvalidated typo in a
 deny pattern would otherwise silently stop guarding.
 
