@@ -84,29 +84,32 @@ export const PERMISSION_REVIEW_BACKENDS: readonly PermissionReviewBackend[] = ["
 /**
  * How a backend asks its model. "decisions" asks a decision model for one
  * probability per question. "text" asks a chat model to write the answers
- * object itself.
+ * object itself. "systemone" posts the System One request that Jev takes.
  */
-export type ReviewApi = "decisions" | "text";
+export type OpencodeReviewApi = "decisions" | "text";
+export type EndpointReviewApi = "systemone" | "decisions" | "text";
+export type ReviewApi = OpencodeReviewApi | EndpointReviewApi;
 
-export const REVIEW_APIS: readonly ReviewApi[] = ["decisions", "text"];
+export const OPENCODE_REVIEW_APIS: readonly OpencodeReviewApi[] = ["decisions", "text"];
+export const ENDPOINT_REVIEW_APIS: readonly EndpointReviewApi[] = ["systemone", "decisions", "text"];
 
 export interface OpencodeReviewSettings {
   /** A model OpenCode can reach, as `provider/model` with an optional `#variant`. */
   model: string;
   /** "decisions" by default; "text" for a chat model. */
-  api: ReviewApi;
+  api: OpencodeReviewApi;
   deadlineMs: number;
 }
 
 export interface EndpointReviewSettings {
-  /** An OpenAI-compatible base URL: HTTPS, or HTTP on a loopback host. */
+  /** A base URL ending before the API path: HTTPS, or HTTP on a loopback host. */
   baseURL: string;
   model: string;
   /** A file that holds the key, or null when the server needs none. Never the key itself. */
   apiKeyFile: string | null;
   deadlineMs: number;
-  /** "text" (`/chat/completions`) by default; "decisions" for `/decisions`. */
-  api: ReviewApi;
+  /** "text" (`/chat/completions`) by default; "decisions" for `/decisions`; "systemone" for `/systemone`. */
+  api: EndpointReviewApi;
 }
 
 export interface PermissionReviewSettings {
@@ -398,12 +401,12 @@ function requireBlockKeys(record: Record<string, unknown>, key: string, fields: 
   }
 }
 
-function requireApi(value: unknown, key: string, fallback: ReviewApi, source: string): ReviewApi {
+function requireApi<Api extends ReviewApi>(value: unknown, key: string, allowed: readonly Api[], fallback: Api, source: string): Api {
   const api = value === undefined ? fallback : value;
-  if (!REVIEW_APIS.includes(api as ReviewApi)) {
-    throw configError(source, `"${key}.api" must be one of ${REVIEW_APIS.join(", ")}, not ${JSON.stringify(value)}`);
+  if (!allowed.includes(api as Api)) {
+    throw configError(source, `"${key}.api" must be one of ${allowed.join(", ")}, not ${JSON.stringify(value)}`);
   }
-  return api as ReviewApi;
+  return api as Api;
 }
 
 function requireDeadline(value: unknown, key: string, fallback: number, source: string): number {
@@ -427,7 +430,7 @@ function requireOpencodeReview(value: unknown, configVersion: number, source: st
   }
   return {
     model: record.model,
-    api: requireApi(record.api, key, "decisions", source),
+    api: requireApi(record.api, key, OPENCODE_REVIEW_APIS, "decisions", source),
     deadlineMs: requireDeadline(record.deadlineMs, key, OPENCODE_DEFAULT_DEADLINE_MS, source),
   };
 }
@@ -459,7 +462,7 @@ function requireEndpointReview(value: unknown, configVersion: number, source: st
     model: record.model,
     apiKeyFile,
     deadlineMs: requireDeadline(record.deadlineMs, key, ENDPOINT_DEFAULT_DEADLINE_MS, source),
-    api: requireApi(record.api, key, "text", source),
+    api: requireApi(record.api, key, ENDPOINT_REVIEW_APIS, "text", source),
   };
 }
 

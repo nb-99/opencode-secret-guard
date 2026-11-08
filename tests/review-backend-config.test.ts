@@ -70,6 +70,8 @@ describe("permission review API selection", () => {
       .toEqual({ ...OPENCODE, api: "text", deadlineMs: 25_000 });
     expect(withReview({ backend: "endpoint", endpoint: { ...ENDPOINT, api: "decisions" } }).permissionReview.endpoint)
       .toMatchObject({ api: "decisions" });
+    expect(withReview({ backend: "endpoint", endpoint: { ...ENDPOINT, api: "systemone" } }).permissionReview.endpoint)
+      .toMatchObject({ api: "systemone" });
   });
 
   test("loads a version 5 policy without the new keys, with the same defaults", () => {
@@ -82,13 +84,15 @@ describe("permission review API selection", () => {
     ["opencode.api", { backend: "opencode", opencode: { ...OPENCODE, api: "text" } }],
     ["opencode.deadlineMs", { backend: "opencode", opencode: { ...OPENCODE, deadlineMs: 5_000 } }],
     ["endpoint.api", { backend: "endpoint", endpoint: { ...ENDPOINT, api: "decisions" } }],
+    ["endpoint.api", { backend: "endpoint", endpoint: { ...ENDPOINT, api: "systemone" } }],
   ])("rejects %s in a version 5 policy", (key, review) => {
     expect(() => withVersion(5, review)).toThrow(`"permissionReview.${key}" requires configVersion 6 or later`);
   });
 
   test.each([
     ["an unknown opencode API", { backend: "opencode", opencode: { ...OPENCODE, api: "chat" } }, /"permissionReview.opencode.api" must be one of decisions, text, not "chat"/],
-    ["a null endpoint API", { backend: "endpoint", endpoint: { ...ENDPOINT, api: null } }, /"permissionReview.endpoint.api" must be one of decisions, text, not null/],
+    ["the System One API for opencode", { backend: "opencode", opencode: { ...OPENCODE, api: "systemone" } }, /"permissionReview.opencode.api" must be one of decisions, text, not "systemone"/],
+    ["a null endpoint API", { backend: "endpoint", endpoint: { ...ENDPOINT, api: null } }, /"permissionReview.endpoint.api" must be one of systemone, decisions, text, not null/],
     ["an opencode deadline above 30 seconds", { backend: "opencode", opencode: { ...OPENCODE, deadlineMs: 30_001 } }, /"permissionReview.opencode.deadlineMs" must be a whole number from 1 to 30000/],
     ["a fractional opencode deadline", { backend: "opencode", opencode: { ...OPENCODE, deadlineMs: 1.5 } }, /"permissionReview.opencode.deadlineMs"/],
     ["a zero opencode deadline", { backend: "opencode", opencode: { ...OPENCODE, deadlineMs: 0 } }, /"permissionReview.opencode.deadlineMs"/],

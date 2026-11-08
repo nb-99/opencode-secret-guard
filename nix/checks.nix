@@ -272,6 +272,13 @@ in
           };
         };
       };
+      endpointSystemOne = evaluate {
+        permissionReview = endpointReview // {
+          endpoint = endpointReview.endpoint // {
+            api = "systemone";
+          };
+        };
+      };
       opencodeText = evaluate {
         permissionReview = {
           mode = "auto";
@@ -287,6 +294,7 @@ in
     assert !failed plain;
     assert !failed endpoint;
     assert !failed endpointDecisions;
+    assert !failed endpointSystemOne;
     assert !failed opencodeText;
     assert failed (evaluate {
       permissionReview.backend = "opencode";
@@ -331,6 +339,7 @@ in
         });
         assert(review("${policyOf endpoint}") === endpoint("text"), "endpoint review settings not written");
         assert(review("${policyOf endpointDecisions}") === endpoint("decisions"), "endpoint decisions API not written");
+        assert(review("${policyOf endpointSystemOne}") === endpoint("systemone"), "endpoint System One API not written");
         assert(review("${policyOf opencodeText}") === JSON.stringify({
           mode: "auto", logPayloads: false, confidenceThreshold: 0.9, backend: "opencode",
           opencode: { model: "github-copilot/gpt-6-luna#low", api: "text", deadlineMs: 15000 },

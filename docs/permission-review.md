@@ -91,7 +91,7 @@ This fragment shows only the relevant keys; merge it into your existing policy.
 | `confidenceThreshold` | `0.9`   | A number above 0.5 and at most 1; see [How a request is approved](#how-a-request-is-approved). |
 | `backend`             | `jev`   | `jev`, `opencode` or `endpoint`; see [Backends](#backends).             |
 | `opencode`            | none    | `{ "model", "api", "deadlineMs" }`. `model` is `provider/model` with an optional `#variant`. `api` is `decisions` (default, a decision model) or `text` (a chat model). `deadlineMs` defaults to 10000. Required with `backend` `opencode`, an error otherwise. |
-| `endpoint`            | none    | `{ "baseURL", "model", "apiKeyFile", "deadlineMs", "api" }`. `api` is `text` (default, `/chat/completions`) or `decisions` (`/decisions`). Required with `backend` `endpoint`, an error otherwise. |
+| `endpoint`            | none    | `{ "baseURL", "model", "apiKeyFile", "deadlineMs", "api" }`. `api` is `text` (default, `/chat/completions`), `decisions` (`/decisions`) or `systemone` (`/systemone`). Required with `backend` `endpoint`, an error otherwise. |
 
 Values are not coerced: `"true"` or `"0.9"` is a validation error. The guard
 reads the policy at startup, so restart OpenCode after a change.
@@ -432,7 +432,8 @@ programs.opencode-secret-guard.permissionReview = {
     baseURL = "http://127.0.0.1:11434/v1";
     model = "example-local-model";
     apiKeyFile = null;
-    # Optional; "decisions" posts to {baseURL}/decisions.
+    # Optional; "decisions" posts to {baseURL}/decisions, "systemone" to
+    # {baseURL}/systemone.
     api = "text";
   };
 };
@@ -467,7 +468,7 @@ The `opencode` and `endpoint` blocks also select an `api`.
 | --------- | ---- | --- | ------------ |
 | `jev` (default) | `https://opencode.ai/zen/v1/systemone`, model `jev-1.13-free`, through the runtime's `fetch`. Neither is configurable. | The OpenCode API key you saved for the `opencode` provider, read through the plugin integration API. The plugin stores no key. | OpenCode Zen. |
 | `opencode` | `api` `decisions` (default): OpenCode's `experimental.generate.decisions`, with a decision model. `api` `text`: OpenCode's `generate.text`, with a chat model. | Your OpenCode connections. No extra key. | The provider of that model, as OpenCode routes it. |
-| `endpoint` | `api` `text` (default): `POST {baseURL}/chat/completions`, with a JSON-schema response format. `api` `decisions`: `POST {baseURL}/decisions`, the OpenAI Decisions API. | `apiKeyFile`: a file that holds the key, or `null` when the server needs none. | The host in `baseURL`. A loopback host keeps the data on this machine. |
+| `endpoint` | `api` `text` (default): `POST {baseURL}/chat/completions`, with a JSON-schema response format. `api` `decisions`: `POST {baseURL}/decisions`, the OpenAI Decisions API. `api` `systemone`: `POST {baseURL}/systemone`, the System One API. | `apiKeyFile`: a file that holds the key, or `null` when the server needs none. | The host in `baseURL`. A loopback host keeps the data on this machine. |
 
 - `jev`: the same request, questions and answer contract as before this option existed.
   The saved key is resolved before the session's messages are read.
@@ -511,6 +512,15 @@ The `opencode` and `endpoint` blocks also select an `api`.
     at `{baseURL}/decisions`. The plugin sends the evidence as JSON input and
     asks four predicate questions, as for `opencode` with `decisions`. A refusal
     answer fails closed with `decision-error`.
+  - With `api` `systemone`, the server must provide the System One API at
+    `{baseURL}/systemone`. The plugin sends the same request as the `jev`
+    backend, with `model` from the block, and expects the same answer object.
+    This fits TypeSafe (`https://api.typesafe.ai/v1`, model `jev-latest`, your
+    TypeSafe key) and local decision-model servers that offer `/v1/systemone`,
+    such as Ollama, llama.cpp's `llama-server` or vLLM. The questions carry
+    `instructions` as a JSON object and Noul `criteria`; check that the server
+    accepts both. Local models are not Jev, and their scores need their own
+    threshold checks.
 
 ```json
 {

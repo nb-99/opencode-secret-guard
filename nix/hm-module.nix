@@ -345,13 +345,16 @@ in
               };
               api = mkOption {
                 type = types.enum [
+                  "systemone"
                   "decisions"
                   "text"
                 ];
                 default = "text";
                 description = ''
                   `text` posts to `{baseURL}/chat/completions`. `decisions` posts to
-                  `{baseURL}/decisions`, the OpenAI Decisions API.
+                  `{baseURL}/decisions`, the OpenAI Decisions API. `systemone` posts
+                  to `{baseURL}/systemone`, the System One API that Jev and local
+                  decision-model servers use.
                 '';
               };
             };

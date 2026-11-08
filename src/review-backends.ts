@@ -6,7 +6,7 @@
  */
 import * as fs from "node:fs";
 import { z } from "zod";
-import type { EndpointReviewSettings, OpencodeReviewSettings, PermissionReviewSettings, ReviewApi } from "./policy.ts";
+import type { EndpointReviewApi, EndpointReviewSettings, OpencodeReviewSettings, PermissionReviewSettings, ReviewApi } from "./policy.ts";
 import type { ReviewRecord } from "./review-log.ts";
 
 export const SYSTEM_ONE_ENDPOINT = "https://opencode.ai/zen/v1/systemone";
@@ -220,13 +220,16 @@ function parseAnswers(text: string): ReviewAnswers {
   return result.data.answers;
 }
 
+/** The System One request: the state and the questions as Jev takes them. */
+const systemOneRequest = (model: string, request: ReviewRequest) => ({ model, state: request.state, questions: request.questions });
+
 function systemOneBackend(host: ReviewHost): ReviewBackend {
   return {
     model: SYSTEM_ONE_MODEL,
     async prepare(signal) {
       const key = await host.apiKey(signal);
       return async (request, call) => {
-        const body = JSON.stringify({ model: SYSTEM_ONE_MODEL, state: request.state, questions: request.questions });
+        const body = JSON.stringify(systemOneRequest(SYSTEM_ONE_MODEL, request));
         if (Buffer.byteLength(body) > MAX_REQUEST_BYTES) throw new Ineligible("request-oversize");
         // The key travels only in the header; an exact copy in a body, raw or
         // JSON-escaped, is still removed. Other encodings are not.
@@ -471,18 +474,28 @@ async function readKey(file: string, signal: AbortSignal): Promise<string> {
   return key;
 }
 
+const ENDPOINT_PATHS: Readonly<Record<EndpointReviewApi, string>> = {
+  systemone: "systemone",
+  decisions: "decisions",
+  text: "chat/completions",
+};
+
+const endpointRequest = (api: EndpointReviewApi, model: string, request: ReviewRequest) =>
+  api === "systemone" ? systemOneRequest(model, request) : api === "decisions" ? decisionsRequest(model, request) : chatRequest(model, request);
+
 function endpointBackend(settings: EndpointReviewSettings, host: ReviewHost): ReviewBackend {
   const base = settings.baseURL.replace(/\/+$/, "");
   const label = new URL(settings.baseURL).host;
-  const api: ReviewApi = settings.api === "decisions" ? "decisions" : "text";
-  const url = `${base}/${api === "decisions" ? "decisions" : "chat/completions"}`;
+  // Settings built without the policy reader can lack `api`.
+  const api: EndpointReviewApi = settings.api ?? "text";
+  const url = `${base}/${ENDPOINT_PATHS[api]}`;
   return {
     model: settings.model,
     api,
     async prepare(signal) {
       const key = settings.apiKeyFile === null ? undefined : await readKey(settings.apiKeyFile, signal);
       return async (request, call) => {
-        const body = JSON.stringify(api === "decisions" ? decisionsRequest(settings.model, request) : chatRequest(settings.model, request));
+        const body = JSON.stringify(endpointRequest(api, settings.model, request));
         if (Buffer.byteLength(body) > MAX_REQUEST_BYTES) throw new Ineligible("request-oversize");
         const headers: Record<string, string> = { "content-type": "application/json" };
         if (key !== undefined) headers.authorization = `Bearer ${key}`;
@@ -494,6 +507,8 @@ function endpointBackend(settings: EndpointReviewSettings, host: ReviewHost): Re
           call,
           key === undefined ? (value) => value : scrubber(key),
         );
+        // System One answers in the shape Jev returns.
+        if (api === "systemone") return parseAnswers(text);
         let envelope: unknown;
         try {
           envelope = JSON.parse(text);

@@ -2986,6 +2986,61 @@ describe("endpoint backend with the decisions API", () => {
   });
 });
 
+describe("endpoint backend with the System One API", () => {
+  const SYSTEM_ONE = {
+    backend: "endpoint",
+    endpoint: { baseURL: "http://127.0.0.1:11434/v1/", model: "nimble", apiKeyFile: null, deadlineMs: 20_000, api: "systemone" },
+  } as const;
+
+  test("posts the same request as the jev backend to /systemone", async () => {
+    const jev = await started("auto");
+    await reviewed(jev);
+    const fake = await started("auto", { fetch: async () => response(200, answerBody(APPROVE)) }, {}, SYSTEM_ONE);
+    expect((await reviewed(fake)).effect).toBe("allow");
+    const { url, init } = fake.requests[0]!;
+    expect(url).toBe("http://127.0.0.1:11434/v1/systemone");
+    expect(init.redirect).toBe("error");
+    expect(init.headers).toEqual({ "content-type": "application/json" });
+    const body = JSON.parse(init.body);
+    const expected = JSON.parse(jev.requests[0]!.init.body);
+    expect(body).toEqual({ ...expected, model: "nimble" });
+    expect(Object.values(body.questions).every((question: any) => question.type === "noul")).toBe(true);
+    expect(fake.records[0]).toMatchObject({ event: "start", backend: "endpoint", api: "systemone", model: "nimble" });
+  });
+
+  test.each([
+    ["a missing answer", JSON.stringify({ model: "nimble", answers: { explicitly_authorized: { type: "noul", noul: 0.9 } } })],
+    ["a choice answer", answerBody(APPROVE).replace('"type":"noul"', '"type":"choice"')],
+    ["an answer array", JSON.stringify({ model: "nimble", answers: [{ type: "noul", noul: 0.9 }] })],
+  ])("rejects %s with response-shape", async (_, text) => {
+    const fake = await started("auto", { fetch: async () => response(200, text) }, {}, SYSTEM_ONE);
+    expect((await reviewed(fake)).effect).toBe("ask");
+    expect(reviewRecord(fake)).toMatchObject({ reason: "response-shape" });
+  });
+
+  test("rejects a reply that is not JSON", async () => {
+    const fake = await started("auto", { fetch: async () => response(200, "ok") }, {}, SYSTEM_ONE);
+    expect((await reviewed(fake)).effect).toBe("ask");
+    expect(reviewRecord(fake)).toMatchObject({ reason: "response-json" });
+  });
+
+  test("sends the key from its file and keeps it out of every log", async () => {
+    const keyFile = path.join(fs.mkdtempSync(path.join(fixture, "systemone-")), "key");
+    fs.writeFileSync(keyFile, "systemone-secret-value\n");
+    const fake = await started(
+      "auto",
+      { fetch: async () => response(200, answerBody(APPROVE)) },
+      {},
+      { ...SYSTEM_ONE, logPayloads: true, endpoint: { ...SYSTEM_ONE.endpoint, baseURL: "https://api.typesafe.ai/v1", model: "jev-latest", apiKeyFile: keyFile } },
+    );
+    expect((await reviewed(fake)).effect).toBe("allow");
+    expect(fake.requests[0]!.url).toBe("https://api.typesafe.ai/v1/systemone");
+    expect(fake.requests[0]!.init.headers.authorization).toBe("Bearer systemone-secret-value");
+    expect(fake.payloads).toContainEqual(expect.objectContaining({ phase: "request", endpoint: "api.typesafe.ai" }));
+    expect(JSON.stringify([fake.records, fake.payloads, fake.lines])).not.toContain("systemone-secret-value");
+  });
+});
+
 describe("backend API defaults", () => {
   test("an opencode block without api uses the decision API", async () => {
     const calls: string[] = [];
