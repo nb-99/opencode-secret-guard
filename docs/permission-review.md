@@ -6,7 +6,7 @@ The secret guard decides deterministically what a command or file tool may
 touch. Permission review is a separate, optional step: when OpenCode V2 is
 about to show you an `ask` prompt, the plugin can send that one request to a
 model and approve it automatically. The default model is Jev (TypeSafe System
-One). You can also choose another decision model through OpenCode, or an
+One). You can also choose a decision or chat model through OpenCode, or an
 OpenAI-compatible endpoint; see [Backends](#backends). The model answers four narrow questions, and code
 combines the answers (see [How a request is approved](#how-a-request-is-approved)).
 Anything else still reaches you as a normal prompt.
@@ -27,9 +27,9 @@ Anything else still reaches you as a normal prompt.
   `ask` explicitly. There is no per-rule exclusion. A deterministic deny is
   still final.
 - In both `observe` and `auto`, the prompt waits for the review, up to the
-  backend's deadline: 10 seconds, or `deadlineMs` for `endpoint`. `observe` is synchronous on purpose.
+  backend's deadline: 10 seconds for `jev`, or `deadlineMs` for `opencode` and `endpoint`. `observe` is synchronous on purpose.
 - It requires OpenCode V2.0.20 or later. The `opencode` backend requires
-  2.2.5 or later ([Backends](#backends)). The V2 plugin and credential
+  2.2.5 or later; its `text` API was checked against 2.2.6 ([Backends](#backends)). The V2 plugin and credential
   contracts it relies on were checked against the 2.0.20 and 2.0.23 source
   ([details](v2-migration.md#permission-review-dependencies)). The TUI contracts
   described below were checked against the V2.1.4 source.
@@ -62,7 +62,8 @@ Anything else still reaches you as a normal prompt.
 
 ## Configuration
 
-`permissionReview` requires `configVersion` 5. Its keys are `mode`,
+`permissionReview` requires `configVersion` 5 or later. The `api` keys and
+`opencode.deadlineMs` require `configVersion` 6. Its keys are `mode`,
 `logPayloads`, `confidenceThreshold`, `backend`, `opencode` and `endpoint`;
 each is optional. `backend` defaults to `jev`. Without `permissionReview` the
 mode is `off`. An invalid `permissionReview` is
@@ -72,7 +73,7 @@ failed call, only leave the normal prompt.
 
 ```json
 {
-  "configVersion": 5,
+  "configVersion": 6,
   "permissionReview": {
     "mode": "observe",
     "logPayloads": false,
@@ -89,8 +90,8 @@ This fragment shows only the relevant keys; merge it into your existing policy.
 | `logPayloads`         | `false` | `true` also writes every request and response body to the [payload log](#payload-log). |
 | `confidenceThreshold` | `0.9`   | A number above 0.5 and at most 1; see [How a request is approved](#how-a-request-is-approved). |
 | `backend`             | `jev`   | `jev`, `opencode` or `endpoint`; see [Backends](#backends).             |
-| `opencode`            | none    | `{ "model": "provider/model" }` with an optional `#variant`. The model must be an OpenCode decision model, not a chat model. Required with `backend` `opencode`, an error otherwise. |
-| `endpoint`            | none    | `{ "baseURL", "model", "apiKeyFile", "deadlineMs" }`. Required with `backend` `endpoint`, an error otherwise. |
+| `opencode`            | none    | `{ "model", "api", "deadlineMs" }`. `model` is `provider/model` with an optional `#variant`. `api` is `decisions` (default, a decision model) or `text` (a chat model). `deadlineMs` defaults to 10000. Required with `backend` `opencode`, an error otherwise. |
+| `endpoint`            | none    | `{ "baseURL", "model", "apiKeyFile", "deadlineMs", "api" }`. `api` is `text` (default, `/chat/completions`) or `decisions` (`/decisions`). Required with `backend` `endpoint`, an error otherwise. |
 
 Values are not coerced: `"true"` or `"0.9"` is a validation error. The guard
 reads the policy at startup, so restart OpenCode after a change.
@@ -337,7 +338,8 @@ tail -n 20 "$log" | jq -c '{time, mode, proposed, applied, reason, modelCalled, 
 
 Records have one of three `event` values:
 
-- `start`: `time`, `pid`, `mode`, `backend`, `model`, `threshold` and `logPayloads`.
+- `start`: `time`, `pid`, `mode`, `backend`, `model`, `threshold` and `logPayloads`,
+  plus `api` for `opencode` and `endpoint`.
 - `review`: also `action`, `proposed` (the model's verdict from a valid judgment,
   otherwise `ask`), `applied` (the effect when the reviewer's hook returned; a later
   plugin can still change it, so this is not a record of what ran),
@@ -403,14 +405,14 @@ visible only as described above.
 | `auth-unsupported`   | Defensive: this OpenCode does not expose saved credentials to plugins. V2.0.20 does. |
 | `key-unreadable`    | `endpoint` backend: the `apiKeyFile` cannot be read. Check the path and its permissions. |
 | `key-empty`         | `endpoint` backend: the `apiKeyFile` is empty. Write the key to it. |
-| `opencode-unsupported` | `opencode` backend: this OpenCode has no `experimental.generate.decisions`. Use OpenCode 2.2.5 or later, or another backend. |
-| `opencode-model-unsupported` | `opencode` backend: the model exists but is not a decision model, for example a chat model. Choose a decision model; see [Backends](#backends). |
+| `opencode-unsupported` | `opencode` backend: this OpenCode does not have the call for `opencode.api`: `experimental.generate.decisions` or `generate.text`. Use a newer OpenCode, or another backend. |
+| `opencode-model-unsupported` | `opencode` backend: the model does not fit `opencode.api`, for example a chat model with `decisions` or a decision model with `text`. See [Backends](#backends). |
 | `opencode-model-not-found` | `opencode` backend: OpenCode has no enabled model or provider with that name. |
 | `opencode-invalid-request` | `opencode` backend: OpenCode rejected the request, for example an unknown `#variant`. |
 | `opencode-unavailable` | `opencode` backend: OpenCode cannot generate now, for example because the provider's credentials are missing. |
 | `opencode-provider-<reason>` | `opencode` backend: the provider failed the request. `<reason>` is `authentication`, `rate-limit`, `content-filter`, `invalid-request`, `overloaded` or `provider`. |
 | `opencode-error`    | `opencode` backend: any other generation failure. |
-| `decision-error`    | `opencode` backend: the model returned an error answer for one question. |
+| `decision-error`    | `decisions` API: the model returned an error or refusal answer for one question. |
 
 Use `observe` to record judgments without applying approvals. Use `auto` to
 apply judgments that pass every approval check. Both modes use the same scope
@@ -430,6 +432,21 @@ programs.opencode-secret-guard.permissionReview = {
     baseURL = "http://127.0.0.1:11434/v1";
     model = "example-local-model";
     apiKeyFile = null;
+    # Optional; "decisions" posts to {baseURL}/decisions.
+    api = "text";
+  };
+};
+```
+
+A chat model through OpenCode instead:
+
+```nix
+programs.opencode-secret-guard.permissionReview = {
+  mode = "observe";
+  backend = "opencode";
+  opencode = {
+    model = "github-copilot/gpt-6-luna#low";
+    api = "text";
   };
 };
 ```
@@ -444,12 +461,13 @@ world-readable Nix store.
 ## Backends
 
 `backend` selects the model call. One backend runs per configuration.
+The `opencode` and `endpoint` blocks also select an `api`.
 
 | `backend` | Call | Key | Data goes to |
 | --------- | ---- | --- | ------------ |
 | `jev` (default) | `https://opencode.ai/zen/v1/systemone`, model `jev-1.13-free`, through the runtime's `fetch`. Neither is configurable. | The OpenCode API key you saved for the `opencode` provider, read through the plugin integration API. The plugin stores no key. | OpenCode Zen. |
-| `opencode` | OpenCode's `experimental.generate.decisions`, with the decision model in `opencode.model`. | Your OpenCode connections. No extra key. | The provider of that model, as OpenCode routes it. |
-| `endpoint` | `POST {baseURL}/chat/completions`, with a JSON-schema response format. | `apiKeyFile`: a file that holds the key, or `null` when the server needs none. | The host in `baseURL`. A loopback host keeps the data on this machine. |
+| `opencode` | `api` `decisions` (default): OpenCode's `experimental.generate.decisions`, with a decision model. `api` `text`: OpenCode's `generate.text`, with a chat model. | Your OpenCode connections. No extra key. | The provider of that model, as OpenCode routes it. |
+| `endpoint` | `api` `text` (default): `POST {baseURL}/chat/completions`, with a JSON-schema response format. `api` `decisions`: `POST {baseURL}/decisions`, the OpenAI Decisions API. | `apiKeyFile`: a file that holds the key, or `null` when the server needs none. | The host in `baseURL`. A loopback host keeps the data on this machine. |
 
 - `jev`: the same request, questions and answer contract as before this option existed.
   The saved key is resolved before the session's messages are read.
@@ -458,28 +476,45 @@ world-readable Nix store.
   Jev is currently offered free on OpenCode Zen; that offer may end, in which case
   review fails and prompts return. There is no paid fallback. See the
   [Jev model documentation](https://opencode.ai/v2/docs/console/models#jev).
-- `opencode`: needs OpenCode 2.2.5 or later, which provides `experimental.generate.decisions`.
-  On an older host each `ask` stays a prompt with reason `opencode-unsupported`.
-  The call accepts only decision models. Chat models, such as the ones you use
-  in sessions, fail with `opencode-model-unsupported`. List the decision models
-  that your connections provide with `opencode api model.list --param types=decision`.
-  With an OpenCode Zen key, `opencode/jev-1.13-free` is one; `opencode/jev-1.13` is paid.
+- `opencode` with `api` `decisions`: needs OpenCode 2.2.5 or later, which
+  provides `experimental.generate.decisions`, and a decision model.
+  Chat models, such as the ones you use in sessions, fail with
+  `opencode-model-unsupported`. List the decision models that your connections
+  provide with `opencode api model.list --param types=decision`.
+  With an OpenCode Zen key, `opencode/jev-1.13-free` is free; `opencode/jev-1.13` is paid.
   The model gets the same evidence as Jev, asked as four predicate questions.
   Each answer is the probability that the question's statement holds, the same
-  yes-probability that Jev returns. OpenCode cannot cancel a generation, so an answer
+  yes-probability that Jev returns.
+- `opencode` with `api` `text`: works with any chat model that OpenCode can
+  reach, for example `github-copilot/gpt-6-luna#low`. List them with
+  `opencode models`. A decision model fails with `opencode-model-unsupported`.
+  The prompt holds the same instructions, evidence and answer format as the
+  `endpoint` text API. The reply must be only the answer object; one
+  surrounding Markdown code fence is allowed. Text-mode scores are numbers that
+  the chat model writes itself. They are less reliable than decision-model
+  probabilities and are not calibrated. A malformed reply keeps the prompt,
+  with `response-json` or `response-shape`.
+- `opencode`, both APIs: on a host without the call, each `ask` stays a prompt
+  with reason `opencode-unsupported`. `deadlineMs` is a whole number from 1 to
+  30000, and defaults to 10000. OpenCode cannot cancel a generation, so an answer
   that arrives after the deadline is ignored; the reason is `deadline`.
 - `endpoint`: `baseURL` must use HTTPS. HTTP is allowed only for `localhost`,
   `127.0.0.1` or `[::1]`. It must not contain credentials. `model` is the
   server's model name. `apiKeyFile` is an absolute path, or starts with `~`.
   The plugin reads it before each review and never logs it. `deadlineMs` is a
   whole number from 1 to 30000, and defaults to 20000, because a local model can need
-  longer than the 10-second default. The server must reply with the same
-  answer object that Jev returns, `{"answers": {"<question>": {"type": "noul", "noul": <probability>}}}`,
-  with no other text. Other replies fail closed with `response-json` or `response-shape`.
+  longer than the 10-second default.
+  - With `api` `text`, the server must reply with the same answer object that
+    Jev returns, `{"answers": {"<question>": {"type": "noul", "noul": <probability>}}}`,
+    with no other text. Other replies fail closed with `response-json` or `response-shape`.
+  - With `api` `decisions`, the server must provide the OpenAI Decisions API
+    at `{baseURL}/decisions`. The plugin sends the evidence as JSON input and
+    asks four predicate questions, as for `opencode` with `decisions`. A refusal
+    answer fails closed with `decision-error`.
 
 ```json
 {
-  "configVersion": 5,
+  "configVersion": 6,
   "permissionReview": {
     "mode": "observe",
     "backend": "endpoint",
@@ -487,7 +522,8 @@ world-readable Nix store.
       "baseURL": "http://127.0.0.1:11434/v1",
       "model": "example-local-model",
       "apiKeyFile": null,
-      "deadlineMs": 20000
+      "deadlineMs": 20000,
+      "api": "text"
     }
   }
 }
@@ -676,8 +712,8 @@ Besides any unmet approval condition, the reviewer leaves the prompt when:
 - Before reporting a proposed approval, the reviewer reads the session again.
   A changed location, user message, compaction entry or tool call invalidates
   that result. A finished tool call also invalidates it.
-- The whole review takes longer than its deadline: 10 seconds for `jev` and
-  `opencode`, or `deadlineMs` for `endpoint`. The call fails, or returns an
+- The whole review takes longer than its deadline: 10 seconds for `jev`, or
+  `deadlineMs` for `opencode` and `endpoint`. The call fails, or returns an
   unusable answer.
 - Two reviews are already running.
 
@@ -717,11 +753,14 @@ Each record has `event: "payload"`, `time`, `pid`, the `reviewID` of its
 
 - `request`: `endpoint` and `body`, the exact JSON sent. For `endpoint` the
   endpoint is the host and port only, never the path or credentials. For
-  `opencode` it is the generation call name and the body holds the same evidence
+  `opencode` it is the generation call name, `experimental.generate.decisions`
+  or `generate.text`, and the body is the call's input with the same evidence
   as the other backends. Written right
   before the call, so a review that never reaches the network, for example
   without a key, writes nothing.
-- `response`: `status`, `body` and `omitted`. The body is read only up to
+- `response`: `status`, `body` and `omitted`. For `opencode` the status is
+  always 200, and with `api` `text` the body is the model's reply text.
+  The body is read only up to
   the 64 kB response limit and the review deadline, for errors too.
   `omitted` is `null` for a complete body; otherwise `body` is empty and
   `omitted` says why: `oversize` (over the limit; no prefix is kept, so a
@@ -730,8 +769,8 @@ Each record has `event: "payload"`, `time`, `pid`, the `reviewID` of its
   below when the review ended while reading. The validation result is
   unchanged: an incomplete body still leaves the prompt.
 - `failure`: no response was received, or the success body could not be
-  read. `reason` is `network`, `response-read`, `deadline` (the 10-second
-  limit), `session-event`, `session-rejected`, `events-ended` or `unloaded` (the
+  read. `reason` is `network`, `response-read`, `deadline` (the review
+  deadline), `session-event`, `session-rejected`, `events-ended` or `unloaded` (the
   review was cancelled), or
   `request-aborted` for any other abort. For `jev` and `endpoint`, the error
   text is never kept. For `opencode`, a failed generation also writes a
