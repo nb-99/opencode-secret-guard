@@ -234,6 +234,48 @@ function modelRef(value: string): DecisionsInput["model"] {
   return hash === -1 ? ref : { ...ref, variant: value.slice(hash + 1) };
 }
 
+/** OpenCode's generation errors by tag, without the `Generate.` namespace. */
+const OPENCODE_ERROR_REASONS: Readonly<Record<string, string>> = {
+  UnsupportedModelError: "opencode-model-unsupported",
+  ModelNotFoundError: "opencode-model-not-found",
+  ProviderNotFoundError: "opencode-model-not-found",
+  InvalidRequestError: "opencode-invalid-request",
+  UnavailableError: "opencode-unavailable",
+  ServiceUnavailableError: "opencode-unavailable",
+};
+const PROVIDER_FAILURES = new Set(["authentication", "rate_limit", "content_filter", "invalid_request", "overloaded", "provider"]);
+const MAX_ERROR_TEXT = 2_000;
+
+const errorField = (error: unknown, key: string): unknown =>
+  typeof error === "object" && error !== null ? (error as Record<string, unknown>)[key] : undefined;
+
+/**
+ * A reason code for a failed generation. The decision log keeps codes only,
+ * so the tag maps to a fixed set and anything else stays `opencode-error`.
+ */
+export function opencodeErrorReason(error: unknown): string {
+  const tag = errorField(error, "_tag");
+  if (typeof tag !== "string") return "opencode-error";
+  const name = tag.slice(tag.lastIndexOf(".") + 1);
+  if (name === "ProviderRequestError") {
+    const failure = errorField(error, "reason");
+    return typeof failure === "string" && PROVIDER_FAILURES.has(failure)
+      ? `opencode-provider-${failure.replace("_", "-")}`
+      : "opencode-provider";
+  }
+  return OPENCODE_ERROR_REASONS[name] ?? "opencode-error";
+}
+
+/** The host's tag and message, for the opt-in payload log only. */
+function opencodeErrorText(error: unknown): string {
+  const tag = errorField(error, "_tag");
+  const message = error instanceof Error ? error.message : errorField(error, "message");
+  const text = [typeof tag === "string" ? tag : undefined, typeof message === "string" ? message : undefined]
+    .filter((part) => part !== undefined)
+    .join(": ");
+  return (text || String(error)).slice(0, MAX_ERROR_TEXT);
+}
+
 /** A predicate asks for the probability that its statement is true. */
 const statement = (question: ReviewQuestion) =>
   [...Object.entries(question.instructions).map(([key, text]) => `${key}: ${text}`), `Statement: ${question.criteria.true}`].join(
@@ -286,8 +328,10 @@ function opencodeBackend(settings: OpencodeReviewSettings, host: ReviewHost): Re
         const result = await within(
           Promise.resolve()
             .then(() => decisions(input))
-            .catch(() => {
-              throw new Ineligible("opencode-error");
+            .catch((error: unknown) => {
+              const reason = opencodeErrorReason(error);
+              call.trace?.({ phase: "failure", reason, error: opencodeErrorText(error) });
+              throw new Ineligible(reason);
             }),
           call.signal,
         );

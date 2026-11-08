@@ -6,8 +6,8 @@ The secret guard decides deterministically what a command or file tool may
 touch. Permission review is a separate, optional step: when OpenCode V2 is
 about to show you an `ask` prompt, the plugin can send that one request to a
 model and approve it automatically. The default model is Jev (TypeSafe System
-One). You can also choose an OpenCode model or an OpenAI-compatible endpoint;
-see [Backends](#backends). The model answers four narrow questions, and code
+One). You can also choose another decision model through OpenCode, or an
+OpenAI-compatible endpoint; see [Backends](#backends). The model answers four narrow questions, and code
 combines the answers (see [How a request is approved](#how-a-request-is-approved)).
 Anything else still reaches you as a normal prompt.
 
@@ -89,7 +89,7 @@ This fragment shows only the relevant keys; merge it into your existing policy.
 | `logPayloads`         | `false` | `true` also writes every request and response body to the [payload log](#payload-log). |
 | `confidenceThreshold` | `0.9`   | A number above 0.5 and at most 1; see [How a request is approved](#how-a-request-is-approved). |
 | `backend`             | `jev`   | `jev`, `opencode` or `endpoint`; see [Backends](#backends).             |
-| `opencode`            | none    | `{ "model": "provider/model" }` with an optional `#variant`. Required with `backend` `opencode`, an error otherwise. |
+| `opencode`            | none    | `{ "model": "provider/model" }` with an optional `#variant`. The model must be an OpenCode decision model, not a chat model. Required with `backend` `opencode`, an error otherwise. |
 | `endpoint`            | none    | `{ "baseURL", "model", "apiKeyFile", "deadlineMs" }`. Required with `backend` `endpoint`, an error otherwise. |
 
 Values are not coerced: `"true"` or `"0.9"` is a validation error. The guard
@@ -404,7 +404,12 @@ visible only as described above.
 | `key-unreadable`    | `endpoint` backend: the `apiKeyFile` cannot be read. Check the path and its permissions. |
 | `key-empty`         | `endpoint` backend: the `apiKeyFile` is empty. Write the key to it. |
 | `opencode-unsupported` | `opencode` backend: this OpenCode has no `experimental.generate.decisions`. Use OpenCode 2.2.5 or later, or another backend. |
-| `opencode-error`    | `opencode` backend: the generation call failed. |
+| `opencode-model-unsupported` | `opencode` backend: the model exists but is not a decision model, for example a chat model. Choose a decision model; see [Backends](#backends). |
+| `opencode-model-not-found` | `opencode` backend: OpenCode has no enabled model or provider with that name. |
+| `opencode-invalid-request` | `opencode` backend: OpenCode rejected the request, for example an unknown `#variant`. |
+| `opencode-unavailable` | `opencode` backend: OpenCode cannot generate now, for example because the provider's credentials are missing. |
+| `opencode-provider-<reason>` | `opencode` backend: the provider failed the request. `<reason>` is `authentication`, `rate-limit`, `content-filter`, `invalid-request`, `overloaded` or `provider`. |
+| `opencode-error`    | `opencode` backend: any other generation failure. |
 | `decision-error`    | `opencode` backend: the model returned an error answer for one question. |
 
 Use `observe` to record judgments without applying approvals. Use `auto` to
@@ -443,7 +448,7 @@ world-readable Nix store.
 | `backend` | Call | Key | Data goes to |
 | --------- | ---- | --- | ------------ |
 | `jev` (default) | `https://opencode.ai/zen/v1/systemone`, model `jev-1.13-free`, through the runtime's `fetch`. Neither is configurable. | The OpenCode API key you saved for the `opencode` provider, read through the plugin integration API. The plugin stores no key. | OpenCode Zen. |
-| `opencode` | OpenCode's `experimental.generate.decisions`, with the model in `opencode.model`. | Your OpenCode connections. No extra key. | The provider of that model, as OpenCode routes it. |
+| `opencode` | OpenCode's `experimental.generate.decisions`, with the decision model in `opencode.model`. | Your OpenCode connections. No extra key. | The provider of that model, as OpenCode routes it. |
 | `endpoint` | `POST {baseURL}/chat/completions`, with a JSON-schema response format. | `apiKeyFile`: a file that holds the key, or `null` when the server needs none. | The host in `baseURL`. A loopback host keeps the data on this machine. |
 
 - `jev`: the same request, questions and answer contract as before this option existed.
@@ -455,6 +460,10 @@ world-readable Nix store.
   [Jev model documentation](https://opencode.ai/v2/docs/console/models#jev).
 - `opencode`: needs OpenCode 2.2.5 or later, which provides `experimental.generate.decisions`.
   On an older host each `ask` stays a prompt with reason `opencode-unsupported`.
+  The call accepts only decision models. Chat models, such as the ones you use
+  in sessions, fail with `opencode-model-unsupported`. List the decision models
+  that your connections provide with `opencode api model.list --param types=decision`.
+  With an OpenCode Zen key, `opencode/jev-1.13-free` is one; `opencode/jev-1.13` is paid.
   The model gets the same evidence as Jev, asked as four predicate questions.
   Each answer is the probability that the question's statement holds, the same
   yes-probability that Jev returns. OpenCode cannot cancel a generation, so an answer
@@ -724,7 +733,11 @@ Each record has `event: "payload"`, `time`, `pid`, the `reviewID` of its
   read. `reason` is `network`, `response-read`, `deadline` (the 10-second
   limit), `session-event`, `session-rejected`, `events-ended` or `unloaded` (the
   review was cancelled), or
-  `request-aborted` for any other abort. The error text is never kept.
+  `request-aborted` for any other abort. For `jev` and `endpoint`, the error
+  text is never kept. For `opencode`, a failed generation also writes a
+  `failure` record with an `opencode-*` reason and `error`: OpenCode's error
+  tag and message, cut to 2,000 characters. The plugin never sees the provider
+  key, but the message can repeat provider text.
 
 The `authorization` header is never written. An exact copy of the API key in
 a body, raw or JSON-escaped, is replaced with `[redacted]`; other encodings

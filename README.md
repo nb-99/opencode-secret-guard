@@ -184,8 +184,8 @@ with a leading `~`, expanded at runtime, so a policy is portable between hosts.
 | `permissionReview.mode`     | `off` (default), `observe`, or `auto`; optional, approval-only model review of OpenCode V2 shell `ask` prompts; requires `configVersion` 5. See [docs/permission-review.md](docs/permission-review.md) |
 | `permissionReview.logPayloads` | `false` (default) or `true`; also logs review request and response bodies to a private local file |
 | `permissionReview.confidenceThreshold` | `0.9` (default); t above 0.5 and at most 1. Authorization and scope answers must reach t; confirmation and impact answers must stay at or below 1 − t. The scores are uncalibrated; see [docs/permission-review.md](docs/permission-review.md#how-a-request-is-approved) |
-| `permissionReview.backend`  | `jev` (default, Jev through OpenCode Zen), `opencode` (a model OpenCode can reach; OpenCode 2.2.5 or later) or `endpoint` (an OpenAI-compatible server). See [Backends](docs/permission-review.md#backends) |
-| `permissionReview.opencode` | `{ "model": "provider/model" }`, optionally `#variant`; required with backend `opencode` and rejected otherwise |
+| `permissionReview.backend`  | `jev` (default, Jev through OpenCode Zen), `opencode` (an OpenCode decision model; OpenCode 2.2.5 or later) or `endpoint` (an OpenAI-compatible server). See [Backends](docs/permission-review.md#backends) |
+| `permissionReview.opencode` | `{ "model": "provider/model" }`, optionally `#variant`; a decision model such as `opencode/jev-1.13-free`, not a chat model; required with backend `opencode` and rejected otherwise |
 | `permissionReview.endpoint` | `{ "baseURL", "model", "apiKeyFile", "deadlineMs" }`; HTTPS, or HTTP on loopback only; required with backend `endpoint` and rejected otherwise |
 
 Validation fails closed: an unsupported version, a wrong type, a non-absolute

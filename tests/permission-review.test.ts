@@ -2618,7 +2618,7 @@ describe("observe score warnings", () => {
 });
 
 describe("opencode backend", () => {
-  const OPENCODE = { backend: "opencode", opencode: { model: "github-copilot/gpt-6-luna#low" } } as const;
+  const OPENCODE = { backend: "opencode", opencode: { model: "opencode/jev-1.13-free" } } as const;
   const NEGATIVE: Answers = { explicitly_authorized: 0.97, confirmation_required: 0.02, high_impact: 0.97, within_scope: 0.96 };
   const predicates = (values: Answers, overrides: Record<string, unknown> = {}) => ({
     answers: Object.entries(values).map(([name, probability]) => ({
@@ -2635,7 +2635,7 @@ describe("opencode backend", () => {
     expect((await reviewed(fake)).effect).toBe("allow");
     expect(fake.requests).toHaveLength(0);
     const [input] = inputs;
-    expect(input.model).toEqual({ providerID: "github-copilot", id: "gpt-6-luna", variant: "low" });
+    expect(input.model).toEqual({ providerID: "opencode", id: "jev-1.13-free" });
     expect(input.input).toEqual([{ type: "json", value: expect.objectContaining({ pending_action: expect.anything() }) }]);
     expect(input.questions.map((question: any) => question.name).sort()).toEqual(Object.keys(REVIEW_QUESTIONS).sort());
     for (const question of input.questions) {
@@ -2648,6 +2648,42 @@ describe("opencode backend", () => {
     const fake = await started("auto", {}, {}, OPENCODE);
     expect((await reviewed(fake)).effect).toBe("ask");
     expect(fake.records.find((entry) => entry.event === "review")).toMatchObject({ reason: "opencode-unsupported", applied: "ask" });
+  });
+
+  test("passes a model variant separately", async () => {
+    const inputs: any[] = [];
+    const variant = { backend: "opencode", opencode: { model: "openai/decider#low" } } as const;
+    const fake = await started("auto", { decisions: async (input) => (inputs.push(input), predicates(APPROVE)) }, {}, variant);
+    await reviewed(fake);
+    expect(inputs[0].model).toEqual({ providerID: "openai", id: "decider", variant: "low" });
+  });
+
+  const hostError = (tag: string, message: string, fields: Record<string, unknown> = {}) =>
+    Object.assign(new Error(message), { _tag: tag, ...fields });
+
+  test.each([
+    [hostError("Generate.UnsupportedModelError", "github-copilot/gpt-6-luna is a chat model, not a decision model"), "opencode-model-unsupported"],
+    [hostError("Generate.ModelNotFoundError", "Model not found: opencode/missing"), "opencode-model-not-found"],
+    [hostError("Generate.InvalidRequestError", "Variant unavailable", { field: "model.variant" }), "opencode-invalid-request"],
+    [hostError("Generate.UnavailableError", "Generation credentials are unavailable"), "opencode-unavailable"],
+    [hostError("Generate.ProviderRequestError", "too many requests", { reason: "rate_limit", status: 429 }), "opencode-provider-rate-limit"],
+    [hostError("Generate.ProviderRequestError", "odd", { reason: "unexpected" }), "opencode-provider"],
+    [hostError("SchemaError", "Expected string"), "opencode-error"],
+    [new Error("plain failure"), "opencode-error"],
+  ])("records a reason code for a host failure: %#", async (error, reason) => {
+    const fake = await started("auto", { decisions: async () => { throw error; } }, {}, { ...OPENCODE, logPayloads: true });
+    expect((await reviewed(fake)).effect).toBe("ask");
+    expect(fake.records.find((entry) => entry.event === "review")).toMatchObject({ reason, applied: "ask" });
+    expect(JSON.stringify(fake.records)).not.toContain(error.message);
+    expect(fake.payloads).toContainEqual(expect.objectContaining({ phase: "failure", reason, error: expect.stringContaining(error.message) }));
+  });
+
+  test("keeps the host's error text out of the payload log when payload logging is off", async () => {
+    const error = hostError("Generate.UnsupportedModelError", "is a chat model, not a decision model");
+    const fake = await started("auto", { decisions: async () => { throw error; } }, {}, OPENCODE);
+    await reviewed(fake);
+    expect(fake.payloads).toHaveLength(0);
+    expect(JSON.stringify([fake.records, fake.lines])).not.toContain(error.message);
   });
 
   test("ignores an answer that arrives after the deadline", async () => {

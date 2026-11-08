@@ -267,7 +267,7 @@ in
       permissionReview.backend = "opencode";
     });
     assert failed (evaluate {
-      permissionReview.opencode.model = "github-copilot/gpt-6-luna";
+      permissionReview.opencode.model = "opencode/jev-1.13-free";
     });
     pkgs.runCommand "secret-guard-module" { nativeBuildInputs = [ pkgs.bun ]; } ''
       cp -r ${../src} src

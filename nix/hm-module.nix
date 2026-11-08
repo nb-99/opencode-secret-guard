@@ -283,8 +283,8 @@ in
           types.submodule {
             options.model = mkOption {
               type = types.str;
-              example = "github-copilot/gpt-6-luna#low";
-              description = "`provider/model`, with an optional `#variant`.";
+              example = "opencode/jev-1.13-free";
+              description = "An OpenCode decision model as `provider/model`, with an optional `#variant`. Chat models are rejected by OpenCode.";
             };
           }
         );
