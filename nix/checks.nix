@@ -247,28 +247,74 @@ in
           ];
         }).config;
       failed = config: lib.any (entry: !entry.assertion) config.assertions;
+      # Option type errors are thrown when the value is read, not asserted.
+      rejected =
+        guard:
+        !(builtins.tryEval (
+          builtins.deepSeq (evaluate guard).programs.opencode-secret-guard.permissionReview true
+        )).success;
       policyOf = config: config.programs.opencode-secret-guard.policyFile;
       plain = evaluate { };
-      endpoint = evaluate {
+      endpointReview = {
+        mode = "observe";
+        backend = "endpoint";
+        endpoint = {
+          baseURL = "http://127.0.0.1:11434/v1";
+          model = "local-judge";
+          apiKeyFile = "~/.config/secrets/judge";
+        };
+      };
+      endpoint = evaluate { permissionReview = endpointReview; };
+      endpointDecisions = evaluate {
+        permissionReview = endpointReview // {
+          endpoint = endpointReview.endpoint // {
+            api = "decisions";
+          };
+        };
+      };
+      opencodeText = evaluate {
         permissionReview = {
-          mode = "observe";
-          backend = "endpoint";
-          endpoint = {
-            baseURL = "http://127.0.0.1:11434/v1";
-            model = "local-judge";
-            apiKeyFile = "~/.config/secrets/judge";
+          mode = "auto";
+          backend = "opencode";
+          opencode = {
+            model = "github-copilot/gpt-6-luna#low";
+            api = "text";
+            deadlineMs = 15000;
           };
         };
       };
     in
     assert !failed plain;
     assert !failed endpoint;
+    assert !failed endpointDecisions;
+    assert !failed opencodeText;
     assert failed (evaluate {
       permissionReview.backend = "opencode";
     });
     assert failed (evaluate {
       permissionReview.opencode.model = "opencode/jev-1.13-free";
     });
+    assert
+      !rejected {
+        permissionReview = {
+          backend = "opencode";
+          opencode = {
+            model = "github-copilot/gpt-6-luna";
+            api = "text";
+            deadlineMs = 30000;
+          };
+        };
+      };
+    assert rejected {
+      permissionReview = {
+        backend = "opencode";
+        opencode = {
+          model = "github-copilot/gpt-6-luna";
+          api = "text";
+          deadlineMs = 30001;
+        };
+      };
+    };
     pkgs.runCommand "secret-guard-module" { nativeBuildInputs = [ pkgs.bun ]; } ''
       cp -r ${../src} src
       bun -e '
@@ -278,11 +324,17 @@ in
         assert(review("${policyOf plain}") ===
           JSON.stringify({ mode: "off", logPayloads: false, confidenceThreshold: 0.9, backend: "jev" }),
           "default review settings changed");
-        assert(review("${policyOf endpoint}") === JSON.stringify({
+        const endpoint = (api) => JSON.stringify({
           mode: "observe", logPayloads: false, confidenceThreshold: 0.9, backend: "endpoint",
           endpoint: { baseURL: "http://127.0.0.1:11434/v1", model: "local-judge",
-            apiKeyFile: "/home/example/.config/secrets/judge", deadlineMs: 20000 },
-        }), "endpoint review settings not written");
+            apiKeyFile: "/home/example/.config/secrets/judge", deadlineMs: 20000, api },
+        });
+        assert(review("${policyOf endpoint}") === endpoint("text"), "endpoint review settings not written");
+        assert(review("${policyOf endpointDecisions}") === endpoint("decisions"), "endpoint decisions API not written");
+        assert(review("${policyOf opencodeText}") === JSON.stringify({
+          mode: "auto", logPayloads: false, confidenceThreshold: 0.9, backend: "opencode",
+          opencode: { model: "github-copilot/gpt-6-luna#low", api: "text", deadlineMs: 15000 },
+        }), "opencode text API not written");
       '
       touch $out
     '';

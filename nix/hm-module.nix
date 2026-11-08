@@ -274,17 +274,40 @@ in
           `jev` uses Jev through OpenCode Zen and your saved OpenCode key.
           `opencode` uses a model OpenCode can reach (OpenCode 2.2.5 or later)
           and needs `opencode.model`. `endpoint` uses an OpenAI-compatible
-          server and needs the `endpoint` block.
+          server and needs the `endpoint` block. Both blocks select an `api`.
         '';
       };
 
       opencode = mkOption {
         type = types.nullOr (
           types.submodule {
-            options.model = mkOption {
-              type = types.str;
-              example = "opencode/jev-1.13-free";
-              description = "An OpenCode decision model as `provider/model`, with an optional `#variant`. Chat models are rejected by OpenCode.";
+            options = {
+              model = mkOption {
+                type = types.str;
+                example = "opencode/jev-1.13-free";
+                description = ''
+                  A model OpenCode can reach, as `provider/model`, with an optional
+                  `#variant`. A decision model, such as `opencode/jev-1.13-free`,
+                  for `api = "decisions"`; a chat model, such as
+                  `github-copilot/gpt-6-luna#low`, for `api = "text"`.
+                '';
+              };
+              api = mkOption {
+                type = types.enum [
+                  "decisions"
+                  "text"
+                ];
+                default = "decisions";
+                description = ''
+                  `decisions` asks a decision model for probabilities. `text` asks
+                  a chat model to write the scores itself; they are less reliable.
+                '';
+              };
+              deadlineMs = mkOption {
+                type = types.ints.between 1 30000;
+                default = 10000;
+                description = "Review deadline in milliseconds.";
+              };
             };
           }
         );
@@ -316,9 +339,20 @@ in
                 '';
               };
               deadlineMs = mkOption {
-                type = types.ints.positive;
+                type = types.ints.between 1 30000;
                 default = 20000;
-                description = "Review deadline, at most 30000.";
+                description = "Review deadline in milliseconds.";
+              };
+              api = mkOption {
+                type = types.enum [
+                  "decisions"
+                  "text"
+                ];
+                default = "text";
+                description = ''
+                  `text` posts to `{baseURL}/chat/completions`. `decisions` posts to
+                  `{baseURL}/decisions`, the OpenAI Decisions API.
+                '';
               };
             };
           }
