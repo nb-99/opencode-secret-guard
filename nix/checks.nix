@@ -162,19 +162,27 @@ in
           "/opt/homebrew/Cellar/opencode"
           "~/Applications/OpenCode.app"
         ];
-        settings.permissionReview.confidenceThreshold = 0.95;
+        permissionReview = {
+          confidenceThreshold = 0.95;
+          # The module passes unset blocks as null; they must not reach the policy.
+          opencode = null;
+        };
       };
       mergedFile = pkgs.writeText "merged-policy.json" (builtins.toJSON merged);
-      # A settings.mode would disagree with the shell the module wires up.
-      reservedRejected =
-        !(builtins.tryEval (mergePolicy {
-          defaultPolicy = builtins.fromJSON (builtins.readFile ../policy/default.json);
-          mode = "shell+files";
-          gitPath = "/usr/bin/git";
-          settings.mode = "files-only";
-        })).success;
+      # A settings value for a key with its own option would disagree with that option.
+      rejects =
+        settings:
+        !(builtins.tryEval (
+          builtins.toJSON (mergePolicy {
+            defaultPolicy = builtins.fromJSON (builtins.readFile ../policy/default.json);
+            mode = "shell+files";
+            gitPath = "/usr/bin/git";
+            inherit settings;
+          })
+        )).success;
     in
-    assert reservedRejected;
+    assert rejects { mode = "files-only"; };
+    assert rejects { permissionReview.mode = "auto"; };
     pkgs.runCommand "secret-guard-merge-policy" { nativeBuildInputs = [ pkgs.bun ]; } ''
       cp -r ${../src} src
       bun -e '
@@ -202,6 +210,79 @@ in
           "extra write-protected roots not appended or not expanded");
         const review = config.permissionReview;
         assert(review.mode === "off" && review.confidenceThreshold === 0.95 && review.logPayloads === false, "permissionReview settings not decoded");
+      '
+      touch $out
+    '';
+
+  # Evaluates the Home Manager module itself, with stubs for the two Home
+  # Manager options it sets, and loads the policy it writes. The merge check
+  # above cannot see option types or the module's assertions.
+  module =
+    let
+      inherit (pkgs) lib;
+      evaluate =
+        guard:
+        (lib.evalModules {
+          modules = [
+            (import ./hm-module.nix {
+              packages.${pkgs.stdenv.hostPlatform.system}.opencode-secret-guard = package;
+            })
+            {
+              options.assertions = lib.mkOption {
+                type = lib.types.listOf lib.types.attrs;
+                default = [ ];
+              };
+              options.xdg.configFile = lib.mkOption {
+                type = lib.types.attrsOf lib.types.anything;
+                default = { };
+              };
+              config._module.args.pkgs = pkgs;
+              # files-only, so the macOS assertion holds on every check platform.
+              config.programs.opencode-secret-guard = {
+                enable = true;
+                mode = "files-only";
+              }
+              // guard;
+            }
+          ];
+        }).config;
+      failed = config: lib.any (entry: !entry.assertion) config.assertions;
+      policyOf = config: config.programs.opencode-secret-guard.policyFile;
+      plain = evaluate { };
+      endpoint = evaluate {
+        permissionReview = {
+          mode = "observe";
+          backend = "endpoint";
+          endpoint = {
+            baseURL = "http://127.0.0.1:11434/v1";
+            model = "local-judge";
+            apiKeyFile = "~/.config/secrets/judge";
+          };
+        };
+      };
+    in
+    assert !failed plain;
+    assert !failed endpoint;
+    assert failed (evaluate {
+      permissionReview.backend = "opencode";
+    });
+    assert failed (evaluate {
+      permissionReview.opencode.model = "github-copilot/gpt-6-luna";
+    });
+    pkgs.runCommand "secret-guard-module" { nativeBuildInputs = [ pkgs.bun ]; } ''
+      cp -r ${../src} src
+      bun -e '
+        const { loadConfig } = await import("./src/policy.ts");
+        const assert = (ok, message) => { if (!ok) throw new Error(message); };
+        const review = (file) => JSON.stringify(loadConfig(file, "/home/example").permissionReview);
+        assert(review("${policyOf plain}") ===
+          JSON.stringify({ mode: "off", logPayloads: false, confidenceThreshold: 0.9, backend: "jev" }),
+          "default review settings changed");
+        assert(review("${policyOf endpoint}") === JSON.stringify({
+          mode: "observe", logPayloads: false, confidenceThreshold: 0.9, backend: "endpoint",
+          endpoint: { baseURL: "http://127.0.0.1:11434/v1", model: "local-judge",
+            apiKeyFile: "/home/example/.config/secrets/judge", deadlineMs: 20000 },
+        }), "endpoint review settings not written");
       '
       touch $out
     '';

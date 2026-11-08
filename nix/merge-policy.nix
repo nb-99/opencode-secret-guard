@@ -13,6 +13,8 @@
   removeSecretPrintingCommands ? [ ],
   extraRelaxationGroups ? { },
   extraWriteProtectedRoots ? [ ],
+  # The module's typed review settings; unset (null) blocks are left out.
+  permissionReview ? { },
   settings ? { },
 }:
 let
@@ -50,10 +52,10 @@ let
     }
     // group
   ) (lib.filterAttrs (name: _: !(defaultPolicy.relaxationGroups ? ${name})) extraRelaxationGroups);
-  # `mode` and `tools.git` have their own options, which the module validates
-  # and wires into OpenCode's shell setting; a `settings` value for either
-  # would silently disagree with what the module assumed.
-  reserved = lib.intersectLists [ "mode" "tools" ] (lib.attrNames settings);
+  # `mode`, `tools.git` and `permissionReview` have their own options, which the
+  # module validates and wires up; a `settings` value for any of them would
+  # silently disagree with what the module assumed.
+  reserved = lib.intersectLists [ "mode" "tools" "permissionReview" ] (lib.attrNames settings);
 in
 assert lib.assertMsg (reserved == [ ])
   "opencode-secret-guard: set ${lib.concatStringsSep ", " reserved} through the module option, not through settings";
@@ -72,4 +74,7 @@ defaultPolicy
   tools = defaultPolicy.tools // {
     git = gitPath;
   };
+  permissionReview =
+    (defaultPolicy.permissionReview or { })
+    // lib.filterAttrs (_: value: value != null) permissionReview;
 }

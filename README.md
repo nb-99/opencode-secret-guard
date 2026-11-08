@@ -91,6 +91,8 @@ in
       "/opt/homebrew/bin/opencode"
       "/Applications/OpenCode.app"
     ];
+    # Optional model review of V2 shell `ask` prompts; see docs/permission-review.md.
+    permissionReview.mode = "observe";
     # Whole-key overrides.
     settings = {
       denyRoots = [ "~/.config/secrets" ];
@@ -118,7 +120,9 @@ over values this module cannot see.
 default, so a host carries only its deltas. `removeSecretPrintingCommands` drops
 shipped refusal rules before the additions are appended, for a host that needs
 `sops -d` or a narrower `kubectl` rule without giving up the rest of the list.
-`settings` replaces a key wholesale. `gitPackage` (default `pkgs.git`) is the
+`settings` replaces a key wholesale, except `mode`, `tools` and
+`permissionReview`, which have their own options. `permissionReview` is typed,
+and its backend blocks are checked during evaluation. `gitPackage` (default `pkgs.git`) is the
 git the guard itself spawns, written as a store path.
 
 `shellPath` and `pluginPath` are **null when they do not apply** — `shellPath`
@@ -180,13 +184,13 @@ with a leading `~`, expanded at runtime, so a policy is portable between hosts.
 | `permissionReview.mode`     | `off` (default), `observe`, or `auto`; optional, approval-only model review of OpenCode V2 shell `ask` prompts; requires `configVersion` 5. See [docs/permission-review.md](docs/permission-review.md) |
 | `permissionReview.logPayloads` | `false` (default) or `true`; also logs review request and response bodies to a private local file |
 | `permissionReview.confidenceThreshold` | `0.9` (default); t above 0.5 and at most 1. Authorization and scope answers must reach t; confirmation and impact answers must stay at or below 1 − t. The scores are uncalibrated; see [docs/permission-review.md](docs/permission-review.md#how-a-request-is-approved) |
+| `permissionReview.backend`  | `jev` (default, Jev through OpenCode Zen), `opencode` (a model OpenCode can reach; OpenCode 2.2.5 or later) or `endpoint` (an OpenAI-compatible server). See [Backends](docs/permission-review.md#backends) |
+| `permissionReview.opencode` | `{ "model": "provider/model" }`, optionally `#variant`; required with backend `opencode` and rejected otherwise |
+| `permissionReview.endpoint` | `{ "baseURL", "model", "apiKeyFile", "deadlineMs" }`; HTTPS, or HTTP on loopback only; required with backend `endpoint` and rejected otherwise |
 
 Validation fails closed: an unsupported version, a wrong type, a non-absolute
 root, an `allowPaths` entry that is not `$HOME`-relative, or a pattern that does
 not compile all abort startup. Patterns are compiled at load time because the
-| `permissionReview.backend`  | `jev` (default, Jev through OpenCode Zen), `opencode` (a model OpenCode can reach; OpenCode 2.2.5 or later) or `endpoint` (an OpenAI-compatible server). See [Backends](docs/permission-review.md#backends) |
-| `permissionReview.opencode` | `{ "model": "provider/model" }`, optionally `#variant`; required with backend `opencode` and rejected otherwise |
-| `permissionReview.endpoint` | `{ "baseURL", "model", "apiKeyFile", "deadlineMs" }`; HTTPS, or HTTP on loopback only; required with backend `endpoint` and rejected otherwise |
 matcher treats an uncompilable pattern as "no match" — an unvalidated typo in a
 deny pattern would otherwise silently stop guarding.
 

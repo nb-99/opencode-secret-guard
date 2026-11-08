@@ -37,6 +37,7 @@ let
         removeSecretPrintingCommands
         extraRelaxationGroups
         extraWriteProtectedRoots
+        permissionReview
         settings
         ;
       # A store path, so the guard never resolves git through PATH.
@@ -91,8 +92,8 @@ in
       description = ''
         Policy keys that replace the shipped default wholesale, applied after
         the `extra*` additions are merged (so a key named here discards those
-        additions for that key). `mode` and `tools` are rejected here; use
-        their options. Roots may start with `~`, and `cleanupRoot` also with
+        additions for that key). `mode`, `tools` and `permissionReview` are
+        rejected here; use their options. Roots may start with `~`, and `cleanupRoot` also with
         `$TMPDIR`; the plugin expands both at runtime. Prefer the `extra*`
         options for additions, so upstream changes to the default still apply.
       '';
@@ -230,6 +231,103 @@ in
       '';
     };
 
+    # Types check structure only. The plugin validates values such as the URL
+    # and the model reference at startup, and refuses to start on an error.
+    permissionReview = {
+      mode = mkOption {
+        type = types.enum [
+          "off"
+          "observe"
+          "auto"
+        ];
+        default = "off";
+        description = ''
+          Optional review of OpenCode V2 shell `ask` prompts by a model.
+          `observe` reports a judgment and still asks you; `auto` may allow one
+          request once. Review never denies. See `docs/permission-review.md`.
+        '';
+      };
+
+      logPayloads = mkOption {
+        type = types.bool;
+        default = false;
+        description = "Also log review request and response bodies to a private local file.";
+      };
+
+      confidenceThreshold = mkOption {
+        type = types.number;
+        default = 0.9;
+        description = ''
+          Above 0.5 and at most 1. Authorization and scope answers must reach
+          it; confirmation and impact answers must stay at or below one minus it.
+        '';
+      };
+
+      backend = mkOption {
+        type = types.enum [
+          "jev"
+          "opencode"
+          "endpoint"
+        ];
+        default = "jev";
+        description = ''
+          `jev` uses Jev through OpenCode Zen and your saved OpenCode key.
+          `opencode` uses a model OpenCode can reach (OpenCode 2.2.5 or later)
+          and needs `opencode.model`. `endpoint` uses an OpenAI-compatible
+          server and needs the `endpoint` block.
+        '';
+      };
+
+      opencode = mkOption {
+        type = types.nullOr (
+          types.submodule {
+            options.model = mkOption {
+              type = types.str;
+              example = "github-copilot/gpt-6-luna#low";
+              description = "`provider/model`, with an optional `#variant`.";
+            };
+          }
+        );
+        default = null;
+        description = "Required when `backend` is `opencode`; must be unset otherwise.";
+      };
+
+      endpoint = mkOption {
+        type = types.nullOr (
+          types.submodule {
+            options = {
+              baseURL = mkOption {
+                type = types.str;
+                example = "http://127.0.0.1:11434/v1";
+                description = "HTTPS, or HTTP on `localhost`, `127.0.0.1` or `[::1]`, without credentials.";
+              };
+              model = mkOption {
+                type = types.str;
+                description = "The server's model name.";
+              };
+              apiKeyFile = mkOption {
+                type = types.nullOr types.str;
+                default = null;
+                example = "~/.config/secrets/review-key";
+                description = ''
+                  A file that holds the key, read by the plugin at runtime; null
+                  when the server needs none. A string, not a Nix path, so the key
+                  never enters the world-readable Nix store.
+                '';
+              };
+              deadlineMs = mkOption {
+                type = types.ints.positive;
+                default = 20000;
+                description = "Review deadline, at most 30000.";
+              };
+            };
+          }
+        );
+        default = null;
+        description = "Required when `backend` is `endpoint`; must be unset otherwise.";
+      };
+    };
+
     # Read-only outputs. The module deliberately does not write into
     # programs.opencode: consumers assemble their own opencode settings, and
     # reaching into another module's option tree invites merge conflicts over
@@ -287,7 +385,20 @@ in
           with the weaker file-tool layer alone.
         '';
       }
-    ];
+    ]
+    ++
+      map
+        (block: {
+          assertion = (cfg.permissionReview.backend == block) == (cfg.permissionReview.${block} != null);
+          message = ''
+            programs.opencode-secret-guard.permissionReview.${block} must be set
+            exactly when permissionReview.backend = "${block}".
+          '';
+        })
+        [
+          "opencode"
+          "endpoint"
+        ];
 
     # The plugin resolves this path at runtime, so no environment plumbing into
     # the OpenCode process is needed.

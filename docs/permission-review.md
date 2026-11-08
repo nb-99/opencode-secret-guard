@@ -411,19 +411,27 @@ Use `observe` to record judgments without applying approvals. Use `auto` to
 apply judgments that pass every approval check. Both modes use the same scope
 and score checks, including compacted and outside-project shell work.
 
-With Home Manager, set it through the existing `settings` option, which is
-written into the protected config file:
+With Home Manager, use the typed `permissionReview` option. The module writes
+it into the protected config file:
 
 ```nix
-programs.opencode-secret-guard.settings.permissionReview = {
+programs.opencode-secret-guard.permissionReview = {
   mode = "observe";
   logPayloads = false;
   confidenceThreshold = 0.9;
+  # Optional; the default is jev.
+  backend = "endpoint";
+  endpoint = {
+    baseURL = "http://127.0.0.1:11434/v1";
+    model = "example-local-model";
+    apiKeyFile = null;
+  };
 };
 ```
 
-`settings.permissionReview` replaces the whole object, so omitted keys take
-their defaults.
+Unset keys take their defaults. Set `opencode` or `endpoint` only together with
+the matching `backend`; evaluation fails otherwise. `settings.permissionReview`
+is rejected, so the option is the only source of these values.
 
 Do not put API keys or other secret literals in Nix: they would end up in the
 world-readable Nix store.
