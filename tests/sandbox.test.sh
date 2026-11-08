@@ -532,6 +532,69 @@ assert_untampered "symlinked policy" "$linked_policy"
 assert_untampered "the policy the link points at" "$policy_destination"
 expect_true "the policy link itself survives" test -L "$linked_policy"
 
+echo "== configured installation roots must be immutable from a command =="
+# A Homebrew-style install outside PATH's protected link directory: launcher
+# and opt links into a versioned keg, and an app bundle. The roots name the
+# stable keg, both links and the bundle, as a host configuration would.
+brew="$scratch/brew"
+keg="$brew/Cellar/tool"
+bundle="$scratch/Applications/Tool.app"
+mkdir -p "$keg/1.0/bin" "$brew/Cellar/other" "$brew/bin" "$brew/opt" "$bundle/Contents/Resources"
+printf '#!/bin/sh\necho %s\n' "$PUBLIC" > "$keg/1.0/bin/tool"
+chmod 755 "$keg/1.0/bin/tool"
+ln -s ../Cellar/tool/1.0/bin/tool "$brew/bin/tool"
+ln -s ../Cellar/tool/1.0 "$brew/opt/tool"
+printf '%s\n' "$PUBLIC" > "$bundle/Contents/Resources/app.asar"
+install_config="$scratch/install-policy.json"
+SG_SRC="$CONFIG" SG_DEST="$install_config" \
+  SG_ROOTS="$keg:$brew/opt/tool:$brew/bin/tool:$bundle" bun -e '
+  const fs = require("node:fs");
+  const policy = JSON.parse(fs.readFileSync(process.env.SG_SRC, "utf8"));
+  policy.writeProtectedRoots = process.env.SG_ROOTS.split(":");
+  fs.writeFileSync(process.env.SG_DEST, JSON.stringify(policy));
+' || { echo "FATAL: could not derive the installation policy" >&2; exit 1; }
+install_profile="$scratch/install.sb"
+SG_EXEMPT_ROOTS="$vault/memory" SG_DENY_ROOTS="$vault" \
+  bun "$REPO_ROOT/tests/gen-profile.ts" "$install_config" "$fixture" "$fakehome" - > "$install_profile" ||
+  { echo "FATAL: could not generate installation profile"; exit 1; }
+# The tamper rule is emitted last, so an exemption around the keg must not reopen it.
+install_exempt_profile="$scratch/install-exempt.sb"
+SG_EXEMPT_ROOTS="$vault/memory:$brew" SG_DENY_ROOTS="$vault" \
+  bun "$REPO_ROOT/tests/gen-profile.ts" "$install_config" "$fixture" "$fakehome" - > "$install_exempt_profile" ||
+  { echo "FATAL: could not generate exempt installation profile"; exit 1; }
+
+tool="$keg/1.0/bin/tool"
+expect_unwritable "installed program" "$tool" 'printf TAMPER >> "'"$tool"'"' "$install_profile"
+expect_unwritable "installed program through its launcher link" "$tool" \
+  'printf TAMPER >> "'"$brew"'/bin/tool"' "$install_profile"
+expect_unwritable "installed program through its opt link" "$tool" \
+  'printf TAMPER >> "'"$brew"'/opt/tool/bin/tool"' "$install_profile"
+expect_unwritable "installed program despite an exemption around it" "$tool" \
+  'printf TAMPER >> "'"$tool"'"' "$install_exempt_profile"
+expect_unwritable "installed program through a hard link" "$tool" \
+  'ln "'"$tool"'" "'"$scratch"'/hl-tool" 2>/dev/null; printf TAMPER >> "'"$scratch"'/hl-tool"' "$install_profile"
+expect_unwritable "a version installed later" "$keg/2.0/bin/tool" \
+  'mkdir -p "'"$keg"'/2.0/bin" && printf TAMPER > "'"$keg"'/2.0/bin/tool"' "$install_profile"
+expect_unwritable "app bundle resource" "$bundle/Contents/Resources/app.asar" \
+  'printf TAMPER >> "'"$bundle"'/Contents/Resources/app.asar"' "$install_profile"
+(cd "$fixture" && HOME="$fakehome" sandbox-exec -f "$install_profile" /bin/zsh -c \
+  ': > "'"$tool"'"; chmod 777 "'"$tool"'"; rm -f "'"$tool"'"; mv "'"$brew"'/Cellar" "'"$brew"'/C2"; rm -rf "'"$bundle"'"
+   ln -sfn "'"$scratch"'/evil" "'"$brew"'/bin/tool"; rm -f "'"$brew"'/opt/tool"' >/dev/null 2>&1)
+expect_true "installed program survives truncation, chmod and deletion" \
+  test -s "$tool" -a "$(stat -f %Lp "$tool")" = 755
+expect_true "the keg's parent was not renamed" test -d "$brew/Cellar/tool" -a ! -e "$brew/C2"
+expect_true "the app bundle was not deleted" test -f "$bundle/Contents/Resources/app.asar"
+expect_true "the launcher link still points into the keg" \
+  test "$(readlink "$brew/bin/tool")" = ../Cellar/tool/1.0/bin/tool
+expect_true "the opt link still points into the keg" test "$(readlink "$brew/opt/tool")" = ../Cellar/tool/1.0
+expect_allowed "installed program still runs" '"'"$brew"'/bin/tool"' "$install_profile"
+expect_allowed "installed program is still readable" 'cat "'"$bundle"'/Contents/Resources/app.asar"' "$install_profile"
+expect_writable "a sibling keg stays writable" "$brew/Cellar/other/note" \
+  'printf "%s" "'"$PUBLIC"'" > "'"$brew"'/Cellar/other/note"' "$install_profile"
+(cd "$fixture" && OPENCODE_SECRET_GUARD_CONFIG="$install_config" HOME="$fakehome" PATH="$fakebin:$PATH" \
+  "$GUARD_SHELL" -c 'printf TAMPER >> "'"$brew"'/bin/tool"' >/dev/null 2>&1)
+assert_untampered "configured shell protects the installed program" "$tool"
+
 echo "== file tools must not grant more than the strict kernel profile =="
 # classifyPath mirrors buildProfile by hand. Every other test in this suite
 # exercises one layer or the other, so the two could drift apart without a

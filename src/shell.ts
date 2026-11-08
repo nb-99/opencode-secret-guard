@@ -128,6 +128,7 @@ export function resolveShellPlan(
     repoRoot: findRepoRoot(cwd),
     pathEnvironment: process.env.PATH,
     home,
+    writeProtectedRoots: guardConfig.writeProtectedRoots,
   });
   const profile = profilePath({
     config: guardConfig,

@@ -29,3 +29,9 @@ A naming-based allowance, distinct from an entire permitted subtree.
 **Protected entry**:
 A directory entry that a deny rule protects after higher-priority exemptions
 are accounted for. Changing the caller's case spelling must not unprotect it.
+
+**Write-protected root**:
+A configured tree that no command or file tool may write, delete or rename,
+such as an OpenCode installation. Reads and execution are unaffected, and no
+exemption reopens it.
+_Avoid_: Deny root (it also denies reads)

@@ -4,7 +4,7 @@ import type { GuardConfig } from "../src/policy.ts";
 import { loadConfig } from "../src/policy.ts";
 
 const config: GuardConfig = {
-  configVersion: 3,
+  configVersion: 4,
   mode: "shell+files",
   cleanupRoot: null,
   tools: { git: "/usr/bin/git" },
@@ -20,6 +20,7 @@ const config: GuardConfig = {
   secretPrintingCommands: [],
   denyRoots: [],
   exemptRoots: [],
+  writeProtectedRoots: [],
   secretEnvironment: [],
   secretEnvironmentPatterns: [],
   cacheTtlMs: 0,

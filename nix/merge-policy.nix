@@ -12,6 +12,7 @@
   extraSecretPrintingCommands ? [ ],
   removeSecretPrintingCommands ? [ ],
   extraRelaxationGroups ? { },
+  extraWriteProtectedRoots ? [ ],
   settings ? { },
 }:
 let
@@ -63,6 +64,7 @@ defaultPolicy
   artifactAllowlist = defaultPolicy.artifactAllowlist ++ extraArtifactAllowlist;
   secretPrintingCommands = keptPrintingCommands ++ extraSecretPrintingCommands;
   relaxationGroups = extendedGroups // newGroups;
+  writeProtectedRoots = (defaultPolicy.writeProtectedRoots or [ ]) ++ extraWriteProtectedRoots;
 }
 // settings
 // {

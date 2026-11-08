@@ -187,8 +187,12 @@ export function profilePath(options: {
   const repoRoot = findRepoRoot(cwd);
   // PATH differs between invocations (direnv, per-project shells), and the
   // writable entries become deny rules, so they are part of the identity.
-  const tamper =
-    options.tamper ?? tamperTargets({ repoRoot, pathEnvironment: process.env.PATH, home });
+  const tamper = options.tamper ?? tamperTargets({
+    repoRoot,
+    pathEnvironment: process.env.PATH,
+    home,
+    writeProtectedRoots: config.writeProtectedRoots,
+  });
 
   const key = createHash("sha256")
     .update(JSON.stringify({ version: PROFILE_VERSION, repoRoot, group, home, config, tamper }))

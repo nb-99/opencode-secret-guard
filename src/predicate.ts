@@ -62,6 +62,7 @@ function classifyEvidence(
       repoRoot: findRepoRoot(canonical),
       pathEnvironment: process.env.PATH,
       home: os.homedir(),
+      writeProtectedRoots: config.writeProtectedRoots,
     });
     if (mayBeTamperProtected(inspected, targets)) return "deny";
   }

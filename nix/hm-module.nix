@@ -36,6 +36,7 @@ let
         extraSecretPrintingCommands
         removeSecretPrintingCommands
         extraRelaxationGroups
+        extraWriteProtectedRoots
         settings
         ;
       # A store path, so the guard never resolves git through PATH.
@@ -206,6 +207,26 @@ in
       description = ''
         Per-group additions merged into the default `relaxationGroups`. A name
         that is not a default group defines a new one.
+      '';
+    };
+
+    extraWriteProtectedRoots = mkOption {
+      type = types.listOf types.str;
+      default = [ ];
+      example = [
+        "/opt/homebrew/Cellar/opencode"
+        "/opt/homebrew/opt/opencode"
+        "/opt/homebrew/bin/opencode"
+        "/Applications/OpenCode.app"
+      ];
+      description = ''
+        Absolute paths, or paths starting with `~`, appended to the default
+        `writeProtectedRoots`. No command or file tool may write, delete or
+        rename anything below them; reads and execution stay allowed. Name an
+        OpenCode installation that is not in the read-only Nix store, so a
+        command cannot change the code the next OpenCode start runs. Use the
+        stable Cellar directory, not a versioned one, and protect a whole app
+        bundle. Paths that do not exist yet are accepted.
       '';
     };
 

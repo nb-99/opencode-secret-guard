@@ -9,10 +9,10 @@ import { supportsAliasPattern } from "./path-pattern.ts";
  * reader refuses anything else, so a newer policy paired with an older plugin
  * fails by name instead of silently ignoring fields it does not know.
  */
-export const SUPPORTED_CONFIG_VERSION = 3;
+export const SUPPORTED_CONFIG_VERSION = 4;
 
 /** Older formats that still load, with defaults for the fields they predate. */
-export const ACCEPTED_CONFIG_VERSIONS: readonly number[] = [1, 2, 3];
+export const ACCEPTED_CONFIG_VERSIONS: readonly number[] = [1, 2, 3, 4];
 
 /** Overrides the policy location; otherwise the XDG default path is used. */
 export const CONFIG_ENVIRONMENT = "OPENCODE_SECRET_GUARD_CONFIG";
@@ -58,6 +58,8 @@ export interface GuardConfig {
   secretPrintingCommands: SecretPrintingCommand[];
   denyRoots: string[];
   exemptRoots: string[];
+  /** Trees no command or file tool may write, such as an OpenCode installation. */
+  writeProtectedRoots: string[];
   secretEnvironment: string[];
   secretEnvironmentPatterns: string[];
   cacheTtlMs: number;
@@ -310,6 +312,14 @@ export function validateConfig(
   const relaxationGroups = requireRelaxationGroups(record.relaxationGroups, source);
   const denyRoots = requireRoots(record.denyRoots, "denyRoots", source, home);
   const exemptRoots = requireRoots(record.exemptRoots, "exemptRoots", source, home);
+  const writeProtectedRoots = record.writeProtectedRoots === undefined
+    ? []
+    : requireRoots(record.writeProtectedRoots, "writeProtectedRoots", source, home);
+  // An older guard would not know the field. Its version gate refuses the
+  // policy instead, but only if the policy declares the version that added it.
+  if (writeProtectedRoots.length > 0 && record.configVersion < 4) {
+    throw configError(source, '"writeProtectedRoots" requires configVersion 4 or later');
+  }
   const config: GuardConfig = {
     configVersion: SUPPORTED_CONFIG_VERSION,
     mode: mode as GuardMode,
@@ -322,6 +332,7 @@ export function validateConfig(
     secretPrintingCommands: requireSecretPrintingCommands(record.secretPrintingCommands, source),
     denyRoots,
     exemptRoots,
+    writeProtectedRoots,
     secretEnvironment: requireEnvironmentNames(
       record.secretEnvironment,
       "secretEnvironment",

@@ -146,7 +146,7 @@ describe("plain realpath", () => {
     modes.mockClear();
     run.mockClear();
     expect(writablePathDirectories(bin, null)).toEqual([bin]);
-    const targets = tamperTargets({ repoRoot: null, pathEnvironment: bin, home: root, policyPath: policy, packageDirectory });
+    const targets = tamperTargets({ repoRoot: null, pathEnvironment: bin, home: root, policyPath: policy, packageDirectory, writeProtectedRoots: [] });
     expect(isTamperProtected(policy, targets)).toBe(true);
     expect(isTamperProtected(path.join(bin, "new-program"), targets)).toBe(true);
     const nodes = protectedNodes({ ...baseConfig, denyRoots: [path.join(root, "Vault")] }, root);
@@ -556,7 +556,7 @@ describe("case-insensitive filesystem with spelling-preserving realpath", () => 
   test("tamper policy files and their ancestors use the same canonical spelling", () => {
     put("Config/Policy.json");
     insensitive();
-    const targets = tamperTargets({ repoRoot: null, pathEnvironment: "", home: root, policyPath: path.join(root, "cONFIG/pOLICY.JSON") });
+    const targets = tamperTargets({ repoRoot: null, pathEnvironment: "", home: root, policyPath: path.join(root, "cONFIG/pOLICY.JSON"), writeProtectedRoots: [] });
     expect(mayBeTamperProtected(inspectPath(path.join(root, "CONFIG/POLICY.json")), targets)).toBe(true);
     expect(mayBeTamperProtected(inspectPath(path.join(root, "CONFIG")), targets)).toBe(true);
   });

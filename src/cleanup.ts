@@ -140,7 +140,12 @@ export function cleanupProfile(config: GuardConfig, plan: CleanupPlan): string {
     gitignore: repoRoot
       ? gitignoreRules(config.tools.git, repoRoot, config.artifactAllowlist)
       : { repoRoot: null, subpaths: [], literals: [], directories: [], helmSecretTemplates: [] },
-    tamper: tamperTargets({ repoRoot, pathEnvironment: process.env.PATH, home: os.homedir() }),
+    tamper: tamperTargets({
+      repoRoot,
+      pathEnvironment: process.env.PATH,
+      home: os.homedir(),
+      writeProtectedRoots: config.writeProtectedRoots,
+    }),
   });
   const targets = plan.entries.map((target) => `(literal ${sbplString(target)})`).join(" ");
   const confined = profile +
