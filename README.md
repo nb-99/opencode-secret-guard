@@ -166,7 +166,7 @@ with a leading `~`, expanded at runtime, so a policy is portable between hosts.
 
 | Key                         | Meaning                                                                                 |
 | --------------------------- | --------------------------------------------------------------------------------------- |
-| `configVersion`             | File format, currently 4; 1 to 3 still load; anything else is rejected                  |
+| `configVersion`             | File format, currently 6; 1 to 5 still load; anything else is rejected                  |
 | `mode`                      | `shell+files` or `files-only`                                                           |
 | `cleanupRoot`               | Opt-in root for `cleanup_temp`, may start with `~` or `$TMPDIR`; `null` disables it and files-only mode cannot enable it |
 | `tools.git`                 | Absolute path of the git the guard spawns; never resolved through `PATH`                |
@@ -181,12 +181,12 @@ with a leading `~`, expanded at runtime, so a policy is portable between hosts.
 | `secretEnvironment`         | Variable names scrubbed before a command runs, always                                   |
 | `secretEnvironmentPatterns` | Regexes; every inherited variable whose name matches is scrubbed                        |
 | `cacheTtlMs`                | How often a profile is regenerated                                                      |
-| `permissionReview.mode`     | `off` (default), `observe`, or `auto`; optional, approval-only model review of OpenCode V2 shell `ask` prompts; requires `configVersion` 5. See [docs/permission-review.md](docs/permission-review.md) |
+| `permissionReview.mode`     | `off` (default), `observe`, or `auto`; optional, approval-only model review of OpenCode V2 shell `ask` prompts; requires `configVersion` 5 or later. See [docs/permission-review.md](docs/permission-review.md) |
 | `permissionReview.logPayloads` | `false` (default) or `true`; also logs review request and response bodies to a private local file |
 | `permissionReview.confidenceThreshold` | `0.9` (default); t above 0.5 and at most 1. Authorization and scope answers must reach t; confirmation and impact answers must stay at or below 1 − t. The scores are uncalibrated; see [docs/permission-review.md](docs/permission-review.md#how-a-request-is-approved) |
-| `permissionReview.backend`  | `jev` (default, Jev through OpenCode Zen), `opencode` (an OpenCode decision model; OpenCode 2.2.5 or later) or `endpoint` (an OpenAI-compatible server). See [Backends](docs/permission-review.md#backends) |
-| `permissionReview.opencode` | `{ "model": "provider/model" }`, optionally `#variant`; a decision model such as `opencode/jev-1.13-free`, not a chat model; required with backend `opencode` and rejected otherwise |
-| `permissionReview.endpoint` | `{ "baseURL", "model", "apiKeyFile", "deadlineMs" }`; HTTPS, or HTTP on loopback only; required with backend `endpoint` and rejected otherwise |
+| `permissionReview.backend`  | `jev` (default, Jev through OpenCode Zen), `opencode` (a decision or chat model OpenCode can reach; OpenCode 2.2.5 or later) or `endpoint` (an OpenAI-compatible server). See [Backends](docs/permission-review.md#backends) |
+| `permissionReview.opencode` | `{ "model", "api", "deadlineMs" }`; `model` is `provider/model`, optionally `#variant`; `api` is `decisions` (default, a decision model such as `opencode/jev-1.13-free`) or `text` (any chat model; its scores are less reliable); `deadlineMs` defaults to 10000; required with backend `opencode` and rejected otherwise. `api` and `deadlineMs` need `configVersion` 6 |
+| `permissionReview.endpoint` | `{ "baseURL", "model", "apiKeyFile", "deadlineMs", "api" }`; HTTPS, or HTTP on loopback only; `api` is `text` (default, `/chat/completions`) or `decisions` (`/decisions`, the OpenAI Decisions API; needs `configVersion` 6); required with backend `endpoint` and rejected otherwise |
 
 Validation fails closed: an unsupported version, a wrong type, a non-absolute
 root, an `allowPaths` entry that is not `$HOME`-relative, or a pattern that does
