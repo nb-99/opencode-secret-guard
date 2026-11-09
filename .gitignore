@@ -2,3 +2,6 @@ result
 result-*
 node_modules/
 /bin/path-lookup
+
+# Added by ggshield
+.cache_ggshield
