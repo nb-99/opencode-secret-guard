@@ -18,7 +18,7 @@ import { matchesAny } from "./paths.ts";
 import { DEFAULT_PERMISSION_REVIEW, type PermissionReviewMode, type PermissionReviewSettings } from "./policy.ts";
 import { formatNote, LOG_UNAVAILABLE_NOTE, PAYLOAD_LOG_UNAVAILABLE_NOTE } from "./review-notes.ts";
 import { fileReviewLog, PAYLOAD_LOG_LIMITS, payloadLogPath, reviewLogPath, type ReviewLogWriter, type ReviewRecord } from "./review-log.ts";
-import { negativeThreshold, type ReviewScores } from "./review-status.ts";
+import { explanationText, MAX_RATIONALE_CHARS, MAX_SUMMARY_CHARS, negativeThreshold, type ReviewExplanation, type ReviewScores } from "./review-status.ts";
 import { setupReviewStatus, type ReviewRpcContext } from "./review-rpc.ts";
 import { COMPACTED_QUESTIONS, REVIEW_QUESTIONS } from "./review-questions.ts";
 import {
@@ -189,10 +189,25 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
 type ContextWarnings = { compacted: boolean; outside_project: boolean };
-/** The decision this module reports, with a reason code that carries no content. */
-export type ReviewOutcome = { allow: boolean; proposed?: "allow" | "ask"; reason: string; score?: number; scores?: ReviewScores; contextWarnings?: ContextWarnings };
+/** The decision this module reports. Only `explanation` carries content: model-written text. */
+export type ReviewOutcome = {
+  allow: boolean; proposed?: "allow" | "ask"; reason: string; score?: number; scores?: ReviewScores;
+  explanation?: ReviewExplanation; contextWarnings?: ContextWarnings;
+};
 
 const ask = (reason: string): ReviewOutcome => ({ allow: false, reason });
+
+/**
+ * The model's explanation as the terminal shows it, or nothing. It is checked
+ * for credentials before and after cleaning, so a cut cannot hide a match.
+ */
+function shownExplanation(raw: ReviewExplanation | undefined, hasCredential: CredentialCheck): ReviewExplanation | undefined {
+  if (!raw) return undefined;
+  const summary = explanationText(raw.summary, MAX_SUMMARY_CHARS);
+  const rationale = explanationText(raw.rationale, MAX_RATIONALE_CHARS);
+  if (!summary || !rationale) return undefined;
+  return [raw.summary, raw.rationale, summary, rationale].some(hasCredential) ? undefined : { summary, rationale };
+}
 
 /**
  * The action as the reviewer sees it: the tool call's own command and the
@@ -629,7 +644,9 @@ export async function setupPermissionReview(
         state: { pending_action: action, user_messages: human.texts, compaction_context: human.compactions, context_warnings: contextWarnings },
         questions: contextWarnings.compacted ? COMPACTED_QUESTIONS : REVIEW_QUESTIONS,
       };
-      const outcome = judged = decide(await send(request, { signal, trace, onRequest }), threshold);
+      const judgment = await send(request, { signal, trace, onRequest });
+      const explanation = shownExplanation(judgment.explanation, hasCredential);
+      const outcome = judged = { ...decide(judgment.answers, threshold), ...(explanation ? { explanation } : {}) };
       if (!outcome.allow) return withWarnings(outcome);
       // What was reviewed must still be what runs, in the same session state:
       // events can be missed, so the session and its review context are read
@@ -720,6 +737,7 @@ export async function setupPermissionReview(
         workspaceID: safeID(ctx.location?.workspaceID),
         messageID: safeID(evaluation.source?.messageID), callID: safeID(evaluation.source?.id),
         action, mode, startedAt: started, threshold,
+        explains: backend.api === "text", toasts: settings.toasts,
       };
       let modelCalled = false;
       statuses.publish({ ...identity, phase: "checking", modelCalled, elapsedMs: 0 });
@@ -762,6 +780,7 @@ export async function setupPermissionReview(
         ...identity, phase: "completed", modelCalled, elapsedMs: Math.max(0, dependencies.now() - started),
         proposed: verdict, applied: evaluation.effect, reason: outcome.reason,
         ...(outcome.scores ? { scores: outcome.scores } : {}),
+        ...(outcome.explanation ? { explanation: outcome.explanation } : {}),
         ...(outcome.contextWarnings ? { contextWarnings: outcome.contextWarnings } : {}),
       });
       if (evaluation.effect !== "ask") return;

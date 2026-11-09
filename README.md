@@ -166,7 +166,7 @@ with a leading `~`, expanded at runtime, so a policy is portable between hosts.
 
 | Key                         | Meaning                                                                                 |
 | --------------------------- | --------------------------------------------------------------------------------------- |
-| `configVersion`             | File format, currently 6; 1 to 5 still load; anything else is rejected                  |
+| `configVersion`             | File format, currently 7; 1 to 6 still load; anything else is rejected                  |
 | `mode`                      | `shell+files` or `files-only`                                                           |
 | `cleanupRoot`               | Opt-in root for `cleanup_temp`, may start with `~` or `$TMPDIR`; `null` disables it and files-only mode cannot enable it |
 | `tools.git`                 | Absolute path of the git the guard spawns; never resolved through `PATH`                |
@@ -185,6 +185,7 @@ with a leading `~`, expanded at runtime, so a policy is portable between hosts.
 | `permissionReview.logPayloads` | `false` (default) or `true`; also logs review request and response bodies to a private local file |
 | `permissionReview.confidenceThreshold` | `0.9` (default); t above 0.5 and at most 1. Authorization and scope answers must reach t; confirmation and impact answers must stay at or below 1 − t. The scores are uncalibrated; see [docs/permission-review.md](docs/permission-review.md#how-a-request-is-approved) |
 | `permissionReview.backend`  | `jev` (default, Jev through OpenCode Zen), `opencode` (a decision or chat model OpenCode can reach; OpenCode 2.2.5 or later) or `endpoint` (an OpenAI-compatible server). See [Backends](docs/permission-review.md#backends) |
+| `permissionReview.toasts`   | `all` (default) or `attention`; `attention` shows only completed reviews that need you and leaves progress and automatic approvals to the sidebar; needs `configVersion` 7. See [Live phase notifications](docs/permission-review.md#live-phase-notifications) |
 | `permissionReview.opencode` | `{ "model", "api", "deadlineMs" }`; `model` is `provider/model`, optionally `#variant`; `api` is `decisions` (default, a decision model such as `opencode/jev-1.13-free`) or `text` (any chat model; its scores are less reliable); `deadlineMs` defaults to 10000; required with backend `opencode` and rejected otherwise. `api` and `deadlineMs` need `configVersion` 6 |
 | `permissionReview.endpoint` | `{ "baseURL", "model", "apiKeyFile", "deadlineMs", "api" }`; HTTPS, or HTTP on loopback only; `api` is `text` (default, `/chat/completions`), `decisions` (`/decisions`, the OpenAI Decisions API) or `systemone` (`/systemone`, the System One API of Jev and local decision-model servers); `api` needs `configVersion` 6; required with backend `endpoint` and rejected otherwise |
 

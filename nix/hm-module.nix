@@ -278,6 +278,19 @@ in
         '';
       };
 
+      toasts = mkOption {
+        type = types.enum [
+          "all"
+          "attention"
+        ];
+        default = "all";
+        description = ''
+          `all` shows a toast for every review phase. `attention` shows only
+          completed reviews that need you, such as a manual approval or a
+          failure; progress and automatic approvals stay in the sidebar.
+        '';
+      };
+
       opencode = mkOption {
         type = types.nullOr (
           types.submodule {

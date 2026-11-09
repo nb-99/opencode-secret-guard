@@ -9,10 +9,10 @@ import { supportsAliasPattern } from "./path-pattern.ts";
  * reader refuses anything else, so a newer policy paired with an older plugin
  * fails by name instead of silently ignoring fields it does not know.
  */
-export const SUPPORTED_CONFIG_VERSION = 6;
+export const SUPPORTED_CONFIG_VERSION = 7;
 
 /** Older formats that still load, with defaults for the fields they predate. */
-export const ACCEPTED_CONFIG_VERSIONS: readonly number[] = [1, 2, 3, 4, 5, 6];
+export const ACCEPTED_CONFIG_VERSIONS: readonly number[] = [1, 2, 3, 4, 5, 6, 7];
 
 /** Overrides the policy location; otherwise the XDG default path is used. */
 export const CONFIG_ENVIRONMENT = "OPENCODE_SECRET_GUARD_CONFIG";
@@ -90,6 +90,14 @@ export type OpencodeReviewApi = "decisions" | "text";
 export type EndpointReviewApi = "systemone" | "decisions" | "text";
 export type ReviewApi = OpencodeReviewApi | EndpointReviewApi;
 
+/**
+ * Which review toasts the terminal shows. "all" shows every phase. "attention"
+ * shows only completed reviews that need the user; the sidebar shows the rest.
+ */
+export type ReviewToasts = "all" | "attention";
+
+export const REVIEW_TOASTS: readonly ReviewToasts[] = ["all", "attention"];
+
 export const OPENCODE_REVIEW_APIS: readonly OpencodeReviewApi[] = ["decisions", "text"];
 export const ENDPOINT_REVIEW_APIS: readonly EndpointReviewApi[] = ["systemone", "decisions", "text"];
 
@@ -123,6 +131,7 @@ export interface PermissionReviewSettings {
    */
   confidenceThreshold: number;
   backend: PermissionReviewBackend;
+  toasts: ReviewToasts;
   /** Required when `backend` is "opencode", and rejected otherwise. */
   opencode?: OpencodeReviewSettings;
   /** Required when `backend` is "endpoint", and rejected otherwise. */
@@ -134,9 +143,10 @@ export const DEFAULT_PERMISSION_REVIEW: Readonly<PermissionReviewSettings> = {
   logPayloads: false,
   confidenceThreshold: 0.9,
   backend: "jev",
+  toasts: "all",
 };
 
-const PERMISSION_REVIEW_KEYS = ["mode", "logPayloads", "confidenceThreshold", "backend", "opencode", "endpoint"];
+const PERMISSION_REVIEW_KEYS = ["mode", "logPayloads", "confidenceThreshold", "backend", "toasts", "opencode", "endpoint"];
 const OPENCODE_DEFAULT_DEADLINE_MS = 10_000;
 const ENDPOINT_DEFAULT_DEADLINE_MS = 20_000;
 const MAX_DEADLINE_MS = 30_000;
@@ -372,6 +382,16 @@ export function requirePermissionReview(
       `"permissionReview.backend" must be one of ${PERMISSION_REVIEW_BACKENDS.join(", ")}, not ${JSON.stringify(record.backend)}`,
     );
   }
+  if (record.toasts !== undefined && configVersion < 7) {
+    throw configError(source, '"permissionReview.toasts" requires configVersion 7 or later');
+  }
+  const toasts = record.toasts === undefined ? DEFAULT_PERMISSION_REVIEW.toasts : record.toasts;
+  if (!REVIEW_TOASTS.includes(toasts as ReviewToasts)) {
+    throw configError(
+      source,
+      `"permissionReview.toasts" must be one of ${REVIEW_TOASTS.join(", ")}, not ${JSON.stringify(record.toasts)}`,
+    );
+  }
   // A block for a backend that does not run is an error, so a stale block cannot look active.
   if (backend !== "opencode" && record.opencode !== undefined) {
     throw configError(source, '"permissionReview.opencode" requires backend "opencode"');
@@ -384,6 +404,7 @@ export function requirePermissionReview(
     logPayloads,
     confidenceThreshold,
     backend: backend as PermissionReviewBackend,
+    toasts: toasts as ReviewToasts,
   };
   if (backend === "opencode") return { ...settings, opencode: requireOpencodeReview(record.opencode, configVersion, source) };
   if (backend === "endpoint") return { ...settings, endpoint: requireEndpointReview(record.endpoint, configVersion, source, home) };

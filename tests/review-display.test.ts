@@ -162,8 +162,8 @@ describe("review RPC boundary", () => {
       anyOf: [{ type: "string", minLength: 1, maxLength: 80 }, { type: "null" }],
     });
     expect(Object.keys(JevRpc.events.review.schema.properties).sort()).toEqual([
-      "action", "applied", "callID", "contextWarnings", "elapsedMs", "messageID", "mode", "modelCalled",
-      "phase", "proposed", "reason", "reviewID", "scores", "sessionID", "startedAt", "threshold", "workspaceID",
+      "action", "applied", "callID", "contextWarnings", "elapsedMs", "explains", "explanation", "messageID", "mode", "modelCalled",
+      "phase", "proposed", "reason", "reviewID", "scores", "sessionID", "startedAt", "threshold", "toasts", "workspaceID",
     ]);
     publisher.dispose();
   });
@@ -500,6 +500,36 @@ describe("review display boundary", () => {
       ].join("\n"),
     });
     expect(ui.display.snapshot("session-1")[0]!.applied).toBe("ask");
+    ui.display.dispose();
+  });
+
+  test("attention toasts hide progress and approvals but keep them in the display", () => {
+    const ui = displayHarness();
+    const attention = { toasts: "attention" } as const;
+    ui.emit(status(attention));
+    ui.emit(status({ ...attention, phase: "evaluating", modelCalled: true }));
+    ui.emit(completed({ ...attention, proposed: "allow", applied: "allow", reason: "model-approved", scores: reviewedScores }));
+    expect(ui.toasts).toEqual([]);
+    expect(ui.display.snapshot("session-1")[0]!.applied).toBe("allow");
+    ui.emit(completed({ ...attention, reviewID: "manual-review", reason: "model-high-impact", scores: reviewedScores }));
+    expect(ui.toasts.map((toast) => toast.message.split("\n")[0])).toEqual(["Manual approval required"]);
+    ui.display.dispose();
+  });
+
+  test("a text-API explanation replaces the score rows in the toast", () => {
+    const ui = displayHarness();
+    ui.emit(completed({
+      proposed: "allow", applied: "allow", reason: "model-approved",
+      scores: { ...reviewedScores, confirmation_required: 0.02 },
+      explanation: { summary: "Runs the test suite.", rationale: "You asked to run the tests; it changes nothing." },
+    }));
+    expect(ui.toasts[0]).toMatchObject({
+      variant: "success",
+      message: [
+        "Automatically approved", "Auto mode · bash", "Does: Runs the test suite.",
+        "Why: You asked to run the tests; it changes nothing.",
+      ].join("\n"),
+    });
     ui.display.dispose();
   });
 
