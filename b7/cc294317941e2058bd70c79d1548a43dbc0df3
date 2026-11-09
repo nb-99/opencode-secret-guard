@@ -1,0 +1,19 @@
+.gitguardian.yaml
+  s_663df7b72f5123::t_84b21a0e7a9a68 1-4
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.6",
+  "base_commit_sha": "b7cc294317941e2058bd70c79d1548a43dbc0df3",
+  "prompts": {},
+  "sessions": {
+    "s_663df7b72f5123": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_e409c93a4ffe8aaVxsYP5Tcnqq",
+        "model": "github-copilot/claude-opus-5.5-long"
+      },
+      "human_author": "nb99 <niklas@beilmann.dev>"
+    }
+  }
+}
