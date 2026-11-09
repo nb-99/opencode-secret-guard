@@ -12,8 +12,8 @@ const ENDPOINT = { baseURL: "https://judge.example.com/v1", model: "judge" };
 
 describe("permission review backend selection", () => {
   test("defaults to jev with no extra block", () => {
-    expect(withReview(undefined).permissionReview).toEqual({ mode: "off", logPayloads: false, confidenceThreshold: 0.9, backend: "jev" });
-    expect(withReview({ mode: "observe" }).permissionReview).toEqual({ mode: "observe", logPayloads: false, confidenceThreshold: 0.9, backend: "jev" });
+    expect(withReview(undefined).permissionReview).toEqual({ mode: "off", logPayloads: false, confidenceThreshold: 0.9, backend: "jev", toasts: "all" });
+    expect(withReview({ mode: "observe" }).permissionReview).toEqual({ mode: "observe", logPayloads: false, confidenceThreshold: 0.9, backend: "jev", toasts: "all" });
   });
 
   test("keeps the opencode model reference, with an optional variant", () => {
@@ -99,5 +99,24 @@ describe("permission review API selection", () => {
     ["an unknown opencode key", { backend: "opencode", opencode: { ...OPENCODE, temperature: 0 } }, /"permissionReview.opencode" has unknown keys: temperature/],
   ])("rejects %s", (_, review, message) => {
     expect(() => withReview({ mode: "auto", ...review })).toThrow(message);
+  });
+});
+
+describe("permission review toasts", () => {
+  const withVersion = (configVersion: number, permissionReview: unknown) =>
+    validateConfig({ ...raw, configVersion, permissionReview }, "test-policy", HOME, "/tmp").permissionReview;
+
+  test("defaults to all and keeps attention", () => {
+    expect(withReview({ mode: "auto" }).permissionReview.toasts).toBe("all");
+    expect(withReview({ mode: "auto", toasts: "attention" }).permissionReview.toasts).toBe("attention");
+    expect(withVersion(6, { mode: "auto" }).toasts).toBe("all");
+  });
+
+  test("rejects the key in a version 6 policy", () => {
+    expect(() => withVersion(6, { toasts: "attention" })).toThrow('"permissionReview.toasts" requires configVersion 7 or later');
+  });
+
+  test.each(["none", null, true])("rejects %p", (toasts) => {
+    expect(() => withReview({ toasts })).toThrow(/"permissionReview.toasts" must be one of all, attention/);
   });
 });

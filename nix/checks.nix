@@ -283,6 +283,7 @@ in
         permissionReview = {
           mode = "auto";
           backend = "opencode";
+          toasts = "attention";
           opencode = {
             model = "github-copilot/gpt-6-luna#low";
             api = "text";
@@ -323,6 +324,7 @@ in
         };
       };
     };
+    assert rejected { permissionReview.toasts = "none"; };
     pkgs.runCommand "secret-guard-module" { nativeBuildInputs = [ pkgs.bun ]; } ''
       cp -r ${../src} src
       bun -e '
@@ -330,10 +332,10 @@ in
         const assert = (ok, message) => { if (!ok) throw new Error(message); };
         const review = (file) => JSON.stringify(loadConfig(file, "/home/example").permissionReview);
         assert(review("${policyOf plain}") ===
-          JSON.stringify({ mode: "off", logPayloads: false, confidenceThreshold: 0.9, backend: "jev" }),
+          JSON.stringify({ mode: "off", logPayloads: false, confidenceThreshold: 0.9, backend: "jev", toasts: "all" }),
           "default review settings changed");
         const endpoint = (api) => JSON.stringify({
-          mode: "observe", logPayloads: false, confidenceThreshold: 0.9, backend: "endpoint",
+          mode: "observe", logPayloads: false, confidenceThreshold: 0.9, backend: "endpoint", toasts: "all",
           endpoint: { baseURL: "http://127.0.0.1:11434/v1", model: "local-judge",
             apiKeyFile: "/home/example/.config/secrets/judge", deadlineMs: 20000, api },
         });
@@ -341,9 +343,9 @@ in
         assert(review("${policyOf endpointDecisions}") === endpoint("decisions"), "endpoint decisions API not written");
         assert(review("${policyOf endpointSystemOne}") === endpoint("systemone"), "endpoint System One API not written");
         assert(review("${policyOf opencodeText}") === JSON.stringify({
-          mode: "auto", logPayloads: false, confidenceThreshold: 0.9, backend: "opencode",
+          mode: "auto", logPayloads: false, confidenceThreshold: 0.9, backend: "opencode", toasts: "attention",
           opencode: { model: "github-copilot/gpt-6-luna#low", api: "text", deadlineMs: 15000 },
-        }), "opencode text API not written");
+        }), "opencode text API or toasts not written");
       '
       touch $out
     '';

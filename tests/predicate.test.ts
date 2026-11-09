@@ -154,7 +154,7 @@ describe("configuration loading", () => {
   });
 
   test("the generated policy validates", () => {
-    expect(baseConfig.configVersion).toBe(6);
+    expect(baseConfig.configVersion).toBe(7);
     expect(baseConfig.secretPatterns.length).toBeGreaterThan(0);
   });
 
@@ -175,7 +175,7 @@ describe("configuration loading", () => {
   });
 
   test.each([
-    ["a newer configVersion", { configVersion: 7 }, /unsupported configVersion 7/],
+    ["a newer configVersion", { configVersion: 8 }, /unsupported configVersion 8/],
     ["an unknown permissionReview mode", { permissionReview: { mode: "on" } }, /"permissionReview.mode" must be one of/],
     ["a null permissionReview mode", { permissionReview: { mode: null } }, /"permissionReview.mode" must be one of/],
     ["an unknown permissionReview key", { permissionReview: { mode: "auto", model: "x" } }, /unknown keys: model/],
@@ -219,26 +219,26 @@ describe("configuration loading", () => {
     expect(loaded.tools.git).toBe("/usr/bin/git");
     expect(loaded.secretEnvironmentPatterns).toEqual([]);
     expect(loaded.writeProtectedRoots).toEqual([]);
-    expect(loaded.permissionReview).toEqual({ mode: "off", logPayloads: false, confidenceThreshold: 0.9, backend: "jev" });
-    expect(loaded.configVersion).toBe(6);
+    expect(loaded.permissionReview).toEqual({ mode: "off", logPayloads: false, confidenceThreshold: 0.9, backend: "jev", toasts: "all" });
+    expect(loaded.configVersion).toBe(7);
   });
 
   test("permissionReview needs configVersion 5 and defaults to off", () => {
     expect(loadConfig(policy("review-off.json", { ...valid(), permissionReview: undefined })).permissionReview)
-      .toEqual({ mode: "off", logPayloads: false, confidenceThreshold: 0.9, backend: "jev" });
+      .toEqual({ mode: "off", logPayloads: false, confidenceThreshold: 0.9, backend: "jev", toasts: "all" });
     expect(loadConfig(policy("review-auto.json", { ...valid(), permissionReview: { mode: "auto" } })).permissionReview)
-      .toEqual({ mode: "auto", logPayloads: false, confidenceThreshold: 0.9, backend: "jev" });
+      .toEqual({ mode: "auto", logPayloads: false, confidenceThreshold: 0.9, backend: "jev", toasts: "all" });
     expect(
       loadConfig(policy("review-full.json", { ...valid(), permissionReview: { mode: "observe", logPayloads: true, confidenceThreshold: 1 } }))
         .permissionReview,
-    ).toEqual({ mode: "observe", logPayloads: true, confidenceThreshold: 1, backend: "jev" });
+    ).toEqual({ mode: "observe", logPayloads: true, confidenceThreshold: 1, backend: "jev", toasts: "all" });
     for (const [name, permissionReview, expected] of [
       ["empty", {}, {}],
       ["threshold", { confidenceThreshold: 0.95 }, { confidenceThreshold: 0.95 }],
       ["payloads", { logPayloads: true }, { logPayloads: true }],
     ] as const) {
       expect(loadConfig(policy(`review-${name}.json`, { ...valid(), permissionReview })).permissionReview)
-        .toEqual({ mode: "off", logPayloads: false, confidenceThreshold: 0.9, backend: "jev", ...expected });
+        .toEqual({ mode: "off", logPayloads: false, confidenceThreshold: 0.9, backend: "jev", toasts: "all", ...expected });
     }
     expect(() => loadConfig(policy("review-v4.json", { ...valid(), configVersion: 4, permissionReview: { mode: "auto" } })))
       .toThrow(/requires configVersion 5/);

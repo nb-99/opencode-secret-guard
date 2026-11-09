@@ -1,5 +1,5 @@
 import { JevRpc } from "./review-rpc.ts";
-import { createReviewStatusStore, MAX_REVIEW_STATUSES, MAX_SESSION_REVIEWS, parseReviewStatus, reviewLines, type ReviewAvailability, type ReviewStatus } from "./review-status.ts";
+import { createReviewStatusStore, MAX_REVIEW_STATUSES, MAX_SESSION_REVIEWS, parseReviewStatus, reviewLines, wantsToast, type ReviewAvailability, type ReviewStatus } from "./review-status.ts";
 import { parseReviewSummary, type ReviewSummary } from "./review-summary.ts";
 
 type Location = { directory: string; workspaceID?: string };
@@ -84,7 +84,7 @@ export function createReviewDisplay(ctx: ReviewDisplayContext, refreshTimeoutMs 
     }
     if (store.update(status)) changed(status.sessionID);
     // Snapshots cannot consume a live phase's notification.
-    if (!notified.update(status)) return;
+    if (!notified.update(status) || !wantsToast(status)) return;
     try {
       ctx.ui.toast.show({
         title: "Permission review",

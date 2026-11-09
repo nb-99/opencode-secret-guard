@@ -1,4 +1,4 @@
-import { createReviewStatusStore, MAX_SESSION_REVIEWS, type ReviewStatus } from "./review-status.ts";
+import { createReviewStatusStore, MAX_RATIONALE_CHARS, MAX_SESSION_REVIEWS, MAX_SUMMARY_CHARS, type ReviewStatus } from "./review-status.ts";
 import { createReviewSummaryStore, type ReviewSummary } from "./review-summary.ts";
 
 // OpenCode 2.2.5 builds RPC validators with Effect 4, which rejects JSON Schema
@@ -45,10 +45,20 @@ const status = {
     startedAt: { type: "number", minimum: 0 },
     elapsedMs: { type: "number", minimum: 0 },
     threshold,
+    explains: { type: "boolean" },
+    toasts: { enum: ["all", "attention"] },
     proposed: { enum: ["allow", "ask"] },
     applied: { enum: ["allow", "ask", "deny"] },
     reason: { type: "string", minLength: 1, maxLength: 60 },
     scores,
+    explanation: {
+      type: "object", additionalProperties: false,
+      properties: {
+        summary: { type: "string", minLength: 1, maxLength: MAX_SUMMARY_CHARS },
+        rationale: { type: "string", minLength: 1, maxLength: MAX_RATIONALE_CHARS },
+      },
+      required: ["summary", "rationale"],
+    },
     contextWarnings: {
       type: "object", additionalProperties: false,
       properties: { compacted: { type: "boolean" }, outside_project: { type: "boolean" } },

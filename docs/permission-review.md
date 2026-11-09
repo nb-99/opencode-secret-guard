@@ -63,8 +63,9 @@ Anything else still reaches you as a normal prompt.
 ## Configuration
 
 `permissionReview` requires `configVersion` 5 or later. The `api` keys and
-`opencode.deadlineMs` require `configVersion` 6. Its keys are `mode`,
-`logPayloads`, `confidenceThreshold`, `backend`, `opencode` and `endpoint`;
+`opencode.deadlineMs` require `configVersion` 6, and `toasts` requires
+`configVersion` 7. Its keys are `mode`, `logPayloads`, `confidenceThreshold`,
+`backend`, `toasts`, `opencode` and `endpoint`;
 each is optional. `backend` defaults to `jev`. Without `permissionReview` the
 mode is `off`. An invalid `permissionReview` is
 a policy validation error, so the guard refuses to start as for any invalid
@@ -73,7 +74,7 @@ failed call, only leave the normal prompt.
 
 ```json
 {
-  "configVersion": 6,
+  "configVersion": 7,
   "permissionReview": {
     "mode": "observe",
     "logPayloads": false,
@@ -90,6 +91,7 @@ This fragment shows only the relevant keys; merge it into your existing policy.
 | `logPayloads`         | `false` | `true` also writes every request and response body to the [payload log](#payload-log). |
 | `confidenceThreshold` | `0.9`   | A number above 0.5 and at most 1; see [How a request is approved](#how-a-request-is-approved). |
 | `backend`             | `jev`   | `jev`, `opencode` or `endpoint`; see [Backends](#backends).             |
+| `toasts`              | `all`   | `all` or `attention`; see [Live phase notifications](#live-phase-notifications). |
 | `opencode`            | none    | `{ "model", "api", "deadlineMs" }`. `model` is `provider/model` with an optional `#variant`. `api` is `decisions` (default, a decision model) or `text` (a chat model). `deadlineMs` defaults to 10000. Required with `backend` `opencode`, an error otherwise. |
 | `endpoint`            | none    | `{ "baseURL", "model", "apiKeyFile", "deadlineMs", "api" }`. `api` is `text` (default, `/chat/completions`), `decisions` (`/decisions`) or `systemone` (`/systemone`). Required with `backend` `endpoint`, an error otherwise. |
 
@@ -176,7 +178,8 @@ The plugin does not bundle a separate UI runtime.
 
 #### Live phase notifications
 
-Every unique live phase update produces a toast, in both `auto` and `observe`:
+With `toasts` `all`, the default, every unique live phase update produces a
+toast, in both `auto` and `observe`:
 
 | Phase | Meaning | Toast |
 | ----- | ------- | ----- |
@@ -189,6 +192,15 @@ Automatic approvals and negative `auto` judgments therefore have notifications,
 even when no permission prompt appears. The reviewer emits completion status
 for skipped and failed reviews too.
 
+With `toasts` `attention`, only a completed review that needs you produces a
+toast. That is a review that did not end in `allow` and either called the model
+(a judgment or a failed call) or has a reason with a `Next:` remedy. Progress,
+automatic approvals and skips without a remedy, such as an unsupported action,
+produce no toast. The sidebar still shows each of them. This follows Codex's
+automatic approval review, which shows progress in its status line and
+reports approvals silently. Every status carries the setting, so the TUI
+applies it without reading the policy.
+
 When the model returns a valid judgment, the phase toast shows all four
 raw yes-probabilities. Each row shows its threshold, comparison direction and
 pass/fail result:
@@ -200,6 +212,37 @@ At the default threshold, these limits are ≥ 90% and ≤ 10%, respectively.
 The display does not replace the [per-answer approval rules](#how-a-request-is-approved).
 It does not invent missing scores. It shows `not evaluated` before a model call,
 `pending` during evaluation, and `unavailable` after a call without a valid judgment.
+
+With the `text` API, the model also writes a short `summary` of what the action
+does and a `rationale` for why it should or should not run without asking you.
+When both are present, the completion toast shows them as `Does:` and `Why:`
+lines, right after the mode line. They replace the four score rows and the
+`Proposed`/`Applied` line, because the heading already states the outcome.
+A `Reason:` line remains only when code overruled the model's verdict, for
+example `context-changed` or `deadline`; `model-*` reasons are left out:
+
+```text
+Manual approval required
+Auto mode · shell
+Does: Force-pushes local main to origin.
+Why: You asked to confirm before any push.
+```
+
+This follows Codex's automatic approval review, which shows the verdict and one
+concise rationale sentence.
+
+The explanation is display-only. Code still decides from the four scores, and
+the sidebar and decision log still use them. The text is the model's own claim
+and is not verified. The plugin flattens it to one line, replaces control,
+format, private-use and unassigned characters with spaces, and cuts it with `…`
+at 100 characters for the summary and 140 for the rationale. These limits keep
+plain text within a few lines of OpenCode's 60-column toast; wide characters
+take more space.
+An explanation that is missing, blank, not text or credential-like is dropped,
+and the toast shows the score rows. Other APIs return no explanation.
+With the `text` API, every status also carries `explains: true`. Its toasts
+then omit the `Scores: not evaluated`, `pending` and `unavailable` lines;
+the heading already says whether the review is pending, skipped or failed.
 
 `proposed` records the model's verdict when it returns a valid judgment; otherwise it is `ask`.
 `applied` records the permission effect at the reviewer's hook exit.
@@ -261,12 +304,17 @@ Other failures show `Status unavailable (<code>)` with a fixed code, such as
 The RPC schemas contain no JSON Schema `pattern` keyword. OpenCode 2.2.5 builds RPC
 validators with Effect 4.0.6, which refuses patterns. That failure returned
 `rpc.invalid_input` (HTTP 400) for every snapshot and prevented live status events.
-Both ends apply the identifier, action and reason character rules in
+Both ends apply the identifier, action, reason and explanation character rules in
 `parseReviewStatus` instead.
 
-Status and decision logs never contain commands, paths, resources, user messages,
+Decision logs never contain commands, paths, resources, user messages,
 keys, host error text or model response bodies. They use identifiers, fixed codes,
-validated scores and context-warning flags. Neither display recovery nor raw score
+validated scores and context-warning flags. Status follows the same rule, with
+one exception: the `text` API's bounded `explanation`. That model-written text
+can repeat parts of the command or its paths. It stays in the server's memory,
+the RPC events and snapshots, and the toast; it is never written to the decision log.
+With `logPayloads: true`, the payload log also keeps it as part of the response body.
+Neither display recovery nor raw score
 logging requires `logPayloads: true` or reads the private payload log.
 
 #### Defensive fallback and log warnings
@@ -281,6 +329,7 @@ With review `off`, the reviewer emits no status or notes. Another trusted plugin
 can still write matching notes, because the note format is not authenticated.
 
 The fallback shows proposed approvals in `observe` once per request.
+It reads no status, so it ignores the `toasts` setting.
 For negative `observe` judgments, it names the first failed check and displays
 the weakest score and threshold. The score is
 `min(explicitly_authorized, within_scope, 1 - confirmation_required, 1 - high_impact)`.
@@ -426,6 +475,8 @@ programs.opencode-secret-guard.permissionReview = {
   mode = "observe";
   logPayloads = false;
   confidenceThreshold = 0.9;
+  # Optional; "attention" hides progress and approval toasts.
+  toasts = "all";
   # Optional; the default is jev.
   backend = "endpoint";
   endpoint = {
@@ -508,6 +559,8 @@ The `opencode` and `endpoint` blocks also select an `api`.
   - With `api` `text`, the server must reply with the same answer object that
     Jev returns, `{"answers": {"<question>": {"type": "noul", "noul": <probability>}}}`,
     with no other text. Other replies fail closed with `response-json` or `response-shape`.
+    The plugin also asks for `summary` and `rationale` strings for the
+    [toast](#live-phase-notifications). A reply without them is still valid.
   - With `api` `decisions`, the server must provide the OpenAI Decisions API
     at `{baseURL}/decisions`. The plugin sends the evidence as JSON input and
     asks four predicate questions, as for `opencode` with `decisions`. A refusal
@@ -524,7 +577,7 @@ The `opencode` and `endpoint` blocks also select an `api`.
 
 ```json
 {
-  "configVersion": 6,
+  "configVersion": 7,
   "permissionReview": {
     "mode": "observe",
     "backend": "endpoint",

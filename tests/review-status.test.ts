@@ -1,13 +1,17 @@
 import { describe, expect, test } from "bun:test";
 import {
+  MAX_RATIONALE_CHARS,
   MAX_REVIEW_STATUSES,
   MAX_SESSION_REVIEWS,
+  MAX_SUMMARY_CHARS,
   createReviewStatusStore,
+  explanationText,
   negativeThreshold,
   parseReviewStatus,
   reviewHeading,
   reviewLines,
   scoreRows,
+  wantsToast,
   type ReviewScores,
   type ReviewStatus,
 } from "../src/review-status.ts";
@@ -209,6 +213,30 @@ describe("parseReviewStatus", () => {
       { compacted: "true", outside_project: false }, { compacted: false, outside_project: 1 }]) {
       expect(parseReviewStatus({ ...completed(), contextWarnings })).toBeUndefined();
     }
+  });
+
+  test("keeps the explains flag and toasts setting, and rejects other values", () => {
+    expect(parseReviewStatus(status({ explains: true, toasts: "attention" }))).toEqual(status({ explains: true, toasts: "attention" }));
+    expect(parseReviewStatus(status({ explains: false, toasts: "all" }))).toEqual(status({ explains: false, toasts: "all" }));
+    for (const explains of [null, 1, "true"]) expect(parseReviewStatus({ ...status(), explains })).toBeUndefined();
+    for (const toasts of [null, "none", "ALL", 1]) expect(parseReviewStatus({ ...status(), toasts })).toBeUndefined();
+  });
+
+  test("accepts a bounded, single-line explanation and rejects anything else", () => {
+    const explanation = { summary: "s".repeat(MAX_SUMMARY_CHARS), rationale: "Asked for by the user…" };
+    expect(parseReviewStatus(completed({ explanation }))?.explanation).toEqual(explanation);
+    for (const value of [null, [], "text", {}, { summary: "Runs tests." }, { rationale: "Requested." },
+      { summary: "", rationale: "Requested." },
+      { summary: "Runs tests.", rationale: "r".repeat(MAX_RATIONALE_CHARS + 1) },
+      { summary: "s".repeat(MAX_SUMMARY_CHARS + 1), rationale: "Requested." },
+      { summary: "Runs\ntests.", rationale: "Requested." },
+      { summary: "Runs tests.", rationale: "\u001b[2JRequested." },
+      { summary: " Runs tests.", rationale: "Requested." },
+      { summary: "Runs tests.", rationale: 1 }]) {
+      expect(parseReviewStatus({ ...completed(), explanation: value })).toBeUndefined();
+    }
+    const parsed = parseReviewStatus({ ...completed(), explanation: { ...explanation, extra: "dropped" } });
+    expect(parsed?.explanation).toEqual(explanation);
   });
 
   test("returns independent nested objects", () => {
@@ -504,5 +532,109 @@ describe("reviewHeading and reviewLines", () => {
     expect(reviewLines(completed({ modelCalled: false, reason: "auth-no-connection" }))).toContain(
       "Next: no active OpenCode Zen connection; connect OpenCode Zen with an API key in OpenCode, then retry.",
     );
+  });
+
+  test("shows the model's explanation instead of the decision fields and score rows", () => {
+    const explanation = { summary: "Force-pushes main to origin.", rationale: "You said to ask before any push." };
+    const input = completed({ reason: "model-confirmation-required", scores: scores(), explanation, contextWarnings: { compacted: true, outside_project: false } });
+    expect(reviewLines(input)).toEqual([
+      "Manual approval required",
+      "Auto mode · bash",
+      "Does: Force-pushes main to origin.",
+      "Why: You said to ask before any push.",
+      "Compacted context",
+    ]);
+  });
+
+  test("keeps the reason code and remedy when code overrules the model's explained verdict", () => {
+    const explanation = { summary: "Runs the tests.", rationale: "You asked for a local test run." };
+    const passing = scores({ confirmation_required: 0.02 });
+    expect(reviewLines(completed({ proposed: "allow", reason: "context-changed", scores: passing, explanation }))).toEqual([
+      "Review scores passed; approval cancelled",
+      "Auto mode · bash",
+      "Does: Runs the tests.",
+      "Why: You asked for a local test run.",
+      "Reason: context-changed",
+    ]);
+    expect(reviewLines(completed({ proposed: "allow", reason: "deadline", scores: passing, explanation })).slice(-2)).toEqual([
+      "Reason: deadline",
+      "Next: the review timed out.",
+    ]);
+  });
+
+  test("text-mode progress and failure toasts have no score placeholders", () => {
+    expect(reviewLines(status({ explains: true }))).toEqual(["Review triggered: checking eligibility", "Auto mode · bash"]);
+    expect(reviewLines(status({ explains: true, phase: "evaluating", modelCalled: true })))
+      .toEqual(["The reviewer is evaluating", "Auto mode · bash"]);
+    expect(reviewLines(completed({ explains: true, reason: "response-shape" }))).toEqual([
+      "Review failed; manual approval required",
+      "Auto mode · bash",
+      "Proposed: ask · Applied: ask",
+      "Reason: response-shape",
+    ]);
+  });
+
+  test("a text-mode judgment without an explanation still shows its scores", () => {
+    expect(reviewLines(completed({ explains: true, reason: "model-high-impact", scores: scores() }))).toContain("High impact: 5% (≤10%; pass)");
+  });
+});
+
+describe("wantsToast", () => {
+  const attention = { toasts: "attention" } as const;
+
+  test("shows every phase by default", () => {
+    for (const input of [status(), status({ toasts: "all", phase: "evaluating", modelCalled: true }), completed({ applied: "allow" })]) {
+      expect(wantsToast(input)).toBe(true);
+    }
+  });
+
+  test("attention hides progress, approvals and silent skips", () => {
+    for (const input of [
+      status(attention),
+      status({ ...attention, phase: "evaluating", modelCalled: true }),
+      completed({ ...attention, proposed: "allow", applied: "allow", reason: "model-approved" }),
+      completed({ ...attention, modelCalled: false, reason: "action-unsupported" }),
+    ]) {
+      expect(wantsToast(input)).toBe(false);
+    }
+  });
+
+  test("attention keeps judgments and failures that leave a prompt, and skips with a remedy", () => {
+    for (const input of [
+      completed({ ...attention, reason: "model-high-impact" }),
+      completed({ ...attention, mode: "observe", proposed: "allow", reason: "model-approved" }),
+      completed({ ...attention, reason: "response-shape" }),
+      completed({ ...attention, modelCalled: false, reason: "auth-no-connection" }),
+    ]) {
+      expect(wantsToast(input)).toBe(true);
+    }
+  });
+});
+
+describe("explanationText", () => {
+  test("returns plain text unchanged", () => {
+    expect(explanationText("Runs the tests.", 20)).toBe("Runs the tests.");
+  });
+
+  test("turns control, format and line separator characters into single spaces", () => {
+    expect(explanationText(" Runs\u001b[31m\ttests\u2028now\u202e \r\n", 40)).toBe("Runs [31m tests now");
+  });
+
+  test("turns lone surrogates, private-use and unassigned characters into spaces", () => {
+    expect(explanationText("a\ud800b\ue000c\u0378d", 20)).toBe("a b c d");
+  });
+
+  test("cuts long text at a word with an ellipsis within the limit", () => {
+    expect(explanationText("Deletes the build directory and every cached artifact", 30)).toBe("Deletes the build directory…");
+  });
+
+  test("cuts a single long word without splitting a surrogate pair", () => {
+    const cut = explanationText("🔒".repeat(10), 6)!;
+    expect(cut).toBe("🔒🔒…");
+    expect(cut.length).toBeLessThanOrEqual(6);
+  });
+
+  test("rejects values that are not text or are blank", () => {
+    for (const value of [undefined, null, 1, {}, "", " \n\t "]) expect(explanationText(value, 20)).toBeUndefined();
   });
 });

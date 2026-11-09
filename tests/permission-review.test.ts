@@ -6,7 +6,7 @@ import * as path from "node:path";
 import { decide, REVIEW_QUESTIONS, SYSTEM_ONE_ENDPOINT, SYSTEM_ONE_MODEL } from "../src/permission-review.ts";
 import type { ReviewDependencies, ReviewFetch } from "../src/permission-review.ts";
 import { JevRpc, type ReviewSnapshot } from "../src/review-rpc.ts";
-import type { ReviewStatus } from "../src/review-status.ts";
+import { MAX_RATIONALE_CHARS, type ReviewStatus } from "../src/review-status.ts";
 import { fileReviewLog, MAX_LOG_BYTES, PAYLOAD_LOG_LIMITS, payloadLogPath, reviewLogPath } from "../src/review-log.ts";
 import { loadConfig } from "../src/policy.ts";
 import tuiPlugin, { createTuiListener, REASON_QUIET_MS } from "../src/tui.ts";
@@ -1334,6 +1334,7 @@ describe("lifecycle", () => {
     const identity = {
       reviewID: decision.reviewID, sessionID: "ses_1", workspaceID: null, messageID: "msg_1", callID: "call_1",
       action: "shell", mode: "auto", startedAt: expect.any(Number), threshold: 0.9, elapsedMs: expect.any(Number),
+      explains: false, toasts: "all",
     };
     expect(fake.rpc.events).toEqual([
       { name: "review", data: { ...identity, phase: "checking", modelCalled: false, elapsedMs: 0 } },
@@ -2743,6 +2744,16 @@ describe("endpoint backend", () => {
     expect(JSON.parse(body.messages[1].content).state.pending_action).toMatchObject({ requested_command: "bun test" });
   });
 
+  test("asks for a summary and rationale and publishes them", async () => {
+    const reply = { ...JSON.parse(answersJSON(APPROVE)), summary: "Runs the tests.", rationale: "You asked for a local test run." };
+    const fake = await started("auto", { fetch: async () => completion(JSON.stringify(reply)) }, {}, LOCAL);
+    expect((await reviewed(fake)).effect).toBe("allow");
+    const schema = JSON.parse(fake.requests[0]!.init.body).response_format.json_schema;
+    expect(schema).toMatchObject({ strict: true, schema: { required: ["answers", "summary", "rationale"] } });
+    expect(schema.schema.properties).toMatchObject({ summary: { type: "string" }, rationale: { type: "string" } });
+    expect(fake.rpc.events.at(-1)!.data.explanation).toEqual({ summary: reply.summary, rationale: reply.rationale });
+  });
+
   test("sends the key from its file and keeps it out of every log", async () => {
     const keyFile = path.join(dir(), "judge-key");
     fs.writeFileSync(keyFile, "endpoint-secret-value\n");
@@ -2809,7 +2820,8 @@ describe("opencode backend with the text API", () => {
       expect(input.prompt).toContain(`"${name}"`);
       expect(input.prompt).toContain(JSON.stringify(question.criteria.true));
     }
-    expect(input.prompt).toContain('{"answers": {NAME: {"type": "noul", "noul": PROBABILITY}}}');
+    expect(input.prompt).toContain('{"answers": {NAME: {"type": "noul", "noul": PROBABILITY}}, "summary": SUMMARY, "rationale": RATIONALE}');
+    expect(input.prompt).toContain('"required":["answers","summary","rationale"]');
     expect(fake.records[0]).toMatchObject({ event: "start", backend: "opencode", api: "text", model: "github-copilot/gpt-6-luna#low" });
     expect(fake.payloads).toContainEqual(expect.objectContaining({ phase: "request", endpoint: "generate.text", body: JSON.stringify(input) }));
     expect(fake.payloads).toContainEqual(expect.objectContaining({ phase: "response", status: 200, body: answersJSON(APPROVE), omitted: null }));
@@ -2828,6 +2840,67 @@ describe("opencode backend with the text API", () => {
     }, {}, TEXT);
     await reviewed(fake);
     expect(calls).toEqual(["generate"]);
+  });
+
+  const SUMMARY = "Runs the project's test suite with bun.";
+  const RATIONALE = "You asked to run the tests here; the run is local and changes nothing.";
+  const explained = (values: Answers, extra: Record<string, unknown> = { summary: SUMMARY, rationale: RATIONALE }) =>
+    JSON.stringify({ ...JSON.parse(answersJSON(values)), ...extra });
+  const completedStatus = (fake: Fake) => fake.rpc.events.at(-1)!.data;
+
+  test("publishes the summary and rationale with the status, and keeps them out of the decision log", async () => {
+    const fake = await started("auto", { text: async () => ({ text: explained(APPROVE) }) }, {}, TEXT);
+    expect((await reviewed(fake)).effect).toBe("allow");
+    expect(completedStatus(fake)).toMatchObject({
+      phase: "completed", reason: "model-approved", scores: APPROVE, explanation: { summary: SUMMARY, rationale: RATIONALE },
+    });
+    expect(JSON.stringify([fake.records, fake.lines])).not.toMatch(/test suite|You asked/);
+  });
+
+  test("marks every status as explained and forwards the toasts setting", async () => {
+    const fake = await started("auto", { text: async () => ({ text: explained(APPROVE) }) }, {}, { ...TEXT, toasts: "attention" });
+    await reviewed(fake);
+    expect(fake.rpc.events.map(({ data }) => [data.phase, data.explains, data.toasts])).toEqual([
+      ["checking", true, "attention"], ["evaluating", true, "attention"], ["completed", true, "attention"],
+    ]);
+  });
+
+  test("keeps the explanation when a negative judgment asks the user", async () => {
+    const fake = await started("auto", { text: async () => ({ text: explained({ ...APPROVE, high_impact: 0.6 }) }) }, {}, TEXT);
+    expect((await reviewed(fake)).effect).toBe("ask");
+    expect(completedStatus(fake)).toMatchObject({ reason: "model-high-impact", explanation: { summary: SUMMARY, rationale: RATIONALE } });
+  });
+
+  test.each([
+    ["without an explanation", {}],
+    ["with one field missing", { summary: SUMMARY }],
+    ["with a blank field", { summary: SUMMARY, rationale: " \n " }],
+    ["with a field that is not text", { summary: SUMMARY, rationale: 3 }],
+  ])("decides from the answers alone when the reply is %s", async (_, extra) => {
+    const fake = await started("auto", { text: async () => ({ text: explained(APPROVE, extra) }) }, {}, TEXT);
+    expect((await reviewed(fake)).effect).toBe("allow");
+    expect(completedStatus(fake)).not.toHaveProperty("explanation");
+    expect(completedStatus(fake).scores).toEqual(APPROVE);
+  });
+
+  test.each([
+    ["in full", "Uses api_key=hunter2hunter2 from the user."],
+    ["where the cut would remove it", `${"a".repeat(120)} sk-${"A".repeat(30)}`],
+  ])("drops an explanation with a credential %s", async (_, rationale) => {
+    const extra = { summary: SUMMARY, rationale };
+    const fake = await started("auto", { text: async () => ({ text: explained(APPROVE, extra) }) }, {}, TEXT);
+    expect((await reviewed(fake)).effect).toBe("allow");
+    expect(completedStatus(fake)).not.toHaveProperty("explanation");
+  });
+
+  test("shows the explanation as one bounded line without control characters", async () => {
+    const extra = { summary: "Runs\u001b[31m tests\nquietly", rationale: `${"word ".repeat(60)}end` };
+    const fake = await started("auto", { text: async () => ({ text: explained(APPROVE, extra) }) }, {}, TEXT);
+    await reviewed(fake);
+    const explanation = completedStatus(fake).explanation!;
+    expect(explanation.summary).toBe("Runs [31m tests quietly");
+    expect(explanation.rationale.length).toBeLessThanOrEqual(MAX_RATIONALE_CHARS);
+    expect(explanation.rationale).toMatch(/^word( word)*…$/);
   });
 
   test.each([
@@ -3006,6 +3079,13 @@ describe("endpoint backend with the System One API", () => {
     expect(body).toEqual({ ...expected, model: "nimble" });
     expect(Object.values(body.questions).every((question: any) => question.type === "noul")).toBe(true);
     expect(fake.records[0]).toMatchObject({ event: "start", backend: "endpoint", api: "systemone", model: "nimble" });
+  });
+
+  test("ignores explanation fields, which only the text API asks for", async () => {
+    const body = JSON.stringify({ ...JSON.parse(answerBody(APPROVE)), summary: "Runs the tests.", rationale: "Requested." });
+    const fake = await started("auto", { fetch: async () => response(200, body) }, {}, SYSTEM_ONE);
+    expect((await reviewed(fake)).effect).toBe("allow");
+    expect(fake.rpc.events.at(-1)!.data).not.toHaveProperty("explanation");
   });
 
   test.each([
