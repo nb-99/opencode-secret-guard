@@ -1,0 +1,30 @@
+src/review-status.ts
+  s_ae1e4a9106518a::t_872fa205685f28 1-4,6,14-19,21-23,26-42,81,84,107,111,136,246,260,264,269
+  s_ae1e4a9106518a::t_62f350345131db 20
+  s_ae1e4a9106518a::t_297a3f3ea5e123 24-25
+  s_ae1e4a9106518a::t_ded6bceb9ee243 43
+  s_ae1e4a9106518a::t_ba5726f1e6114f 82-83
+  s_ae1e4a9106518a::t_cb8122cc8f4dfd 104-106
+  s_ae1e4a9106518a::t_7b86b2a0230c12 108-110
+  s_ae1e4a9106518a::t_c8e9114780e184 133-135
+  s_ae1e4a9106518a::t_9329b6b7e54d0b 243-245
+  s_ae1e4a9106518a::t_26c4815e0da2f5 261-263
+  s_ae1e4a9106518a::t_089f0fd3a1de03 265-268
+  s_ae1e4a9106518a::t_d54e34e0cee7a5 270
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.7",
+  "base_commit_sha": "ee89d32758bf36656b88fa4b0df0f3b39792b344",
+  "prompts": {},
+  "sessions": {
+    "s_ae1e4a9106518a": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_e400e9612ffewN86zHpoJWN251",
+        "model": "github-copilot/claude-opus-5.5-long"
+      },
+      "human_author": "nb99 <niklas@beilmann.dev>"
+    }
+  }
+}
