@@ -69,19 +69,23 @@ contracts that were checked against the [v2.0.20][v2.0.20-tag] and
   before shell permission. Both checks carry the same tool-call source identity.
   The reviewer tracks each permission action separately.
 - `session.get` and `session.context` return the session and its messages;
-  message types include `user` and `compaction` ([source][v2-session-message]).
-  Completed V2.0.20 compactions have top-level string fields `summary` and
-  `recent`. The latter contains a raw text transcript, not another summary.
+  message types include `user`, `skill`, `assistant` and `compaction`
+  ([source][v2-session-message]). Completed V2.0.20 compactions have top-level
+  string fields `summary` and `recent`; V2.3.0 rebuilds the verbatim text into
+  `metadata.recent`. The reviewer reads only its `[User]:` and skill blocks.
   [Context loading][v2-session-store] starts at the
-  [latest completed compaction][v2-session-history]. See the
-  [review scope](permission-review.md#scope) for the resulting evidence limits.
+  [latest completed compaction][v2-session-history]. A session's `parentID`
+  and `fork` identify subagent sessions and forks. See the
+  [review evidence](permission-review.md#evidence) for what the reviewer reads.
 - `integration.connection.active` and `resolve` return the saved credential
   for an integration ([source][v2-integration]).
 - `event.subscribe` streams host events ([source][v2-plugin-event]). The
   reviewer cancels reviews on `session.execution.interrupted`,
-  `session.deleted`, `session.moved` and `session.inbox.*` events
-  ([source][v2-session-event]), and stops reviewing a session after a
-  `permission.replied` rejection ([source][v2-schema-permission]).
+  `session.deleted`, `session.moved` and `session.inbox.*` events, also in the
+  subagent sessions of that session ([source][v2-session-event]). It maps a
+  `permission.replied` rejection to its call through `permission.asked`, and
+  pauses review in that session until the user writes again
+  ([source][v2-schema-permission]).
 - A plugin's `setup` may return a cleanup function
   ([source][v2-plugin-cleanup]); the guard returns the reviewer's, which
   closes its event subscription and disposes its review RPC registration and
