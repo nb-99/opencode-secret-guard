@@ -32,13 +32,13 @@ function completed(overrides: Partial<ReviewStatus> = {}): ReviewStatus {
 }
 
 const scores = {
-  explicitly_authorized: 0.98, within_scope: 0.95, confirmation_required: 0.22, high_impact: 0.05,
+  explicitly_authorized: 0.98, within_scope: 0.95, confirmation_required: 0.22, sensitive_effect: 0.05, remote_effect: 0.04, named_by_user: 0.2,
 };
 const completedMessage = [
   "Manual approval required", "Auto mode · bash", "Proposed: ask · Applied: ask",
   "Reason: model-confirmation-required", "Authorization: 98% (≥90%; pass)",
   "Within scope: 95% (≥90%; pass)", "Confirmation required: 22% (≤10%; fail)",
-  "High impact: 5% (≤10%; pass)",
+  "Sensitive effect: 5% (≤10%; pass)", "Remote effect: 4%, named 20% (≤10% or named ≥90%; pass)",
 ].join("\n");
 const loaderWarning: Toast = {
   title: "Secret guard review",
@@ -129,7 +129,7 @@ describe("supported TUI setup", () => {
     dispose();
   });
 
-  test("notifies each live phase once and shows all four reviewed scores", async () => {
+  test("notifies each live phase once and shows all reviewed scores", async () => {
     const ui = host();
     const dispose = setupTui(ui.ctx, async () => ui.panel);
     await settlePanel();
@@ -204,7 +204,7 @@ describe("supported TUI setup", () => {
     expect(ui.snapshot).toHaveBeenCalledTimes(1);
   });
 
-  test("a rejected panel loader warns but live review notifications retain all four scores", async () => {
+  test("a rejected panel loader warns but live review notifications retain all scores", async () => {
     const ui = host();
     const loading = deferred<Panel>();
     const dispose = setupTui(ui.ctx, () => loading.promise);

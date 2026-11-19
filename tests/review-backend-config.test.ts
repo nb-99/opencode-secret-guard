@@ -12,8 +12,8 @@ const ENDPOINT = { baseURL: "https://judge.example.com/v1", model: "judge" };
 
 describe("permission review backend selection", () => {
   test("defaults to jev with no extra block", () => {
-    expect(withReview(undefined).permissionReview).toEqual({ mode: "off", logPayloads: false, confidenceThreshold: 0.9, backend: "jev", toasts: "all" });
-    expect(withReview({ mode: "observe" }).permissionReview).toEqual({ mode: "observe", logPayloads: false, confidenceThreshold: 0.9, backend: "jev", toasts: "all" });
+    expect(withReview(undefined).permissionReview).toEqual({ mode: "off", logPayloads: false, confidenceThreshold: 0.9, backend: "jev", toasts: "all", restrictionScreen: true });
+    expect(withReview({ mode: "observe" }).permissionReview).toEqual({ mode: "observe", logPayloads: false, confidenceThreshold: 0.9, backend: "jev", toasts: "all", restrictionScreen: true });
   });
 
   test("keeps the opencode model reference, with an optional variant", () => {
@@ -60,14 +60,14 @@ describe("permission review API selection", () => {
 
   test("resolves each block's default API and the opencode deadline", () => {
     expect(withReview({ backend: "opencode", opencode: OPENCODE }).permissionReview.opencode)
-      .toEqual({ ...OPENCODE, api: "decisions", deadlineMs: 10_000 });
+      .toEqual({ ...OPENCODE, api: "decisions", deadlineMs: 10_000, maxRequestBytes: null });
     expect(withReview({ backend: "endpoint", endpoint: ENDPOINT }).permissionReview.endpoint)
-      .toEqual({ ...ENDPOINT, apiKeyFile: null, deadlineMs: 20_000, api: "text" });
+      .toEqual({ ...ENDPOINT, apiKeyFile: null, deadlineMs: 20_000, api: "text", maxRequestBytes: null });
   });
 
   test("keeps explicit values", () => {
     expect(withReview({ backend: "opencode", opencode: { ...OPENCODE, api: "text", deadlineMs: 25_000 } }).permissionReview.opencode)
-      .toEqual({ ...OPENCODE, api: "text", deadlineMs: 25_000 });
+      .toEqual({ ...OPENCODE, api: "text", deadlineMs: 25_000, maxRequestBytes: null });
     expect(withReview({ backend: "endpoint", endpoint: { ...ENDPOINT, api: "decisions" } }).permissionReview.endpoint)
       .toMatchObject({ api: "decisions" });
     expect(withReview({ backend: "endpoint", endpoint: { ...ENDPOINT, api: "systemone" } }).permissionReview.endpoint)
@@ -75,7 +75,7 @@ describe("permission review API selection", () => {
   });
 
   test("loads a version 5 policy without the new keys, with the same defaults", () => {
-    expect(withVersion(5, { backend: "opencode", opencode: OPENCODE }).opencode).toEqual({ ...OPENCODE, api: "decisions", deadlineMs: 10_000 });
+    expect(withVersion(5, { backend: "opencode", opencode: OPENCODE }).opencode).toEqual({ ...OPENCODE, api: "decisions", deadlineMs: 10_000, maxRequestBytes: null });
     expect(withVersion(5, { backend: "endpoint", endpoint: ENDPOINT }).endpoint).toMatchObject({ api: "text", deadlineMs: 20_000 });
     expect(withVersion(6, { backend: "endpoint", endpoint: { ...ENDPOINT, api: "decisions" } }).endpoint).toMatchObject({ api: "decisions" });
   });
@@ -118,5 +118,39 @@ describe("permission review toasts", () => {
 
   test.each(["none", null, true])("rejects %p", (toasts) => {
     expect(() => withReview({ toasts })).toThrow(/"permissionReview.toasts" must be one of all, attention/);
+  });
+});
+
+describe("permission review request limits and restriction screen", () => {
+  const withVersion = (configVersion: number, permissionReview: unknown) =>
+    validateConfig({ ...raw, configVersion, permissionReview }, "test-policy", HOME, "/tmp").permissionReview;
+  const OPENCODE = { model: "github-copilot/gpt-6-luna#low" };
+
+  test("keeps a request limit in either block, and null as the backend default", () => {
+    expect(withReview({ backend: "opencode", opencode: { ...OPENCODE, maxRequestBytes: 64_000 } }).permissionReview.opencode)
+      .toMatchObject({ maxRequestBytes: 64_000 });
+    expect(withReview({ backend: "endpoint", endpoint: { ...ENDPOINT, maxRequestBytes: 360_000 } }).permissionReview.endpoint)
+      .toMatchObject({ maxRequestBytes: 360_000 });
+    expect(withReview({ backend: "endpoint", endpoint: { ...ENDPOINT, maxRequestBytes: null } }).permissionReview.endpoint)
+      .toMatchObject({ maxRequestBytes: null });
+  });
+
+  test.each([31_999, 360_001, 40_000.5, "64000", true])("rejects a request limit of %p", (maxRequestBytes) => {
+    expect(() => withReview({ backend: "endpoint", endpoint: { ...ENDPOINT, maxRequestBytes } }))
+      .toThrow(/"permissionReview.endpoint.maxRequestBytes" must be null or a whole number from 32000 to 360000/);
+  });
+
+  test("turns the restriction screen off, and rejects other values", () => {
+    expect(withReview({ restrictionScreen: false }).permissionReview.restrictionScreen).toBe(false);
+    expect(withVersion(7, { mode: "auto" }).restrictionScreen).toBe(true);
+    for (const restrictionScreen of ["false", null, 0]) {
+      expect(() => withReview({ restrictionScreen })).toThrow(/"permissionReview.restrictionScreen" must be true or false/);
+    }
+  });
+
+  test("rejects the new keys in a version 7 policy", () => {
+    expect(() => withVersion(7, { restrictionScreen: false })).toThrow('"permissionReview.restrictionScreen" requires configVersion 8 or later');
+    expect(() => withVersion(7, { backend: "opencode", opencode: { ...OPENCODE, maxRequestBytes: 64_000 } }))
+      .toThrow('"permissionReview.opencode.maxRequestBytes" requires configVersion 8 or later');
   });
 });

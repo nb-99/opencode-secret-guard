@@ -51,7 +51,9 @@ function scores(overrides: Partial<ReviewScores> = {}): ReviewScores {
     explicitly_authorized: 0.98,
     within_scope: 0.95,
     confirmation_required: 0.22,
-    high_impact: 0.05,
+    sensitive_effect: 0.05,
+    remote_effect: 0.04,
+    named_by_user: 0.2,
     ...overrides,
   };
 }
@@ -131,10 +133,10 @@ describe("parseReviewStatus", () => {
     }
   });
 
-  test("requires all four finite scores between 0 and 1", () => {
-    const endpoints = scores({ explicitly_authorized: 0, within_scope: 1, confirmation_required: 0, high_impact: 1 });
+  test("requires all six finite scores between 0 and 1", () => {
+    const endpoints = scores({ explicitly_authorized: 0, within_scope: 1, confirmation_required: 0, sensitive_effect: 1, remote_effect: 0, named_by_user: 1 });
     expect(parseReviewStatus(completed({ scores: endpoints }))?.scores).toEqual(endpoints);
-    for (const field of ["explicitly_authorized", "within_scope", "confirmation_required", "high_impact"] as const) {
+    for (const field of ["explicitly_authorized", "within_scope", "confirmation_required", "sensitive_effect", "remote_effect", "named_by_user"] as const) {
       for (const value of [undefined, null, -0.0001, 1.0001, NaN, Infinity, -Infinity, "0.98"]) {
         expect(parseReviewStatus({ ...completed(), scores: { ...scores(), [field]: value } })).toBeUndefined();
       }
@@ -188,7 +190,7 @@ describe("parseReviewStatus", () => {
       proposed: "ask",
       applied: "ask",
       reason: "confirmation-required",
-      scores: { explicitly_authorized: 0.98, within_scope: 0.95, confirmation_required: 0.22, high_impact: 0.05 },
+      scores: { explicitly_authorized: 0.98, within_scope: 0.95, confirmation_required: 0.22, sensitive_effect: 0.05, remote_effect: 0.04, named_by_user: 0.2 },
       contextWarnings: { compacted: true, outside_project: true },
     });
   });
@@ -220,6 +222,13 @@ describe("parseReviewStatus", () => {
     expect(parseReviewStatus(status({ explains: false, toasts: "all" }))).toEqual(status({ explains: false, toasts: "all" }));
     for (const explains of [null, 1, "true"]) expect(parseReviewStatus({ ...status(), explains })).toBeUndefined();
     for (const toasts of [null, "none", "ALL", 1]) expect(parseReviewStatus({ ...status(), toasts })).toBeUndefined();
+  });
+
+  test("keeps the eligible and screened flags, and rejects other values", () => {
+    expect(parseReviewStatus(completed({ eligible: true, screened: false }))).toEqual(completed({ eligible: true, screened: false }));
+    for (const field of ["eligible", "screened"] as const) {
+      for (const value of [null, 1, "true"]) expect(parseReviewStatus({ ...completed(), [field]: value })).toBeUndefined();
+    }
   });
 
   test("accepts a bounded, single-line explanation and rejects anything else", () => {
@@ -301,7 +310,7 @@ describe("createReviewStatusStore", () => {
     const checking = status();
     store.update(checking);
     expect(store.update({ ...completed(), threshold: 0.5 })).toBeUndefined();
-    expect(store.update({ ...completed(), scores: { ...scores(), high_impact: Infinity } })).toBeUndefined();
+    expect(store.update({ ...completed(), scores: { ...scores(), sensitive_effect: Infinity } })).toBeUndefined();
     expect(store.snapshot("session-1")).toEqual([checking]);
   });
 
@@ -371,7 +380,7 @@ describe("createReviewStatusStore", () => {
     result.contextWarnings!.outside_project = true;
     const snapshot = store.snapshot("session-1");
     snapshot[0]!.reviewID = "mutated-snapshot";
-    snapshot[0]!.scores!.high_impact = 1;
+    snapshot[0]!.scores!.sensitive_effect = 1;
     snapshot[0]!.contextWarnings!.compacted = false;
     snapshot.push(status({ reviewID: "injected" }));
 
@@ -396,37 +405,47 @@ describe("createReviewStatusStore", () => {
 });
 
 describe("scoreRows", () => {
-  test("renders 98, 95, 22 and 5 percent with the correct threshold direction", () => {
+  test("renders every check with the correct threshold direction", () => {
     expect(scoreRows(scores(), 0.9)).toEqual([
       { label: "Authorization", score: "98%", required: "≥90%", pass: true },
       { label: "Within scope", score: "95%", required: "≥90%", pass: true },
       { label: "Confirmation required", score: "22%", required: "≤10%", pass: false },
-      { label: "High impact", score: "5%", required: "≤10%", pass: true },
+      { label: "Sensitive effect", score: "5%", required: "≤10%", pass: true },
+      { label: "Remote effect", score: "4%, named 20%", required: "≤10% or named ≥90%", pass: true },
     ]);
   });
 
   test("accepts equality and rejects scores on the wrong side of each limit", () => {
-    expect(scoreRows(scores({ explicitly_authorized: 0.89, within_scope: 0.9, confirmation_required: 0.1, high_impact: 0.11 }), 0.9)).toEqual([
+    expect(scoreRows(scores({ explicitly_authorized: 0.89, within_scope: 0.9, confirmation_required: 0.1, sensitive_effect: 0.11, remote_effect: 0.1 }), 0.9)).toEqual([
       { label: "Authorization", score: "89%", required: "≥90%", pass: false },
       { label: "Within scope", score: "90%", required: "≥90%", pass: true },
       { label: "Confirmation required", score: "10%", required: "≤10%", pass: true },
-      { label: "High impact", score: "11%", required: "≤10%", pass: false },
+      { label: "Sensitive effect", score: "11%", required: "≤10%", pass: false },
+      { label: "Remote effect", score: "10%, named 20%", required: "≤10% or named ≥90%", pass: true },
     ]);
+  });
+
+  test("a remote effect passes only when the user named the action", () => {
+    const rows = (remote_effect: number, named_by_user: number) => scoreRows(scores({ remote_effect, named_by_user }), 0.9).at(-1);
+    expect(rows(0.95, 0.9)).toEqual({ label: "Remote effect", score: "95%, named 90%", required: "≤10% or named ≥90%", pass: true });
+    expect(rows(0.95, 0.89)).toMatchObject({ pass: false });
+    expect(rows(0.11, 0.2)).toMatchObject({ pass: false });
   });
 
   test("uses the exact decimal negative limit of 0.07 for a 0.93 threshold", () => {
     expect(negativeThreshold(0.93)).toBe(0.07);
-    expect(scoreRows(scores({ explicitly_authorized: 0.93, within_scope: 0.93, confirmation_required: 0.07, high_impact: 0.07 }), 0.93)).toEqual([
+    expect(scoreRows(scores({ explicitly_authorized: 0.93, within_scope: 0.93, confirmation_required: 0.07, sensitive_effect: 0.07, remote_effect: 0.07 }), 0.93)).toEqual([
       { label: "Authorization", score: "93%", required: "≥93%", pass: true },
       { label: "Within scope", score: "93%", required: "≥93%", pass: true },
       { label: "Confirmation required", score: "7%", required: "≤7%", pass: true },
-      { label: "High impact", score: "7%", required: "≤7%", pass: true },
+      { label: "Sensitive effect", score: "7%", required: "≤7%", pass: true },
+      { label: "Remote effect", score: "7%, named 20%", required: "≤7% or named ≥93%", pass: true },
     ]);
-    expect(scoreRows(scores({ explicitly_authorized: 0.94, within_scope: 0.92, confirmation_required: 0.0701, high_impact: 0.0699 }), 0.93)).toEqual([
+    expect(scoreRows(scores({ explicitly_authorized: 0.94, within_scope: 0.92, confirmation_required: 0.0701, sensitive_effect: 0.0699 }), 0.93).slice(0, 4)).toEqual([
       { label: "Authorization", score: "94%", required: "≥93%", pass: true },
       { label: "Within scope", score: "92%", required: "≥93%", pass: false },
       { label: "Confirmation required", score: "7.01%", required: "≤7%", pass: false },
-      { label: "High impact", score: "6.99%", required: "≤7%", pass: true },
+      { label: "Sensitive effect", score: "6.99%", required: "≤7%", pass: true },
     ]);
   });
 });
@@ -455,7 +474,8 @@ describe("reviewHeading and reviewLines", () => {
       "Authorization: 98% (≥90%; pass)",
       "Within scope: 95% (≥90%; pass)",
       "Confirmation required: 22% (≤10%; fail)",
-      "High impact: 5% (≤10%; pass)",
+      "Sensitive effect: 5% (≤10%; pass)",
+      "Remote effect: 4%, named 20% (≤10% or named ≥90%; pass)",
       "Compacted context",
       "Outside-project access",
     ]);
@@ -495,7 +515,8 @@ describe("reviewHeading and reviewLines", () => {
       "Authorization: 98% (≥90%; pass)",
       "Within scope: 95% (≥90%; pass)",
       "Confirmation required: 2% (≤10%; pass)",
-      "High impact: 5% (≤10%; pass)",
+      "Sensitive effect: 5% (≤10%; pass)",
+      "Remote effect: 4%, named 20% (≤10% or named ≥90%; pass)",
     ]);
     expect(reviewHeading(approved)).toBe("Automatically approved");
     expect(reviewLines(approved)).toEqual([
@@ -506,7 +527,8 @@ describe("reviewHeading and reviewLines", () => {
       "Authorization: 98% (≥90%; pass)",
       "Within scope: 95% (≥90%; pass)",
       "Confirmation required: 2% (≤10%; pass)",
-      "High impact: 5% (≤10%; pass)",
+      "Sensitive effect: 5% (≤10%; pass)",
+      "Remote effect: 4%, named 20% (≤10% or named ≥90%; pass)",
     ]);
   });
 
@@ -575,7 +597,7 @@ describe("reviewHeading and reviewLines", () => {
   });
 
   test("a text-mode judgment without an explanation still shows its scores", () => {
-    expect(reviewLines(completed({ explains: true, reason: "model-high-impact", scores: scores() }))).toContain("High impact: 5% (≤10%; pass)");
+    expect(reviewLines(completed({ explains: true, reason: "model-high-impact", scores: scores() }))).toContain("Sensitive effect: 5% (≤10%; pass)");
   });
 });
 
