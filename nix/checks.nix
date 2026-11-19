@@ -284,10 +284,12 @@ in
           mode = "auto";
           backend = "opencode";
           toasts = "attention";
+          restrictionScreen = false;
           opencode = {
             model = "github-copilot/gpt-6-luna#low";
             api = "text";
             deadlineMs = 15000;
+            maxRequestBytes = 64000;
           };
         };
       };
@@ -325,6 +327,14 @@ in
       };
     };
     assert rejected { permissionReview.toasts = "none"; };
+    assert rejected {
+      permissionReview = {
+        backend = "endpoint";
+        endpoint = endpointReview.endpoint // {
+          maxRequestBytes = 1000;
+        };
+      };
+    };
     pkgs.runCommand "secret-guard-module" { nativeBuildInputs = [ pkgs.bun ]; } ''
       cp -r ${../src} src
       bun -e '
@@ -332,20 +342,20 @@ in
         const assert = (ok, message) => { if (!ok) throw new Error(message); };
         const review = (file) => JSON.stringify(loadConfig(file, "/home/example").permissionReview);
         assert(review("${policyOf plain}") ===
-          JSON.stringify({ mode: "off", logPayloads: false, confidenceThreshold: 0.9, backend: "jev", toasts: "all" }),
+          JSON.stringify({ mode: "off", logPayloads: false, confidenceThreshold: 0.9, backend: "jev", toasts: "all", restrictionScreen: true }),
           "default review settings changed");
         const endpoint = (api) => JSON.stringify({
-          mode: "observe", logPayloads: false, confidenceThreshold: 0.9, backend: "endpoint", toasts: "all",
+          mode: "observe", logPayloads: false, confidenceThreshold: 0.9, backend: "endpoint", toasts: "all", restrictionScreen: true,
           endpoint: { baseURL: "http://127.0.0.1:11434/v1", model: "local-judge",
-            apiKeyFile: "/home/example/.config/secrets/judge", deadlineMs: 20000, api },
+            apiKeyFile: "/home/example/.config/secrets/judge", deadlineMs: 20000, api, maxRequestBytes: null },
         });
         assert(review("${policyOf endpoint}") === endpoint("text"), "endpoint review settings not written");
         assert(review("${policyOf endpointDecisions}") === endpoint("decisions"), "endpoint decisions API not written");
         assert(review("${policyOf endpointSystemOne}") === endpoint("systemone"), "endpoint System One API not written");
         assert(review("${policyOf opencodeText}") === JSON.stringify({
-          mode: "auto", logPayloads: false, confidenceThreshold: 0.9, backend: "opencode", toasts: "attention",
-          opencode: { model: "github-copilot/gpt-6-luna#low", api: "text", deadlineMs: 15000 },
-        }), "opencode text API or toasts not written");
+          mode: "auto", logPayloads: false, confidenceThreshold: 0.9, backend: "opencode", toasts: "attention", restrictionScreen: false,
+          opencode: { model: "github-copilot/gpt-6-luna#low", api: "text", deadlineMs: 15000, maxRequestBytes: 64000 },
+        }), "opencode text API, toasts, screen or request limit not written");
       '
       touch $out
     '';
@@ -384,6 +394,11 @@ in
     test -f ${package}/lib/review-status.ts
     test -f ${package}/lib/review-summary.ts
     test -f ${package}/lib/review-questions.ts
+    test -f ${package}/lib/review-evidence.ts
+    test -f ${package}/lib/review-screen.ts
+    test -f ${package}/lib/review-report.ts
+    # The package records its source revision for the decision log.
+    grep -q '^export const GUARD_REVISION: string | null = "' ${package}/lib/build-info.ts
     test -f ${package}/lib/node_modules/zod/package.json
     # The wrapper's interpreter must be a store path, not resolved via PATH.
     head -1 ${package}/bin/.opencode-secret-guard-wrapped | grep -q '^#!/nix/store/'

@@ -35,7 +35,8 @@ const MODEL_JUDGMENTS: Readonly<Record<string, string>> = {
   "model-not-authorized": "authorization",
   "model-out-of-scope": "scope",
   "model-confirmation-required": "confirmation",
-  "model-high-impact": "impact",
+  "model-sensitive-effect": "sensitive effect",
+  "model-remote-unnamed": "remote effect not named by the user",
 };
 
 /**

@@ -20,7 +20,9 @@
     in
     {
       packages = forAllSystems (pkgs: rec {
-        opencode-secret-guard = pkgs.callPackage ./nix/package.nix { };
+        opencode-secret-guard = pkgs.callPackage ./nix/package.nix {
+          revision = self.shortRev or self.dirtyShortRev or null;
+        };
         default = opencode-secret-guard;
       });
 

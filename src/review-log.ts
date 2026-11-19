@@ -28,8 +28,8 @@ const MAX_RECORD_BYTES = 4096;
 
 /**
  * The opt-in payload log (`logPayloads`) holds request and response bodies,
- * so its records are larger: a 48 kB request or 64 kB response, JSON-escaped.
- * Unlike the decision log it contains commands and the user's messages.
+ * so its records are larger: a request of up to 360 kB or a 64 kB response,
+ * JSON-escaped. Unlike the decision log it contains commands and the user's messages.
  */
 export const PAYLOAD_LOG_LIMITS = { maxRecordBytes: 512 * 1024, maxLogBytes: 8 * 1024 * 1024 } as const;
 
@@ -43,7 +43,11 @@ function stateDirectory(): string {
 export const reviewLogPath = (): string => path.join(stateDirectory(), "permission-review.jsonl");
 export const payloadLogPath = (): string => path.join(stateDirectory(), "permission-review-payloads.jsonl");
 
-export type ReviewRecord = Record<string, string | number | boolean | null | ReviewScores>;
+/** Fixed codes, numbers and identifiers only in the decision log; see above. */
+export type ReviewRecordValue =
+  | string | number | boolean | null | ReviewScores | readonly string[]
+  | { readonly [key: string]: string | number | boolean | null };
+export type ReviewRecord = Record<string, ReviewRecordValue>;
 export type ReviewLogWriter = (record: ReviewRecord) => void;
 
 /** Existing files with wider modes are refused, not changed: they are the user's. */

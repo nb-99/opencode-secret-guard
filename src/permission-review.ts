@@ -1,6 +1,6 @@
 /**
  * Optional, approval-only review of OpenCode V2 permission prompts by TypeSafe's
- * System One model Jev, served through OpenCode Zen.
+ * System One model Jev, served through OpenCode Zen, or another backend.
  *
  * Only an incoming `ask` is reviewed, and the only change this module ever makes
  * is `ask` -> `allow` for that one evaluation: never `deny`, never a saved rule.
@@ -12,40 +12,69 @@
  * deliberately strict starting points.
  */
 import { randomUUID } from "node:crypto";
-import * as os from "node:os";
 import * as path from "node:path";
-import { matchesAny } from "./paths.ts";
+import { GUARD_REVISION } from "./build-info.ts";
 import { DEFAULT_PERMISSION_REVIEW, type PermissionReviewMode, type PermissionReviewSettings } from "./policy.ts";
 import { formatNote, LOG_UNAVAILABLE_NOTE, PAYLOAD_LOG_UNAVAILABLE_NOTE } from "./review-notes.ts";
 import { fileReviewLog, PAYLOAD_LOG_LIMITS, payloadLogPath, reviewLogPath, type ReviewLogWriter, type ReviewRecord } from "./review-log.ts";
 import { explanationText, MAX_RATIONALE_CHARS, MAX_SUMMARY_CHARS, negativeThreshold, type ReviewExplanation, type ReviewScores } from "./review-status.ts";
 import { setupReviewStatus, type ReviewRpcContext } from "./review-rpc.ts";
-import { COMPACTED_QUESTIONS, REVIEW_QUESTIONS } from "./review-questions.ts";
+import { COMPACTED_QUESTIONS, QUESTION_NAMES, REVIEW_QUESTIONS } from "./review-questions.ts";
 import {
   createReviewBackend,
   Ineligible,
+  PROMPT_VERSION,
   within,
   type ReviewAnswers,
   type ReviewFetch,
   type ReviewRequest,
+  type ReviewUsage,
 } from "./review-backends.ts";
+import {
+  buildEvidence,
+  credentialCheck,
+  effectiveDirectory,
+  parseContext,
+  refusalGate,
+  tokenMatcher,
+  type ActionEvidence,
+  type ContextWarnings,
+  type CredentialCheck,
+  type EvidenceTag,
+  type LiveRefusals,
+  type ParsedContext,
+  type RefusedCall,
+  type ReviewAction,
+  type SecretNames,
+  type SkipDetail,
+} from "./review-evidence.ts";
+import { createScreenCache, runScreen, SCREEN_DEADLINE_SHARE, SCREEN_MIN_REMAINING_MS } from "./review-screen.ts";
 export { REVIEW_QUESTIONS } from "./review-questions.ts";
 export { SYSTEM_ONE_ENDPOINT, SYSTEM_ONE_MODEL } from "./review-backends.ts";
 export type { ReviewFetch } from "./review-backends.ts";
+export type { SecretNames } from "./review-evidence.ts";
 
 /** Covers session lookup, context, credential resolution and the request. */
 const REVIEW_DEADLINE_MS = 10_000;
 const MAX_CONCURRENT_REVIEWS = 2;
 const PENDING_TTL_MS = 15 * 60_000;
 const MAX_PENDING_CALLS = 512;
-const MAX_REFUSED_SESSIONS = 1_024;
 const MAX_UNSAFE_CALLS = 1_024;
+/** Open permission requests remembered to map a reject to its call. */
+const MAX_ASKED = 1_024;
+/** Sessions paused by a live reject. When full, every other session waits for its user too. */
+const MAX_PAUSED_SESSIONS = 1_024;
+/** Sessions whose refused calls are kept as evidence, and calls kept per session. */
+const MAX_REFUSED_CALL_SESSIONS = 1_024;
+const MAX_REFUSED_CALLS = 8;
+/** Parent lookups from a subagent session to its root. */
+const MAX_ANCESTRY = 4;
+/** Attempts to shrink the evidence until the request fits the backend's limit. */
+const FIT_ATTEMPTS = 4;
 
 const MAX_COMMAND_CHARS = 4_000;
 const MAX_FIELD_CHARS = 1_000;
 const MAX_RESOURCES = 16;
-const MAX_HUMAN_CHARS = 12_000;
-
 
 type MaybePromise = void | Promise<void>;
 
@@ -107,6 +136,8 @@ export interface ReviewContext extends ReviewRpcContext {
   readonly generate?: {
     text?(input: unknown): Promise<unknown>;
   };
+  /** v2.3.0 plugin `App`; only the version is read, for the decision log. */
+  readonly app?: { readonly version?: unknown };
 }
 
 /** v2.0.20 plugin `Cleanup`. */
@@ -142,57 +173,17 @@ const defaultDependencies = (): ReviewDependencies => {
 
 /** A safe identifier for correlation, or null; host ids are not trusted to be short or plain. */
 const safeID = (value: unknown) => (typeof value === "string" && /^[A-Za-z0-9_.:-]{1,80}$/.test(value) ? value : null);
-
-/**
- * Obvious inline credentials. Any match in the action or in the human's text
- * keeps the prompt and sends nothing: partial redaction cannot be trusted to
- * remove a whole secret, such as the body of a PEM key or a quoted password.
- */
-const INLINE_CREDENTIAL = new RegExp(
-  [
-    String.raw`\bsk-[A-Za-z0-9_-]{16,}`,
-    String.raw`\bgh[pousr]_[A-Za-z0-9]{20,}`,
-    String.raw`\bgithub_pat_\w{20,}`,
-    String.raw`\bglpat-[\w-]{20,}`,
-    String.raw`\bAKIA[0-9A-Z]{16}\b`,
-    String.raw`\bxox[abprs]-[A-Za-z0-9-]{10,}`,
-    String.raw`-----BEGIN [A-Z ]*PRIVATE KEY-----`,
-    String.raw`\b(?:bearer|basic)\s+[A-Za-z0-9._~+/=-]{16,}`,
-    // Also matches prefixed and suffixed names such as AWS_SECRET_ACCESS_KEY=.
-    String.raw`(?:password|passwd|secret|token|api[_-]?key|access[_-]?key)\w*\s*[=:]\s*\S+`,
-    String.raw`://[^/\s:@]+:[^/\s@]+@`,
-  ].join("|"),
-  "gi",
-);
-
-/** The guard's configured secret environment names, reused for assignments. */
-export interface SecretNames {
-  readonly secretEnvironment: ReadonlyArray<string>;
-  readonly secretEnvironmentPatterns: ReadonlyArray<string>;
-}
-
-const ASSIGNMENT = /([A-Za-z_][A-Za-z0-9_]*)\s*[=:]/g;
-
-/** Recognises some credentials; not an exhaustive scanner. */
-type CredentialCheck = (text: string) => boolean;
-
-const credentialCheck = (secrets: SecretNames): CredentialCheck => (text) => {
-  INLINE_CREDENTIAL.lastIndex = 0;
-  if (INLINE_CREDENTIAL.test(text)) return true;
-  for (const [, name] of text.matchAll(ASSIGNMENT)) {
-    if (secrets.secretEnvironment.includes(name!) || matchesAny(name!, [...secrets.secretEnvironmentPatterns])) return true;
-  }
-  return false;
-};
+const safeVersion = (value: unknown) => (typeof value === "string" && /^[A-Za-z0-9._+-]{1,40}$/.test(value) ? value : null);
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
-type ContextWarnings = { compacted: boolean; outside_project: boolean };
 /** The decision this module reports. Only `explanation` carries content: model-written text. */
 export type ReviewOutcome = {
   allow: boolean; proposed?: "allow" | "ask"; reason: string; score?: number; scores?: ReviewScores;
   explanation?: ReviewExplanation; contextWarnings?: ContextWarnings;
+  /** The approval relied on the user naming a remote or publishing action. */
+  remoteNamed?: boolean;
 };
 
 const ask = (reason: string): ReviewOutcome => ({ allow: false, reason });
@@ -201,40 +192,12 @@ const ask = (reason: string): ReviewOutcome => ({ allow: false, reason });
  * The model's explanation as the terminal shows it, or nothing. It is checked
  * for credentials before and after cleaning, so a cut cannot hide a match.
  */
-function shownExplanation(raw: ReviewExplanation | undefined, hasCredential: CredentialCheck): ReviewExplanation | undefined {
+function shownExplanation(raw: ReviewExplanation | undefined, credentials: CredentialCheck): ReviewExplanation | undefined {
   if (!raw) return undefined;
   const summary = explanationText(raw.summary, MAX_SUMMARY_CHARS);
   const rationale = explanationText(raw.rationale, MAX_RATIONALE_CHARS);
   if (!summary || !rationale) return undefined;
-  return [raw.summary, raw.rationale, summary, rationale].some(hasCredential) ? undefined : { summary, rationale };
-}
-
-/**
- * The action as the reviewer sees it: the tool call's own command and the
- * absolute directory it asks for, plus the commands V2 parsed for the prompt.
- * V2 gives shell.create.before hooks no call identity and the prompt no
- * metadata, so a plugin that rewrites the final invocation is trusted.
- */
-type ReviewAction = "shell" | "external_directory";
-type ActionEvidence = {
-  kind: "shell";
-  permission_action: ReviewAction;
-  requested_command: string;
-  requested_cwd: string;
-  project_directory: string;
-  permission_resources: string[];
-};
-
-/**
- * v2.0.20 `FileAccess.resolvePath`: `~` and `~/` name the home directory and
- * everything else resolves against the location directory.
- */
-function effectiveDirectory(location: string, workdir: string | undefined): string {
-  if (workdir === undefined) return location;
-  const home = os.homedir();
-  if (workdir === "~") return home;
-  if (workdir.startsWith("~/")) return path.join(home, workdir.slice(2));
-  return path.resolve(location, workdir);
+  return [raw.summary, raw.rationale, summary, rationale].some(credentials.any) ? undefined : { summary, rationale };
 }
 
 const inside = (root: string, target: string) => {
@@ -242,110 +205,55 @@ const inside = (root: string, target: string) => {
   return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 };
 
-const boundedString = (value: unknown, limit: number, what: string, hasCredential: CredentialCheck): string => {
-  if (typeof value !== "string" || value.length === 0) throw new Ineligible(`${what}-missing`);
-  if (value.length > limit) throw new Ineligible(`${what}-oversize`);
-  if (hasCredential(value)) throw new Ineligible(`${what}-credential`);
-  return value;
-};
-
 /**
  * Only shell calls are eligible, including their external-access requests.
  * An edit or write is judged by content this module does not export, so it
- * stays a prompt, as do patches, MCP tools and anything else.
+ * stays a prompt, as do patches, MCP tools and anything else. A real token
+ * format keeps the prompt. A generic or configured `name=value` has its value
+ * removed only when the value is one plain word; any other match keeps the
+ * prompt, so the removal never hides part of what runs.
  */
 function actionEvidence(
   evaluation: PermissionEvaluation,
   tool: string,
   input: unknown,
   location: string,
-  hasCredential: CredentialCheck,
-): ActionEvidence {
+  credentials: CredentialCheck,
+): { action: ActionEvidence; redacted: boolean } {
+  let redacted = false;
+  const field = (value: unknown, limit: number, what: string): string => {
+    if (typeof value !== "string" || value.length === 0) throw new Ineligible(`${what}-missing`);
+    if (value.length > limit) throw new Ineligible(`${what}-oversize`);
+    if (credentials.token(value)) throw new Ineligible(`${what}-credential`);
+    const shown = credentials.redactValues(value);
+    if (credentials.any(shown)) throw new Ineligible(`${what}-credential`);
+    if (shown !== value) redacted = true;
+    return shown;
+  };
   if (!isRecord(input)) throw new Ineligible("input-shape");
   if (evaluation.resources.length === 0 || evaluation.resources.length > MAX_RESOURCES) {
     throw new Ineligible("resources-bounds");
   }
-  const resources = evaluation.resources.map((resource) => boundedString(resource, MAX_COMMAND_CHARS, "resource", hasCredential));
+  const resources = evaluation.resources.map((resource) => field(resource, MAX_COMMAND_CHARS, "resource"));
   const name = tool.toLowerCase();
   if ((evaluation.action !== "shell" && evaluation.action !== "external_directory") || name !== "shell") {
     throw new Ineligible("action-unsupported");
   }
-  const command = boundedString(input.command, MAX_COMMAND_CHARS, "command", hasCredential);
-  const workdir = input.workdir === undefined ? undefined : boundedString(input.workdir, MAX_FIELD_CHARS, "workdir", hasCredential);
-  const cwd = boundedString(effectiveDirectory(location, workdir), MAX_FIELD_CHARS, "cwd", hasCredential);
+  const command = field(input.command, MAX_COMMAND_CHARS, "command");
+  if (input.workdir !== undefined) field(input.workdir, MAX_FIELD_CHARS, "workdir");
+  const workdir = input.workdir as string | undefined;
+  const cwd = field(effectiveDirectory(location, workdir), MAX_FIELD_CHARS, "cwd");
   return {
-    kind: "shell",
-    permission_action: evaluation.action,
-    requested_command: command,
-    requested_cwd: cwd,
-    project_directory: location,
-    permission_resources: resources,
+    action: {
+      kind: "shell",
+      permission_action: evaluation.action,
+      requested_command: command,
+      requested_cwd: cwd,
+      project_directory: location,
+      permission_resources: resources,
+    },
+    redacted,
   };
-}
-
-/**
- * Saved refusals, on the assistant message or a tool part's error state
- * (v2.0.20 session-message.ts). to-session-error.ts maps a corrected or
- * blocked permission to `permission.rejected`; runner/step.ts saves a plain
- * decline, like any interruption, as `aborted`. Both are treated as a refusal.
- */
-const REFUSAL_ERRORS = new Set(["permission.rejected", "aborted"]);
-const refusal = (error: unknown) => isRecord(error) && REFUSAL_ERRORS.has(error.type as string);
-function refusedPermission(message: Record<string, unknown>): boolean {
-  if (refusal(message.error)) return true;
-  if (!Array.isArray(message.content)) return false;
-  return message.content.some((part) => isRecord(part) && isRecord(part.state) && refusal(part.state.error));
-}
-
-type CompactionEvidence = { summary: string };
-
-/** User-channel text and separate generated summaries. */
-function userMessages(
-  context: unknown,
-  hasCredential: CredentialCheck,
-): { texts: string[]; compactions: CompactionEvidence[]; identity: string } {
-  if (!Array.isArray(context)) throw new Ineligible("context-shape");
-  const texts: string[] = [];
-  const compactions: CompactionEvidence[] = [];
-  const ids: unknown[] = [];
-  let total = 0;
-  const checkedText = (text: unknown): string => {
-    if (typeof text !== "string") throw new Ineligible("context-shape");
-    total += text.length;
-    if (total > MAX_HUMAN_CHARS) throw new Ineligible("context-oversize");
-    if (hasCredential(text)) throw new Ineligible("context-credential");
-    return text;
-  };
-  for (const message of context) {
-    if (!isRecord(message) || typeof message.type !== "string") throw new Ineligible("context-shape");
-    if (message.type === "compaction") {
-      if (message.status !== "completed") throw new Ineligible("context-compacted");
-      const summary = checkedText(message.summary);
-      // `recent` is a raw transcript, not a summary. Provider-native fields are also omitted.
-      compactions.push({ summary });
-      ids.push(["compaction", message.id ?? null]);
-      continue;
-    }
-    if (message.type === "assistant" && refusedPermission(message)) throw new Ineligible("context-rejected");
-    if (message.type !== "user") continue;
-    // v2.0.20 inlines attached files and skill text into what the main agent
-    // sees (runner/to-llm-message.ts); they are not exported, so any attachment
-    // keeps the prompt.
-    for (const field of ["files", "skills"] as const) {
-      const value = message[field];
-      if (value === undefined) continue;
-      if (!Array.isArray(value)) throw new Ineligible("context-shape");
-      if (value.length > 0) throw new Ineligible("context-attachment");
-    }
-    const text = checkedText(message.text);
-    texts.push(text);
-    ids.push(message.id ?? null);
-  }
-  if (texts.length === 0 && !compactions.some((entry) => entry.summary.trim())) {
-    throw new Ineligible("context-no-human");
-  }
-  // Same text under a new message id is a new message.
-  return { texts, compactions, identity: JSON.stringify([ids, texts, compactions]) };
 }
 
 /**
@@ -354,28 +262,29 @@ function userMessages(
  * t = 0.93 gives exactly 0.07 rather than 0.06999...; at t = 1 the limit is
  * 0 and any positive p asks. A JSON number in (0.5, 1] prints without an
  * exponent, so its decimal digits are its precision.
+ *
+ * A remote or publishing effect passes when the user named the action and
+ * its target. Data loss, security, credentials and production stay manual.
  */
 export function decide(answers: ReviewAnswers, threshold = DEFAULT_PERMISSION_REVIEW.confidenceThreshold): ReviewOutcome {
   const negativeLimit = negativeThreshold(threshold);
-  const scores: ReviewScores = {
-    explicitly_authorized: answers.explicitly_authorized.noul,
-    within_scope: answers.within_scope.noul,
-    confirmation_required: answers.confirmation_required.noul,
-    high_impact: answers.high_impact.noul,
-  };
+  const scores = Object.fromEntries(QUESTION_NAMES.map((name) => [name, answers[name].noul])) as ReviewScores;
   // Display only: the comparisons below decide, not this score.
   const score = Math.min(
-    answers.explicitly_authorized.noul,
-    answers.within_scope.noul,
-    1 - answers.confirmation_required.noul,
-    1 - answers.high_impact.noul,
+    scores.explicitly_authorized,
+    scores.within_scope,
+    1 - scores.confirmation_required,
+    1 - scores.sensitive_effect,
+    Math.max(1 - scores.remote_effect, scores.named_by_user),
   );
   const scored = (reason: string): ReviewOutcome => ({ allow: false, reason, score, scores });
-  if (answers.confirmation_required.noul > negativeLimit) return scored("model-confirmation-required");
-  if (answers.high_impact.noul > negativeLimit) return scored("model-high-impact");
-  if (answers.explicitly_authorized.noul < threshold) return scored("model-not-authorized");
-  if (answers.within_scope.noul < threshold) return scored("model-out-of-scope");
-  return { allow: true, reason: "model-approved", score, scores };
+  const remote = scores.remote_effect > negativeLimit;
+  if (scores.confirmation_required > negativeLimit) return scored("model-confirmation-required");
+  if (scores.sensitive_effect > negativeLimit) return scored("model-sensitive-effect");
+  if (remote && scores.named_by_user < threshold) return scored("model-remote-unnamed");
+  if (scores.explicitly_authorized < threshold) return scored("model-not-authorized");
+  if (scores.within_scope < threshold) return scored("model-out-of-scope");
+  return { allow: true, reason: "model-approved", score, scores, ...(remote ? { remoteNamed: true } : {}) };
 }
 
 async function apiKey(ctx: ReviewContext, signal: AbortSignal): Promise<string> {
@@ -426,18 +335,54 @@ function snapshot(event: ToolCallBefore): { tool: string; input: unknown; text: 
   return { tool, input: JSON.parse(text)[1], text };
 }
 
-/** The session as review requires it: a root session in this plugin's location. */
-function rootSession(session: unknown, sessionID: string, location: string): string {
+/** The pending session and, for a subagent session, its root. */
+interface SessionChain {
+  /** Location and ancestry; the final recheck compares it. */
+  readonly identity: string;
+  /** The root session of a subagent session, where the user writes. */
+  readonly rootID?: string;
+  readonly forked: boolean;
+}
+
+/**
+ * A session in this plugin's location. A subagent session follows `parentID`
+ * to its root; a fork reviews with its own copied history. A fork of a
+ * subagent session follows the subagent rules.
+ */
+async function resolveSession(
+  sessions: NonNullable<ReviewContext["session"]>,
+  sessionID: string,
+  location: string,
+  signal: AbortSignal,
+): Promise<SessionChain> {
+  const session = await within(sessions.get({ sessionID }), signal);
   if (!isRecord(session) || session.id !== sessionID) throw new Ineligible("session-unknown");
-  // Delegated and forked sessions carry prompts a human did not type here.
-  if (session.parentID !== undefined && session.parentID !== null) throw new Ineligible("session-delegated");
-  if (session.fork !== undefined && session.fork !== null) throw new Ineligible("session-forked");
   // v2.0.20 Session.Info: `location.directory` is absolute; `subpath` is separate.
   if (!isRecord(session.location) || session.location.directory !== location) throw new Ineligible("session-location");
   if (session.subpath !== undefined && session.subpath !== null && session.subpath !== "") {
     throw new Ineligible("session-subpath");
   }
-  return JSON.stringify([session.location.directory, session.location.workspaceID ?? null]);
+  const forked = session.fork !== undefined && session.fork !== null;
+  const place = [session.location.directory, session.location.workspaceID ?? null];
+  const chain = [sessionID];
+  let current: Record<string, unknown> = session;
+  while (current.parentID !== undefined && current.parentID !== null) {
+    const parentID = current.parentID;
+    if (typeof parentID !== "string" || chain.includes(parentID) || chain.length > MAX_ANCESTRY) {
+      throw new Ineligible("session-ancestry");
+    }
+    const parent = await within(sessions.get({ sessionID: parentID }), signal).catch((error) => {
+      throw error instanceof Ineligible ? error : new Ineligible("session-ancestry");
+    });
+    if (!isRecord(parent) || parent.id !== parentID) throw new Ineligible("session-ancestry");
+    chain.push(parentID);
+    current = parent;
+  }
+  return {
+    identity: JSON.stringify([...place, chain]),
+    ...(chain.length > 1 ? { rootID: chain.at(-1)! } : {}),
+    forked,
+  };
 }
 
 /**
@@ -456,8 +401,19 @@ const INVALIDATING_EVENTS = new Set([
 
 interface ActiveReview {
   readonly sessionID: string;
+  /** Set once known: events for the root also cancel reviews in its subagent sessions. */
+  rootSessionID?: string;
   readonly controller: AbortController;
   cancelled?: string;
+}
+
+/** What a review found, for the decision log and the status; codes and counts only. */
+interface ReviewInfo {
+  eligible: boolean;
+  skipDetail?: SkipDetail;
+  tags?: Set<EvidenceTag>;
+  screen?: { chunks: number; cached: number; asked: number; selected: number; failed: boolean };
+  usage?: ReviewUsage;
 }
 
 /**
@@ -474,6 +430,7 @@ export async function setupPermissionReview(
 ): Promise<ReviewCleanup | undefined> {
   const dependencies = { ...defaultDependencies(), ...overrides };
   const { mode, confidenceThreshold: threshold } = settings;
+  const restrictionScreen = settings.restrictionScreen ?? DEFAULT_PERMISSION_REVIEW.restrictionScreen;
   const { log } = dependencies;
   const say = (line: string) => {
     try {
@@ -533,12 +490,10 @@ export async function setupPermissionReview(
   });
   // A local endpoint can need longer than the 10 second default; see review-backends.ts.
   const deadlineMs = settings.endpoint?.deadlineMs ?? settings.opencode?.deadlineMs ?? dependencies.deadlineMs;
-  const hasCredential = credentialCheck(secrets);
+  const credentials = credentialCheck(secrets);
+  const screenCache = createScreenCache();
   const statuses = await setupReviewStatus(ctx);
   const pending = new Map<string, PendingCall>();
-  // Sessions where the human refused a prompt this run; review never resumes
-  // there. Bounded: once full, every session counts as refused.
-  const refused = new Set<string>();
   const reviews = new Set<ActiveReview>();
   // Call identities that can no longer be bound to one call: two live calls
   // shared them (CodeMode children can), or a call was dropped unfinished (expiry, cap or a session event) and
@@ -555,6 +510,40 @@ export async function setupPermissionReview(
     if (entry?.event.tool === "shell") poison(key);
   };
 
+  // Live rejects. A reject pauses review in its session until the user writes
+  // again or gives feedback. Pauses are never evicted: when the store is full,
+  // every session without an entry waits for its user after the latest reject.
+  const asked = new Map<string, { sessionID: string; messageID?: string; callID?: string; action?: string }>();
+  const pauses = new Map<string, number>();
+  let overflowSince: number | undefined;
+  let everySession = false;
+  const refusedCalls = new Map<string, RefusedCall[]>();
+  const liveFor = (sessionID: string): LiveRefusals => {
+    const since = pauses.get(sessionID) ?? overflowSince;
+    return { ...(since === undefined ? {} : { pausedSince: since }), everySession, calls: refusedCalls.get(sessionID) ?? [] };
+  };
+  const pause = (sessionID: string | undefined, call: RefusedCall | undefined, at: number) => {
+    if (sessionID === undefined) {
+      everySession = true;
+      return;
+    }
+    if (pauses.has(sessionID) || pauses.size < MAX_PAUSED_SESSIONS) {
+      pauses.delete(sessionID);
+      pauses.set(sessionID, at);
+    } else {
+      overflowSince = at;
+    }
+    if (!call) return;
+    const calls = [...(refusedCalls.get(sessionID) ?? []), call].slice(-MAX_REFUSED_CALLS);
+    refusedCalls.delete(sessionID);
+    refusedCalls.set(sessionID, calls);
+    if (refusedCalls.size > MAX_REFUSED_CALL_SESSIONS) refusedCalls.delete(refusedCalls.keys().next().value!);
+  };
+  // Only the pause that the review saw ends; a newer reject keeps its own.
+  const lift = (sessionID: string, since: number | undefined) => {
+    if (since !== undefined && pauses.get(sessionID) === since) pauses.delete(sessionID);
+  };
+
   const subscription = new AbortController();
   // Reviews run only while the event stream is live; without it a change of
   // instructions could go unnoticed.
@@ -562,7 +551,7 @@ export async function setupPermissionReview(
 
   const cancelSession = (sessionID: string | undefined, reason: string) => {
     for (const active of reviews) {
-      if (sessionID !== undefined && active.sessionID !== sessionID) continue;
+      if (sessionID !== undefined && active.sessionID !== sessionID && active.rootSessionID !== sessionID) continue;
       active.cancelled = reason;
       active.controller.abort(reason);
     }
@@ -585,9 +574,14 @@ export async function setupPermissionReview(
     }
   };
 
-  const review = async (evaluation: PermissionEvaluation, reviewID: string, onRequest: () => void): Promise<ReviewOutcome> => {
+  const review = async (
+    evaluation: PermissionEvaluation,
+    reviewID: string,
+    started: number,
+    info: ReviewInfo,
+    onRequest: () => void,
+  ): Promise<ReviewOutcome> => {
     if (!live) return ask("events-unavailable");
-    if (refused.has(evaluation.sessionID) || refused.size >= MAX_REFUSED_SESSIONS) return ask("session-rejected");
     const source = evaluation.source;
     if (!source || source.type !== "tool") return ask("no-tool-source");
     const callKey = pendingKey(evaluation.sessionID, source.messageID, source.id);
@@ -613,7 +607,6 @@ export async function setupPermissionReview(
     const signal = active.controller.signal;
     const timer = setTimeout(() => active.controller.abort("deadline"), deadlineMs);
     const sessionID = evaluation.sessionID;
-    const state = async () => rootSession(await within(sessions.get({ sessionID }), signal), sessionID, location);
     let contextWarnings: ContextWarnings | undefined;
     let judged: ReviewOutcome | undefined;
     const withWarnings = (outcome: ReviewOutcome): ReviewOutcome =>
@@ -623,14 +616,55 @@ export async function setupPermissionReview(
       });
     try {
       const before = snapshot(call.event);
-      const action = actionEvidence(evaluation, before.tool, before.input, location, hasCredential);
-      const cwdExternal = !inside(location, action.requested_cwd);
-      const where = await state();
+      const { action, redacted } = actionEvidence(evaluation, before.tool, before.input, location, credentials);
+      info.eligible = true;
+      const outsideProject = !inside(location, action.requested_cwd) || call.externalAccess === true;
+      const chain = await resolveSession(sessions, sessionID, location, signal);
+      if (chain.rootID !== undefined) active.rootSessionID = chain.rootID;
       // Credentials come before the transcript, so a missing credential never
       // causes the context to be read.
-      const send = await backend.prepare(signal);
-      const human = userMessages(await within(sessions.context({ sessionID }), signal), hasCredential);
-      contextWarnings = { compacted: human.compactions.length > 0, outside_project: cwdExternal || call.externalAccess === true };
+      const channel = await backend.prepare(signal);
+      const read = async (): Promise<{ target: ParsedContext; root?: ParsedContext }> => {
+        const [target, root] = await Promise.all([
+          within(sessions.context({ sessionID }), signal),
+          chain.rootID === undefined ? undefined : within(sessions.context({ sessionID: chain.rootID }), signal),
+        ]);
+        return { target: parseContext(target), ...(root === undefined ? {} : { root: parseContext(root) }) };
+      };
+      const gateFor = (contexts: { target: ParsedContext; root?: ParsedContext }) => refusalGate({
+        ...contexts,
+        live: liveFor(sessionID),
+        ...(chain.rootID === undefined ? {} : { rootLive: liveFor(chain.rootID) }),
+        action, location, credentials,
+      });
+      const contexts = await read();
+      const pausedSince = liveFor(sessionID).pausedSince;
+      const gate = gateFor(contexts);
+      if (gate.skip) {
+        info.skipDetail = gate.skip.detail;
+        return withWarnings(ask(gate.skip.reason));
+      }
+      if (gate.lifted) lift(sessionID, pausedSince);
+      const compacted = contexts.target.compactions.length > 0 || (contexts.root?.compactions.length ?? 0) > 0;
+      const questions = compacted ? COMPACTED_QUESTIONS : REVIEW_QUESTIONS;
+      const build = (parsed: { target: ParsedContext; root?: ParsedContext }, ready: typeof gate, budget: number) => buildEvidence({
+        action, ...parsed, gate: ready, budget, credentials,
+        warnings: { outside_project: outsideProject, forked: chain.forked, credential_removed: redacted },
+      });
+      // Fit the evidence to the backend's limits; the request size is measured, not estimated.
+      let budget = Math.min(backend.stateBytes, backend.maxRequestBytes - backend.requestBytes({ state: {}, questions }));
+      let evidence = build(contexts, gate, budget);
+      for (let attempt = 1; attempt < FIT_ATTEMPTS; attempt++) {
+        const over = backend.requestBytes({ state: evidence.state, questions }) - backend.maxRequestBytes;
+        if (over <= 0) break;
+        budget -= over + 1_024;
+        evidence = build(contexts, gate, budget);
+      }
+      // Nothing is sent, not even the screen, when the evidence cannot fit.
+      if (backend.requestBytes({ state: evidence.state, questions }) > backend.maxRequestBytes) throw new Ineligible("request-oversize");
+      const state = evidence.state;
+      contextWarnings = state.context_warnings;
+      info.tags = evidence.tags;
       const correlation = {
         event: "payload",
         reviewID,
@@ -640,23 +674,55 @@ export async function setupPermissionReview(
         model: backend.model,
       };
       const trace = settings.logPayloads ? (fields: ReviewRecord) => recordPayload({ ...correlation, ...fields }) : undefined;
-      const request: ReviewRequest = {
-        state: { pending_action: action, user_messages: human.texts, compaction_context: human.compactions, context_warnings: contextWarnings },
-        questions: contextWarnings.compacted ? COMPACTED_QUESTIONS : REVIEW_QUESTIONS,
-      };
-      const judgment = await send(request, { signal, trace, onRequest });
-      const explanation = shownExplanation(judgment.explanation, hasCredential);
+
+      const remainingMs = deadlineMs - (dependencies.now() - started);
+      if (restrictionScreen && evidence.leftovers.length > 0 && remainingMs >= SCREEN_MIN_REMAINING_MS) {
+        const screenController = new AbortController();
+        const stopScreen = () => screenController.abort(typeof signal.reason === "string" ? signal.reason : "deadline");
+        signal.addEventListener("abort", stopScreen, { once: true });
+        const screenTimer = setTimeout(() => screenController.abort("deadline"), Math.floor(remainingMs * SCREEN_DEADLINE_SHARE));
+        try {
+          const result = await runScreen({
+            backend, channel, cache: screenCache, leftovers: evidence.leftovers, names: tokenMatcher(evidence.tokens),
+            call: { signal: screenController.signal, trace, onRequest, label: "screen" },
+            room: budget - Buffer.byteLength(JSON.stringify(state)),
+          });
+          info.screen = { chunks: result.chunks, cached: result.cached, asked: result.asked, selected: result.selected, failed: result.failed };
+          evidence.tags.add("screen");
+          if (result.failed) state.context_warnings.screen_failed = true;
+          state.restriction_excerpts.push(...result.excerpts);
+          if (result.unscreened) {
+            state.coverage.push({ source: "restriction_screen", id: null, status: "omitted", characters: result.unscreenedCharacters });
+          }
+          // Excerpts give way if the request is too large, the screen's first.
+          while (state.restriction_excerpts.length && backend.requestBytes({ state, questions }) > backend.maxRequestBytes) {
+            state.restriction_excerpts.pop();
+          }
+        } finally {
+          clearTimeout(screenTimer);
+          signal.removeEventListener("abort", stopScreen);
+        }
+        if (signal.aborted) throw new Ineligible("deadline");
+      }
+
+      const request: ReviewRequest = { state, questions };
+      const judgment = await channel.judge(request, { signal, trace, onRequest });
+      if (judgment.usage) info.usage = judgment.usage;
+      const explanation = shownExplanation(judgment.explanation, credentials);
       const outcome = judged = { ...decide(judgment.answers, threshold), ...(explanation ? { explanation } : {}) };
+      if (outcome.remoteNamed) evidence.tags.add("remote-named");
       if (!outcome.allow) return withWarnings(outcome);
       // What was reviewed must still be what runs, in the same session state:
-      // events can be missed, so the session and its review context are read
+      // events can be missed, so the sessions and their evidence are read
       // again within the same deadline.
-      if ((await state()) !== where) return withWarnings(ask("session-changed"));
-      if (userMessages(await within(sessions.context({ sessionID }), signal), hasCredential).identity !== human.identity) {
-        return withWarnings(ask("context-changed"));
+      if ((await resolveSession(sessions, sessionID, location, signal)).identity !== chain.identity) {
+        return withWarnings(ask("session-changed"));
       }
+      const fresh = await read();
+      const freshGate = gateFor(fresh);
+      if (freshGate.skip) return withWarnings(ask(freshGate.skip.reason));
+      if (build(fresh, freshGate, budget).identity !== evidence.identity) return withWarnings(ask("context-changed"));
       if (signal.aborted) return withWarnings(ask(active.cancelled ?? "deadline"));
-      if (refused.has(sessionID)) return withWarnings(ask("session-rejected"));
       if (pending.get(callKey!) !== call) return withWarnings(ask("call-ended"));
       if (isUnsafe(callKey!)) return withWarnings(ask("call-ambiguous"));
       if (snapshot(call.event).text !== before.text) return withWarnings(ask("call-changed"));
@@ -674,6 +740,33 @@ export async function setupPermissionReview(
     }
   };
 
+  /** A reject, mapped to its call when the request was seen; the call survives compaction. */
+  const rejected = (data: Record<string, unknown>) => {
+    const sessionID = typeof data.sessionID === "string" ? data.sessionID : undefined;
+    const requestID = typeof data.requestID === "string" ? data.requestID : undefined;
+    const request = requestID === undefined ? undefined : asked.get(requestID);
+    if (requestID !== undefined) asked.delete(requestID);
+    const at = dependencies.now();
+    let call: RefusedCall | undefined;
+    if (request && request.sessionID === sessionID && request.messageID && request.callID) {
+      const tracked = pending.get(pendingKey(sessionID, request.messageID, request.callID) ?? "")?.event;
+      const input = tracked && isRecord(tracked.input) ? tracked.input : undefined;
+      const shell = tracked?.tool === "shell" && input !== undefined;
+      const command = shell && typeof input!.command === "string" ? input!.command : undefined;
+      const workdir = shell && typeof input!.workdir === "string" ? input!.workdir : undefined;
+      const tool = tracked?.tool ?? request.action;
+      call = {
+        messageID: request.messageID,
+        callID: request.callID,
+        at,
+        ...(tool === undefined ? {} : { tool }),
+        ...(command === undefined ? {} : { command, directory: effectiveDirectory(location, workdir) }),
+      };
+    }
+    pause(sessionID, call, at);
+    cancelSession(sessionID, "session-rejected");
+  };
+
   try {
     const stream = await events.subscribe({ signal: subscription.signal });
     live = true;
@@ -681,12 +774,26 @@ export async function setupPermissionReview(
       try {
         for await (const event of stream) {
           if (!isRecord(event) || typeof event.type !== "string") continue;
-          const sessionID = isRecord(event.data) && typeof event.data.sessionID === "string" ? event.data.sessionID : undefined;
-          // v2.0.20 schema permission.ts: ephemeral `permission.replied` {sessionID, requestID, reply}.
-          if (event.type === "permission.replied" && isRecord(event.data) && event.data.reply === "reject") {
-            if (sessionID !== undefined && refused.size < MAX_REFUSED_SESSIONS) refused.add(sessionID);
-            else refused.add("");
-            cancelSession(sessionID, "session-rejected");
+          const data = isRecord(event.data) ? event.data : undefined;
+          const sessionID = typeof data?.sessionID === "string" ? data.sessionID : undefined;
+          // v2.0.20 schema permission.ts: ephemeral `permission.asked` {id, sessionID, action, resources, source}.
+          if (event.type === "permission.asked") {
+            const source = isRecord(data?.source) ? data.source : undefined;
+            if (typeof data?.id !== "string" || sessionID === undefined) continue;
+            asked.delete(data.id);
+            asked.set(data.id, {
+              sessionID,
+              ...(typeof source?.messageID === "string" ? { messageID: source.messageID } : {}),
+              ...(typeof source?.id === "string" ? { callID: source.id } : {}),
+              ...(typeof data.action === "string" ? { action: data.action } : {}),
+            });
+            if (asked.size > MAX_ASKED) asked.delete(asked.keys().next().value!);
+            continue;
+          }
+          // Ephemeral `permission.replied` {sessionID, requestID, reply}.
+          if (event.type === "permission.replied") {
+            if (data?.reply === "reject") rejected(data);
+            else if (typeof data?.requestID === "string") asked.delete(data.requestID);
             continue;
           }
           if (!INVALIDATING_EVENTS.has(event.type)) continue;
@@ -740,10 +847,12 @@ export async function setupPermissionReview(
         explains: backend.api === "text", toasts: settings.toasts,
       };
       let modelCalled = false;
+      const info: ReviewInfo = { eligible: false };
       statuses.publish({ ...identity, phase: "checking", modelCalled, elapsedMs: 0 });
       let outcome: ReviewOutcome;
       try {
-        outcome = await review(evaluation, reviewID, () => {
+        outcome = await review(evaluation, reviewID, started, info, () => {
+          if (modelCalled) return;
           modelCalled = true;
           statuses.publish({ ...identity, phase: "evaluating", modelCalled, elapsedMs: Math.max(0, dependencies.now() - started) });
         });
@@ -763,12 +872,19 @@ export async function setupPermissionReview(
         applied: evaluation.effect,
         reason: outcome.reason,
         modelCalled,
+        eligible: info.eligible,
         ...(outcome.score === undefined ? {} : { score: outcome.score }),
         ...(outcome.scores === undefined ? {} : { scores: outcome.scores }),
         ...(outcome.contextWarnings === undefined ? {} : {
           contextCompacted: outcome.contextWarnings.compacted,
           outsideProject: outcome.contextWarnings.outside_project,
         }),
+        ...(info.skipDetail ? { skipDetail: info.skipDetail } : {}),
+        ...(info.tags ? { evidence: [...info.tags].sort() } : {}),
+        ...(info.screen ? { screen: info.screen } : {}),
+        ...(info.usage?.inputTokens === undefined ? {} : { inputTokens: info.usage.inputTokens }),
+        ...(info.usage?.outputTokens === undefined ? {} : { outputTokens: info.usage.outputTokens }),
+        promptVersion: PROMPT_VERSION,
         threshold,
         reviewID,
         elapsedMs: dependencies.now() - started,
@@ -779,9 +895,12 @@ export async function setupPermissionReview(
       statuses.publish({
         ...identity, phase: "completed", modelCalled, elapsedMs: Math.max(0, dependencies.now() - started),
         proposed: verdict, applied: evaluation.effect, reason: outcome.reason,
+        eligible: info.eligible, screened: info.screen !== undefined,
         ...(outcome.scores ? { scores: outcome.scores } : {}),
         ...(outcome.explanation ? { explanation: outcome.explanation } : {}),
-        ...(outcome.contextWarnings ? { contextWarnings: outcome.contextWarnings } : {}),
+        ...(outcome.contextWarnings ? {
+          contextWarnings: { compacted: outcome.contextWarnings.compacted, outside_project: outcome.contextWarnings.outside_project },
+        } : {}),
       });
       if (evaluation.effect !== "ask") return;
       const notes: string[] = [];
@@ -807,7 +926,8 @@ export async function setupPermissionReview(
   // The path stays out of the record, which holds no user paths.
   record({
     event: "start", backend: settings.backend, ...(backend.api ? { api: backend.api } : {}),
-    model: backend.model, threshold, logPayloads: settings.logPayloads,
+    model: backend.model, threshold, logPayloads: settings.logPayloads, restrictionScreen,
+    guardVersion: GUARD_REVISION, hostVersion: safeVersion(ctx.app?.version), promptVersion: PROMPT_VERSION,
   });
   say(`${mode} with ${backend.model}, threshold ${threshold}; decision log: ${dependencies.logPath}`);
   if (settings.logPayloads) say(`request and response bodies are logged to ${dependencies.payloadLogPath}`);

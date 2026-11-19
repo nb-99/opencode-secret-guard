@@ -22,13 +22,13 @@ function completed(overrides: Partial<ReviewStatus> = {}): ReviewStatus {
 }
 
 const reviewedScores = {
-  explicitly_authorized: 0.98, within_scope: 0.95, confirmation_required: 0.22, high_impact: 0.05,
+  explicitly_authorized: 0.98, within_scope: 0.95, confirmation_required: 0.22, sensitive_effect: 0.05, remote_effect: 0.04, named_by_user: 0.2,
 };
 const reviewedScoreLines = [
   "Authorization: 98% (≥90%; pass)",
   "Within scope: 95% (≥90%; pass)",
   "Confirmation required: 22% (≤10%; fail)",
-  "High impact: 5% (≤10%; pass)",
+  "Sensitive effect: 5% (≤10%; pass)", "Remote effect: 4%, named 20% (≤10% or named ≥90%; pass)",
 ];
 
 type SnapshotHandler = (input: unknown) => Promise<ReviewSnapshot>;
@@ -162,8 +162,8 @@ describe("review RPC boundary", () => {
       anyOf: [{ type: "string", minLength: 1, maxLength: 80 }, { type: "null" }],
     });
     expect(Object.keys(JevRpc.events.review.schema.properties).sort()).toEqual([
-      "action", "applied", "callID", "contextWarnings", "elapsedMs", "explains", "explanation", "messageID", "mode", "modelCalled",
-      "phase", "proposed", "reason", "reviewID", "scores", "sessionID", "startedAt", "threshold", "toasts", "workspaceID",
+      "action", "applied", "callID", "contextWarnings", "elapsedMs", "eligible", "explains", "explanation", "messageID", "mode", "modelCalled",
+      "phase", "proposed", "reason", "reviewID", "scores", "screened", "sessionID", "startedAt", "threshold", "toasts", "workspaceID",
     ]);
     publisher.dispose();
   });
@@ -198,8 +198,9 @@ describe("review RPC boundary", () => {
     const summary = {
       sessionID: "session-1", workspaceID: "workspace-1", mode: "auto", threshold: 0.9,
       reviews: 1, approved: 0, manual: 1, skipped: 0, failed: 0, scored: 1,
+      eligible: 0, invalidated: 0, screens: 0, skips: [],
       average: { ...reviewedScores },
-      passed: { explicitly_authorized: 1, within_scope: 1, confirmation_required: 0, high_impact: 1 },
+      passed: { explicitly_authorized: 1, within_scope: 1, confirmation_required: 0, sensitive_effect: 1, remote_effect: 1 },
     };
     expect(rpc.emitted).toEqual([{ name: "review", data: safe }, { name: "summary", data: summary }]);
     expect(await rpc.snapshot({ sessionID: "session-1" })).toEqual({ reviews: [safe], summary });
@@ -235,7 +236,7 @@ describe("review RPC boundary", () => {
       null, [], { ...status(), phase: "failed" }, { ...status(), action: "cat synthetic-file" },
       { ...status(), workspaceID: undefined }, { ...status(), workspaceID: "invalid workspace" },
       { ...completed(), applied: undefined }, { ...completed(), reason: "private response text" },
-      { ...completed(), scores: { ...reviewedScores, high_impact: Infinity } },
+      { ...completed(), scores: { ...reviewedScores, sensitive_effect: Infinity } },
       { ...completed(), scores: { ...reviewedScores, confirmation_required: -0.1 } },
       { ...completed(), scores: { ...reviewedScores, within_scope: 1.01 } },
       { ...completed(), scores: { explicitly_authorized: 0.98 } },
@@ -404,7 +405,7 @@ describe("review display boundary", () => {
     explicit.display.dispose();
   });
 
-  test("notifies every unique live phase with reviewed status and all four scores", () => {
+  test("notifies every unique live phase with reviewed status and all scores", () => {
     const ui = displayHarness();
     const checking = status();
     const evaluating = status({ phase: "evaluating", modelCalled: true, elapsedMs: 50 });
@@ -496,7 +497,7 @@ describe("review display boundary", () => {
       message: [
         "Would approve; manual approval required", "Observe mode · bash", "Proposed: allow · Applied: ask",
         "Reason: model-approved", "Authorization: 98% (≥90%; pass)", "Within scope: 95% (≥90%; pass)",
-        "Confirmation required: 2% (≤10%; pass)", "High impact: 5% (≤10%; pass)",
+        "Confirmation required: 2% (≤10%; pass)", "Sensitive effect: 5% (≤10%; pass)", "Remote effect: 4%, named 20% (≤10% or named ≥90%; pass)",
       ].join("\n"),
     });
     expect(ui.display.snapshot("session-1")[0]!.applied).toBe("ask");
@@ -545,7 +546,7 @@ describe("review display boundary", () => {
         message: [
           "Automatically approved", "Auto mode · bash", "Proposed: allow · Applied: allow", "Reason: model-approved",
           "Authorization: 98% (≥90%; pass)", "Within scope: 95% (≥90%; pass)",
-          "Confirmation required: 2% (≤10%; pass)", "High impact: 5% (≤10%; pass)",
+          "Confirmation required: 2% (≤10%; pass)", "Sensitive effect: 5% (≤10%; pass)", "Remote effect: 4%, named 20% (≤10% or named ≥90%; pass)",
         ].join("\n"),
         variant: "success",
       },
@@ -553,7 +554,7 @@ describe("review display boundary", () => {
         message: [
           "Permission denied; review did not override it", "Auto mode · bash", "Proposed: allow · Applied: deny",
           "Reason: permission-denied", "Authorization: 98% (≥90%; pass)", "Within scope: 95% (≥90%; pass)",
-          "Confirmation required: 2% (≤10%; pass)", "High impact: 5% (≤10%; pass)",
+          "Confirmation required: 2% (≤10%; pass)", "Sensitive effect: 5% (≤10%; pass)", "Remote effect: 4%, named 20% (≤10% or named ≥90%; pass)",
         ].join("\n"),
         variant: "warning",
       },
@@ -575,12 +576,12 @@ describe("review display boundary", () => {
       [
         "Review scores passed; approval cancelled", "Auto mode · bash", "Proposed: allow · Applied: ask",
         "Reason: approval-cancelled", "Authorization: 98% (≥90%; pass)", "Within scope: 95% (≥90%; pass)",
-        "Confirmation required: 2% (≤10%; pass)", "High impact: 5% (≤10%; pass)",
+        "Confirmation required: 2% (≤10%; pass)", "Sensitive effect: 5% (≤10%; pass)", "Remote effect: 4%, named 20% (≤10% or named ≥90%; pass)",
       ].join("\n"),
       [
         "Review scores passed; approval cancelled", "Observe mode · bash", "Proposed: allow · Applied: ask",
         "Reason: approval-cancelled", "Authorization: 98% (≥90%; pass)", "Within scope: 95% (≥90%; pass)",
-        "Confirmation required: 2% (≤10%; pass)", "High impact: 5% (≤10%; pass)",
+        "Confirmation required: 2% (≤10%; pass)", "Sensitive effect: 5% (≤10%; pass)", "Remote effect: 4%, named 20% (≤10% or named ≥90%; pass)",
       ].join("\n"),
     ]);
     expect(ui.toasts.map((toast) => toast.variant)).toEqual(["warning", "warning"]);
@@ -607,7 +608,7 @@ describe("review display boundary", () => {
     const changes = mock(() => {});
     ui.display.subscribe(changes);
     for (const value of [null, [], {}, { ...status(), phase: "unknown" },
-      { ...completed(), scores: { ...reviewedScores, high_impact: NaN } },
+      { ...completed(), scores: { ...reviewedScores, sensitive_effect: NaN } },
       { ...completed(), applied: "approved" }]) ui.emit(value);
     expect(ui.toasts).toEqual([]);
     expect(ui.display.snapshot("session-1")).toEqual([]);
@@ -743,7 +744,7 @@ describe("review display boundary", () => {
   });
 
   test("a malformed status in the requested session makes snapshot recovery fail", async () => {
-    const ui = displayHarness({ snapshot: async () => ({ reviews: [{ ...completed(), scores: { ...reviewedScores, high_impact: Infinity } }] }) });
+    const ui = displayHarness({ snapshot: async () => ({ reviews: [{ ...completed(), scores: { ...reviewedScores, sensitive_effect: Infinity } }] }) });
     expect(await ui.display.refresh("session-1")).toMatchObject({ ok: false });
     expect(ui.display.snapshot("session-1")).toEqual([]);
     expect(ui.toasts).toEqual([]);
@@ -921,8 +922,9 @@ describe("review summary display", () => {
   const totals = (reviews: number, overrides: Record<string, unknown> = {}) => ({
     sessionID: "session-1", workspaceID: "workspace-1", mode: "auto", threshold: 0.9,
     reviews, approved: reviews, manual: 0, skipped: 0, failed: 0, scored: reviews,
+    eligible: reviews, invalidated: 0, screens: 0, skips: [],
     average: { ...reviewedScores },
-    passed: { explicitly_authorized: reviews, within_scope: reviews, confirmation_required: 0, high_impact: reviews },
+    passed: { explicitly_authorized: reviews, within_scope: reviews, confirmation_required: 0, sensitive_effect: reviews, remote_effect: reviews },
     ...overrides,
   });
 
