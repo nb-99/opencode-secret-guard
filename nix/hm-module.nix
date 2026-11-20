@@ -291,6 +291,16 @@ in
         '';
       };
 
+      restrictionScreen = mkOption {
+        type = types.bool;
+        default = true;
+        description = ''
+          When evidence does not fit the review request, ask the same review
+          backend which left-out chunks state rules for the agent, and send
+          those chunks unchanged. A failure only loses the extra excerpts.
+        '';
+      };
+
       opencode = mkOption {
         type = types.nullOr (
           types.submodule {
@@ -320,6 +330,11 @@ in
                 type = types.ints.between 1 30000;
                 default = 10000;
                 description = "Review deadline in milliseconds.";
+              };
+              maxRequestBytes = mkOption {
+                type = types.nullOr (types.ints.between 32000 360000);
+                default = null;
+                description = "The largest review request in bytes; null keeps the default of 48000.";
               };
             };
           }
@@ -368,6 +383,14 @@ in
                   `{baseURL}/decisions`, the OpenAI Decisions API. `systemone` posts
                   to `{baseURL}/systemone`, the System One API that Jev and local
                   decision-model servers use.
+                '';
+              };
+              maxRequestBytes = mkOption {
+                type = types.nullOr (types.ints.between 32000 360000);
+                default = null;
+                description = ''
+                  The largest review request in bytes; null keeps the default:
+                  160000 for `systemone`, 48000 otherwise.
                 '';
               };
             };

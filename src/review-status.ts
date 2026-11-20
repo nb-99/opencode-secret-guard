@@ -8,8 +8,20 @@ export type ReviewScores = {
   explicitly_authorized: number;
   within_scope: number;
   confirmation_required: number;
-  high_impact: number;
+  sensitive_effect: number;
+  remote_effect: number;
+  named_by_user: number;
 };
+
+export const SCORE_KEYS: readonly (keyof ReviewScores)[] = [
+  "explicitly_authorized", "within_scope", "confirmation_required", "sensitive_effect", "remote_effect", "named_by_user",
+];
+
+/** The approval checks. `named_by_user` is no check of its own: it only lifts `remote_effect`. */
+export type CheckKey = Exclude<keyof ReviewScores, "named_by_user">;
+export const CHECK_KEYS: readonly CheckKey[] = [
+  "explicitly_authorized", "within_scope", "confirmation_required", "sensitive_effect", "remote_effect",
+];
 
 /** The text API's short, display-only account of its judgment. It never affects a decision. */
 export type ReviewExplanation = { summary: string; rationale: string };
@@ -64,6 +76,10 @@ export type ReviewStatus = {
   scores?: ReviewScores;
   explanation?: ReviewExplanation;
   contextWarnings?: { compacted: boolean; outside_project: boolean };
+  /** The ask passed the action and call checks, so its context was read. */
+  eligible?: boolean;
+  /** The restriction screen ran for this review. */
+  screened?: boolean;
 };
 
 export const MAX_REVIEW_STATUSES = 128;
@@ -118,15 +134,9 @@ export function parseReviewStatus(value: unknown): ReviewStatus | undefined {
     result.reason = value.reason;
   }
   if (value.scores !== undefined) {
-    const scores = value.scores;
-    if (!record(scores) || !probability(scores.explicitly_authorized) || !probability(scores.within_scope) ||
-      !probability(scores.confirmation_required) || !probability(scores.high_impact)) return undefined;
-    result.scores = {
-      explicitly_authorized: scores.explicitly_authorized,
-      within_scope: scores.within_scope,
-      confirmation_required: scores.confirmation_required,
-      high_impact: scores.high_impact,
-    };
+    const scores = parseScores(value.scores);
+    if (!scores) return undefined;
+    result.scores = scores;
   }
   if (value.explanation !== undefined) {
     const explanation = value.explanation;
@@ -139,7 +149,18 @@ export function parseReviewStatus(value: unknown): ReviewStatus | undefined {
     if (!record(warnings) || typeof warnings.compacted !== "boolean" || typeof warnings.outside_project !== "boolean") return undefined;
     result.contextWarnings = { compacted: warnings.compacted, outside_project: warnings.outside_project };
   }
+  for (const flag of ["eligible", "screened"] as const) {
+    if (value[flag] === undefined) continue;
+    if (typeof value[flag] !== "boolean") return undefined;
+    result[flag] = value[flag];
+  }
   return result;
+}
+
+/** All six scores, each a probability, without other fields. */
+export function parseScores(value: unknown): ReviewScores | undefined {
+  if (!record(value) || !SCORE_KEYS.every((key) => probability(value[key]))) return undefined;
+  return Object.fromEntries(SCORE_KEYS.map((key) => [key, value[key]])) as ReviewScores;
 }
 
 /** Bounded snapshots restore a connected client's display without reading private payload logs. */
@@ -186,31 +207,34 @@ function percent(value: number): string {
   return `${Math.abs(rounded / 100 - value) > Number.EPSILON ? "≈" : ""}${rounded}%`;
 }
 
-/** Whether each score is on the passing side of its limit at this threshold. */
-export function scorePasses(scores: ReviewScores, threshold: number): Record<keyof ReviewScores, boolean> {
+/** Whether each check is on the passing side of its limit at this threshold. */
+export function scorePasses(scores: ReviewScores, threshold: number): Record<CheckKey, boolean> {
   const low = negativeThreshold(threshold);
   return {
     explicitly_authorized: scores.explicitly_authorized >= threshold,
     within_scope: scores.within_scope >= threshold,
     confirmation_required: scores.confirmation_required <= low,
-    high_impact: scores.high_impact <= low,
+    sensitive_effect: scores.sensitive_effect <= low,
+    // A remote or publishing action passes when the user named it and its target.
+    remote_effect: scores.remote_effect <= low || scores.named_by_user >= threshold,
   };
 }
 
 export function scoreRows(scores: ReviewScores, threshold: number) {
   const low = negativeThreshold(threshold);
   const passes = scorePasses(scores, threshold);
-  return [
-    { key: "explicitly_authorized", label: "Authorization", limit: threshold, positive: true },
-    { key: "within_scope", label: "Within scope", limit: threshold, positive: true },
-    { key: "confirmation_required", label: "Confirmation required", limit: low, positive: false },
-    { key: "high_impact", label: "High impact", limit: low, positive: false },
-  ].map((row) => ({
-    label: row.label,
-    score: percent(scores[row.key as keyof ReviewScores]),
-    required: `${row.positive ? "≥" : "≤"}${percent(row.limit)}`,
-    pass: passes[row.key as keyof ReviewScores],
-  }));
+  const rows: { key: CheckKey; label: string; score: string; required: string }[] = [
+    { key: "explicitly_authorized", label: "Authorization", score: percent(scores.explicitly_authorized), required: `≥${percent(threshold)}` },
+    { key: "within_scope", label: "Within scope", score: percent(scores.within_scope), required: `≥${percent(threshold)}` },
+    { key: "confirmation_required", label: "Confirmation required", score: percent(scores.confirmation_required), required: `≤${percent(low)}` },
+    { key: "sensitive_effect", label: "Sensitive effect", score: percent(scores.sensitive_effect), required: `≤${percent(low)}` },
+    {
+      key: "remote_effect", label: "Remote effect",
+      score: `${percent(scores.remote_effect)}, named ${percent(scores.named_by_user)}`,
+      required: `≤${percent(low)} or named ≥${percent(threshold)}`,
+    },
+  ];
+  return rows.map(({ key, ...row }) => ({ ...row, pass: passes[key] }));
 }
 
 export function reviewHeading(status: ReviewStatus): string {

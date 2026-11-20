@@ -39,7 +39,7 @@ export const hasLogUnavailableNote = (message: unknown): boolean =>
 export type Proposal = "would allow" | "manual approval";
 
 /**
- * An observe-mode model judgment. `score` is the weakest of the four answers,
+ * An observe-mode model judgment. `score` is the weakest of the five checks,
  * oriented so that higher favours approval, and `threshold` is the policy's
  * confidence threshold (0.5 < t <= 1).
  */

@@ -9,10 +9,10 @@ import { supportsAliasPattern } from "./path-pattern.ts";
  * reader refuses anything else, so a newer policy paired with an older plugin
  * fails by name instead of silently ignoring fields it does not know.
  */
-export const SUPPORTED_CONFIG_VERSION = 7;
+export const SUPPORTED_CONFIG_VERSION = 8;
 
 /** Older formats that still load, with defaults for the fields they predate. */
-export const ACCEPTED_CONFIG_VERSIONS: readonly number[] = [1, 2, 3, 4, 5, 6, 7];
+export const ACCEPTED_CONFIG_VERSIONS: readonly number[] = [1, 2, 3, 4, 5, 6, 7, 8];
 
 /** Overrides the policy location; otherwise the XDG default path is used. */
 export const CONFIG_ENVIRONMENT = "OPENCODE_SECRET_GUARD_CONFIG";
@@ -107,6 +107,8 @@ export interface OpencodeReviewSettings {
   /** "decisions" by default; "text" for a chat model. */
   api: OpencodeReviewApi;
   deadlineMs: number;
+  /** The largest request in bytes, or null for the backend's default. */
+  maxRequestBytes: number | null;
 }
 
 export interface EndpointReviewSettings {
@@ -118,6 +120,8 @@ export interface EndpointReviewSettings {
   deadlineMs: number;
   /** "text" (`/chat/completions`) by default; "decisions" for `/decisions`; "systemone" for `/systemone`. */
   api: EndpointReviewApi;
+  /** The largest request in bytes, or null for the backend's default. */
+  maxRequestBytes: number | null;
 }
 
 export interface PermissionReviewSettings {
@@ -132,6 +136,8 @@ export interface PermissionReviewSettings {
   confidenceThreshold: number;
   backend: PermissionReviewBackend;
   toasts: ReviewToasts;
+  /** Asks the review backend which left-out evidence states rules; see review-screen.ts. */
+  restrictionScreen: boolean;
   /** Required when `backend` is "opencode", and rejected otherwise. */
   opencode?: OpencodeReviewSettings;
   /** Required when `backend` is "endpoint", and rejected otherwise. */
@@ -144,12 +150,18 @@ export const DEFAULT_PERMISSION_REVIEW: Readonly<PermissionReviewSettings> = {
   confidenceThreshold: 0.9,
   backend: "jev",
   toasts: "all",
+  restrictionScreen: true,
 };
 
-const PERMISSION_REVIEW_KEYS = ["mode", "logPayloads", "confidenceThreshold", "backend", "toasts", "opencode", "endpoint"];
+const PERMISSION_REVIEW_KEYS = ["mode", "logPayloads", "confidenceThreshold", "backend", "toasts", "restrictionScreen", "opencode", "endpoint"];
 const OPENCODE_DEFAULT_DEADLINE_MS = 10_000;
 const ENDPOINT_DEFAULT_DEADLINE_MS = 20_000;
 const MAX_DEADLINE_MS = 30_000;
+/**
+ * The payload log keeps a request JSON-escaped in one record of at most 512 KiB.
+ * The questions alone take about 23,000 bytes with System One and the decisions APIs.
+ */
+export const REQUEST_BYTES_RANGE = { min: 32_000, max: 360_000 } as const;
 const OPENCODE_MODEL = /^[^/\s#]+\/[^/\s#]+(#[^/\s#]+)?$/;
 const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
 
@@ -392,6 +404,13 @@ export function requirePermissionReview(
       `"permissionReview.toasts" must be one of ${REVIEW_TOASTS.join(", ")}, not ${JSON.stringify(record.toasts)}`,
     );
   }
+  if (record.restrictionScreen !== undefined && configVersion < 8) {
+    throw configError(source, '"permissionReview.restrictionScreen" requires configVersion 8 or later');
+  }
+  const restrictionScreen = record.restrictionScreen === undefined ? DEFAULT_PERMISSION_REVIEW.restrictionScreen : record.restrictionScreen;
+  if (typeof restrictionScreen !== "boolean") {
+    throw configError(source, `"permissionReview.restrictionScreen" must be true or false, not ${JSON.stringify(restrictionScreen)}`);
+  }
   // A block for a backend that does not run is an error, so a stale block cannot look active.
   if (backend !== "opencode" && record.opencode !== undefined) {
     throw configError(source, '"permissionReview.opencode" requires backend "opencode"');
@@ -405,6 +424,7 @@ export function requirePermissionReview(
     confidenceThreshold,
     backend: backend as PermissionReviewBackend,
     toasts: toasts as ReviewToasts,
+    restrictionScreen,
   };
   if (backend === "opencode") return { ...settings, opencode: requireOpencodeReview(record.opencode, configVersion, source) };
   if (backend === "endpoint") return { ...settings, endpoint: requireEndpointReview(record.endpoint, configVersion, source, home) };
@@ -438,11 +458,20 @@ function requireDeadline(value: unknown, key: string, fallback: number, source: 
   return deadlineMs;
 }
 
+function requireRequestBytes(value: unknown, key: string, source: string): number | null {
+  if (value === undefined || value === null) return null;
+  const { min, max } = REQUEST_BYTES_RANGE;
+  if (typeof value !== "number" || !Number.isInteger(value) || value < min || value > max) {
+    throw configError(source, `"${key}.maxRequestBytes" must be null or a whole number from ${min} to ${max}, not ${JSON.stringify(value)}`);
+  }
+  return value;
+}
+
 function requireOpencodeReview(value: unknown, configVersion: number, source: string): OpencodeReviewSettings {
   const key = "permissionReview.opencode";
   if (!value || typeof value !== "object" || Array.isArray(value)) throw configError(source, `"${key}" must be an object`);
   const record = value as Record<string, unknown>;
-  requireBlockKeys(record, key, { model: 5, api: 6, deadlineMs: 6 }, configVersion, source);
+  requireBlockKeys(record, key, { model: 5, api: 6, deadlineMs: 6, maxRequestBytes: 8 }, configVersion, source);
   if (typeof record.model !== "string" || !OPENCODE_MODEL.test(record.model)) {
     throw configError(
       source,
@@ -453,6 +482,7 @@ function requireOpencodeReview(value: unknown, configVersion: number, source: st
     model: record.model,
     api: requireApi(record.api, key, OPENCODE_REVIEW_APIS, "decisions", source),
     deadlineMs: requireDeadline(record.deadlineMs, key, OPENCODE_DEFAULT_DEADLINE_MS, source),
+    maxRequestBytes: requireRequestBytes(record.maxRequestBytes, key, source),
   };
 }
 
@@ -460,7 +490,7 @@ function requireEndpointReview(value: unknown, configVersion: number, source: st
   const key = "permissionReview.endpoint";
   if (!value || typeof value !== "object" || Array.isArray(value)) throw configError(source, `"${key}" must be an object`);
   const record = value as Record<string, unknown>;
-  requireBlockKeys(record, key, { baseURL: 5, model: 5, apiKeyFile: 5, deadlineMs: 5, api: 6 }, configVersion, source);
+  requireBlockKeys(record, key, { baseURL: 5, model: 5, apiKeyFile: 5, deadlineMs: 5, api: 6, maxRequestBytes: 8 }, configVersion, source);
   if (typeof record.baseURL !== "string" || !validEndpointURL(record.baseURL)) {
     throw configError(
       source,
@@ -484,6 +514,7 @@ function requireEndpointReview(value: unknown, configVersion: number, source: st
     apiKeyFile,
     deadlineMs: requireDeadline(record.deadlineMs, key, ENDPOINT_DEFAULT_DEADLINE_MS, source),
     api: requireApi(record.api, key, ENDPOINT_REVIEW_APIS, "text", source),
+    maxRequestBytes: requireRequestBytes(record.maxRequestBytes, key, source),
   };
 }
 

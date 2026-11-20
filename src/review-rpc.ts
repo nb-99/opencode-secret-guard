@@ -1,19 +1,19 @@
 import { createReviewStatusStore, MAX_RATIONALE_CHARS, MAX_SESSION_REVIEWS, MAX_SUMMARY_CHARS, type ReviewStatus } from "./review-status.ts";
-import { createReviewSummaryStore, type ReviewSummary } from "./review-summary.ts";
+import { createReviewSummaryStore, MAX_SKIP_REASONS, type ReviewSummary } from "./review-summary.ts";
 
 // OpenCode 2.2.5 builds RPC validators with Effect 4, which rejects JSON Schema
 // `pattern`. Both ends apply the character patterns in parseReviewStatus instead.
 const id = { type: "string", minLength: 1, maxLength: 80 };
 const probability = { type: "number", minimum: 0, maximum: 1 };
 const count = { type: "integer", minimum: 0 };
+const SCORE_NAMES = ["explicitly_authorized", "within_scope", "confirmation_required", "sensitive_effect", "remote_effect", "named_by_user"];
+const CHECK_NAMES = SCORE_NAMES.filter((name) => name !== "named_by_user");
 const scores = {
   type: "object", additionalProperties: false,
-  properties: {
-    explicitly_authorized: probability, within_scope: probability,
-    confirmation_required: probability, high_impact: probability,
-  },
-  required: ["explicitly_authorized", "within_scope", "confirmation_required", "high_impact"],
+  properties: Object.fromEntries(SCORE_NAMES.map((name) => [name, probability])),
+  required: SCORE_NAMES,
 };
+const reason = { type: "string", minLength: 1, maxLength: 60 };
 const mode = { enum: ["observe", "auto"] };
 const threshold = { type: "number", exclusiveMinimum: 0.5, maximum: 1 };
 const summary = {
@@ -21,14 +21,25 @@ const summary = {
   properties: {
     sessionID: id, workspaceID: { anyOf: [id, { type: "null" }] }, mode, threshold,
     reviews: count, approved: count, manual: count, skipped: count, failed: count, scored: count,
+    eligible: count, invalidated: count, screens: count,
+    skips: {
+      type: "array", maxItems: MAX_SKIP_REASONS,
+      items: {
+        type: "object", additionalProperties: false,
+        properties: { reason, count }, required: ["reason", "count"],
+      },
+    },
     average: scores,
     passed: {
       type: "object", additionalProperties: false,
-      properties: { explicitly_authorized: count, within_scope: count, confirmation_required: count, high_impact: count },
-      required: ["explicitly_authorized", "within_scope", "confirmation_required", "high_impact"],
+      properties: Object.fromEntries(CHECK_NAMES.map((name) => [name, count])),
+      required: CHECK_NAMES,
     },
   },
-  required: ["sessionID", "workspaceID", "mode", "threshold", "reviews", "approved", "manual", "skipped", "failed", "scored", "passed"],
+  required: [
+    "sessionID", "workspaceID", "mode", "threshold", "reviews", "approved", "manual", "skipped", "failed", "scored",
+    "eligible", "invalidated", "screens", "skips", "passed",
+  ],
   additionalProperties: false,
 };
 const status = {
@@ -49,7 +60,7 @@ const status = {
     toasts: { enum: ["all", "attention"] },
     proposed: { enum: ["allow", "ask"] },
     applied: { enum: ["allow", "ask", "deny"] },
-    reason: { type: "string", minLength: 1, maxLength: 60 },
+    reason,
     scores,
     explanation: {
       type: "object", additionalProperties: false,
@@ -64,6 +75,8 @@ const status = {
       properties: { compacted: { type: "boolean" }, outside_project: { type: "boolean" } },
       required: ["compacted", "outside_project"],
     },
+    eligible: { type: "boolean" },
+    screened: { type: "boolean" },
   },
   required: ["reviewID", "sessionID", "workspaceID", "messageID", "callID", "action", "mode", "phase", "modelCalled", "startedAt", "elapsedMs", "threshold"],
   additionalProperties: false,
