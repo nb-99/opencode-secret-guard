@@ -5,12 +5,14 @@ import * as path from "node:path";
 import { spawnSync } from "node:child_process";
 import { cleanupProfile, prepareCleanup } from "../src/cleanup.ts";
 import { loadConfig } from "../src/policy.ts";
+import { host } from "./support.ts";
 
 const base = loadConfig(process.env.OPENCODE_SECRET_GUARD_CONFIG);
 const shell = process.env.SECRET_GUARD_SHELL;
 if (!shell) throw new Error("Use nix run .#integration to exercise the installed cleanup tool");
 const moduleDirectory = path.join(path.dirname(path.dirname(shell)), "lib");
 const { createV1Hooks } = await import(path.join(moduleDirectory, "v1.ts"));
+const { setupV2 } = await import(path.join(moduleDirectory, "v2.ts"));
 let fixture: string;
 let root: string;
 
@@ -35,6 +37,63 @@ async function tool(cleanupRoot = root) {
 const context = (ask = async (_input: any) => {}) => ({ abort: new AbortController().signal, ask });
 const sandbox = (profile: string, binary: string, args: string[]) =>
   spawnSync("/usr/bin/sandbox-exec", ["-p", profile, binary, ...args], { encoding: "utf8" });
+
+/** The installed tool as OpenCode V2 registers it, with `assert` standing in for the permission rules. */
+async function v2Tool(assert: (input: any) => Promise<void>) {
+  const fake = host(fixture);
+  const tools: any[] = [];
+  const ctx = fake.ctx as any;
+  ctx.tool.transform = async (callback: (editor: unknown) => void) => callback({ add: (tool: any) => tools.push(tool) });
+  ctx.permission.assert = assert;
+  await setupV2(fake.ctx, { ...base, cleanupRoot: root }, moduleDirectory);
+  return tools.find((tool) => tool.name === "cleanup_temp");
+}
+const execution = (signal = new AbortController().signal) =>
+  ({ sessionID: "ses_cleanup", agent: "build", messageID: "msg_cleanup", id: "call_cleanup", signal });
+
+test("V2: an allowed edit request deletes the requested targets without a prompt", async () => {
+  const requests: any[] = [];
+  const cleanup = await v2Tool(async (input) => {
+    requests.push(input);
+  });
+  const result = await cleanup.execute({ paths: ["job"] }, execution());
+  expect(result.content).toContain("Cleanup completed");
+  expect(requests.map((request) => [request.action, request.resources])).toEqual([
+    ["edit", [path.join(root, "job"), path.join(root, "job/output")]],
+  ]);
+  expect(fs.existsSync(path.join(root, "job"))).toBe(false);
+  expect(fs.readFileSync(path.join(fixture, "sentinel"), "utf8")).toBe("keep");
+});
+
+test("V2: a rejected edit request prevents the deletion worker", async () => {
+  const cleanup = await v2Tool(async () => {
+    throw new Error("edit rejected");
+  });
+  await expect(cleanup.execute({ paths: ["job"] }, execution())).rejects.toThrow("edit rejected");
+  expect(fs.readFileSync(path.join(root, "job/output"), "utf8")).toBe("temporary");
+});
+
+test("V2: a descendant-specific edit denial rejects recursive cleanup", async () => {
+  const protectedFile = path.join(root, "job/output");
+  const cleanup = await v2Tool(async (input) => {
+    if (input.resources.includes(protectedFile)) throw new Error("descendant edit denied");
+  });
+  await expect(cleanup.execute({ paths: ["job"] }, execution())).rejects.toThrow("descendant edit denied");
+  expect(fs.readFileSync(protectedFile, "utf8")).toBe("temporary");
+});
+
+test("V2: cancellation during approval does not launch deletion", async () => {
+  const controller = new AbortController();
+  let asked = false;
+  const cleanup = await v2Tool(async () => {
+    asked = true;
+    controller.abort();
+  });
+  await expect(cleanup.execute({ paths: ["job"] }, execution(controller.signal)))
+    .rejects.toMatchObject({ name: "AbortError" });
+  expect(asked).toBe(true);
+  expect(fs.readFileSync(path.join(root, "job/output"), "utf8")).toBe("temporary");
+});
 
 test("installed tool deletes only requested targets and can repeat cleanup", async () => {
   const cleanup = await tool();
@@ -110,9 +169,15 @@ test("secret denies survive cleanup confinement and report partial failure", asy
 
 test("cancellation during approval does not launch deletion", async () => {
   const controller = new AbortController();
+  let asked = false;
   await expect((await tool()).execute({ paths: ["job"] }, {
-    abort: controller.signal, ask: async () => controller.abort(),
-  })).rejects.toThrow();
+    abort: controller.signal,
+    ask: async () => {
+      asked = true;
+      controller.abort();
+    },
+  })).rejects.toMatchObject({ name: "AbortError" });
+  expect(asked).toBe(true);
   expect(fs.existsSync(path.join(root, "job/output"))).toBe(true);
 });
 

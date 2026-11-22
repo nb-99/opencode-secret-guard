@@ -7,6 +7,7 @@
  * must not throw; it withholds the result instead.
  */
 import * as path from "node:path";
+import { CLEANUP_INPUT_SCHEMA, createCleanupTool } from "./cleanup.ts";
 import { checkToolCall, FILES_ONLY_WARNING, guardsTool, hostDirectory, isRecord } from "./guard.ts";
 import type { GuardConfig } from "./policy.ts";
 import { setupPermissionReview } from "./permission-review.ts";
@@ -24,11 +25,38 @@ interface ToolAfter extends ToolCallIdentity {
   result?: { output?: unknown; content?: unknown; metadata?: unknown };
 }
 
+/** v2.0.29 `packages/plugin/src/permission.ts` `AssertInput`, in its encoded form. */
+interface PermissionAssertion {
+  sessionID: string;
+  agent?: string;
+  action: string;
+  resources: string[];
+  save?: string[];
+  metadata?: Record<string, unknown>;
+  source?: { type: "tool"; messageID: string; id: string };
+}
+
+/** v2.0.29 `packages/plugin/src/promise/tool.ts`: the members a tool executor gets that cleanup reads. */
+interface ToolExecution {
+  readonly sessionID: string;
+  readonly agent: string;
+  readonly messageID: string;
+  readonly id: string;
+  readonly signal: AbortSignal;
+}
+
+interface ToolDefinition {
+  name: string;
+  description: string;
+  input: Readonly<Record<string, unknown>>;
+  execute(input: unknown, context: ToolExecution): Promise<{ content: string }>;
+}
+
 /**
  * V2's context subset; see index.ts for the structural typing rationale. The
  * reviewer's members are optional and read only when it is enabled.
  */
-export interface V2Context extends Omit<ReviewContext, "tool"> {
+export interface V2Context extends Omit<ReviewContext, "tool" | "permission"> {
   readonly location: { readonly directory: string };
   readonly shell: {
     hook(name: "create.before", callback: (event: { shell?: unknown }) => MaybePromise): Promise<unknown>;
@@ -36,11 +64,16 @@ export interface V2Context extends Omit<ReviewContext, "tool"> {
   readonly tool: {
     hook(name: "execute.before", callback: (event: ToolBefore) => MaybePromise): Promise<unknown>;
     hook(name: "execute.after", callback: (event: ToolAfter) => MaybePromise): Promise<unknown>;
+    transform?(callback: (editor: { add(tool: ToolDefinition): void }) => void): Promise<unknown>;
+  };
+  /** `assert` exists from v2.0.29; cleanup_temp needs it. */
+  readonly permission?: NonNullable<ReviewContext["permission"]> & {
+    assert?(input: PermissionAssertion): Promise<void>;
   };
 }
 
-/** Where the missing V2 permission prompt is tracked. */
-const CLEANUP_ISSUE = "https://github.com/nb-99/opencode-secret-guard/issues/16";
+/** The first V2 release whose plugin tools can request a permission. */
+const CLEANUP_MINIMUM_VERSION = "2.0.29";
 
 const UNRECOGNISED = "secret-guard: search results withheld because their format was not recognised.";
 const UNCHECKED = "secret-guard: search results withheld because they could not be checked.";
@@ -270,10 +303,58 @@ export async function setupV2(
       ? undefined
       : await setupPermissionReview(ctx, { ...review, mode: review.mode }, base, guardConfig, reviewDependencies);
 
-  if (guardConfig.cleanupRoot) {
-    process.stderr.write(`secret-guard: cleanup_temp is not available on OpenCode V2 (${CLEANUP_ISSUE}).\n`);
-  }
+  if (guardConfig.cleanupRoot) await registerCleanup(ctx, guardConfig);
   return cleanup;
+}
+
+/**
+ * Registers `cleanup_temp`. Like V1's `context.ask`, `ctx.permission.assert`
+ * requests `edit` for every path the call would delete, so the session's
+ * permission rules decide: an allow runs it without a prompt, and a deny or a
+ * rejection fails the call before anything is deleted. A host without the
+ * API, or one that rejects the registration, leaves the guard running without
+ * it. V2 logs a definition it skips as invalid itself; that does not reach here.
+ */
+async function registerCleanup(ctx: V2Context, guardConfig: GuardConfig): Promise<void> {
+  const permission = ctx.permission;
+  const assert = permission?.assert?.bind(permission);
+  const transform = ctx.tool.transform?.bind(ctx.tool);
+  if (!assert || !transform) {
+    process.stderr.write(
+      `secret-guard: cleanup_temp needs OpenCode ${CLEANUP_MINIMUM_VERSION} or newer, where plugin tools can request permission.\n`,
+    );
+    return;
+  }
+  // V1's shell gate has no V2 counterpart: this runs only after the guard's hooks are registered.
+  const tool = createCleanupTool(guardConfig, () => true);
+  try {
+    await transform((editor) =>
+      editor.add({
+        name: "cleanup_temp",
+        description: tool.description,
+        input: CLEANUP_INPUT_SCHEMA,
+        execute: async (input, context) => ({
+          content: await tool.execute(input, {
+            abort: context.signal,
+            ask: ({ permission: action, patterns, always, metadata }) =>
+              assert({
+                sessionID: context.sessionID,
+                agent: context.agent,
+                source: { type: "tool", messageID: context.messageID, id: context.id },
+                action,
+                resources: patterns,
+                save: always,
+                metadata,
+              }),
+          }),
+        }),
+      }),
+    );
+  } catch (error) {
+    process.stderr.write(
+      `secret-guard: could not register cleanup_temp: ${error instanceof Error ? error.message : String(error)}\n`,
+    );
+  }
 }
 
 /**

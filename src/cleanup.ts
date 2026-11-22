@@ -13,10 +13,13 @@ import { tamperTargets } from "./tamper.ts";
 const argsSchema = z.object({
   paths: z.array(z.string().min(1).max(4096)).min(1).max(64),
 }).strict();
+const { $schema: _, ...inputJsonSchema } = z.toJSONSchema(argsSchema);
+/** The arguments as JSON Schema, which V2 tool definitions take. */
+export const CLEANUP_INPUT_SCHEMA: Readonly<Record<string, unknown>> = inputJsonSchema;
 const MAX_ENTRIES = 4096;
 const MAX_PROFILE_BYTES = 128 * 1024;
 
-type CleanupContext = {
+export type CleanupContext = {
   abort: AbortSignal;
   ask(input: {
     permission: string;

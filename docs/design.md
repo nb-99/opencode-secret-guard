@@ -600,7 +600,7 @@ translate host events and filter their different search formats.
 | Before a call  | `tool.execute.before(input, output)`     | `tool` `execute.before(event)`                 |
 | Filter results | parse and rebuild the `output` string    | filter structured `output`, rebuild text       |
 | Base directory | `directory` passed to `server`           | `ctx.location.directory`                       |
-| `cleanup_temp` | registered when configured              | not registered (issue #16)                     |
+| `cleanup_temp` | registered when configured              | registered when configured, from V2 2.0.29     |
 
 Relative tool paths resolve against the host's directory, never the process's.
 The shared call check classifies a leading `~` both literally and expanded,
@@ -677,15 +677,18 @@ usual failure mode of string matching. The kernel rule has no such gap.
 not a model argument. A leading `$TMPDIR` expands to `os.tmpdir()` of the
 plugin process, which runs inside OpenCode, so it names the same directory
 OpenCode derives its own `…/opencode` scratch path from; the randomized macOS
-per-user path never has to appear in the policy. OpenCode validates the public Zod schema, and the tool
-validates it again inside `execute` because preceding hooks can rewrite
-arguments. The package vendors only Zod, not the OpenCode SDK.
+per-user path never has to appear in the policy. V1 validates the public Zod
+schema and V2 the same schema converted to JSON Schema. The tool validates it
+again inside `execute` because preceding hooks can rewrite arguments. The
+package vendors only Zod, not the OpenCode SDK.
 
-The tool exists on OpenCode V1 only. V2 gives a plugin tool no way to request
-permission for paths the tool computes (its context has no `ask`, and
-`ctx.permission` can list and answer requests but not open one), and the tool
-must not delete anything without that prompt. The V2 adapter therefore does not
-register it and says so at startup. Tracked in issue #16.
+Both hosts register the tool, and both request `edit` through the host's
+permission engine: V1 through the tool context's `ask`, V2 through
+`ctx.permission.assert`, which V2 added in 2.0.29. A deny or a rejection fails
+the call before the worker starts. Older V2 releases have no way for a plugin
+tool to request permission, and the tool must not delete anything without that
+check, so the V2 adapter registers it only when `assert` exists and otherwise
+says so at startup.
 
 The tool resolves every target beneath an existing root, rejects symlink
 operands and traversal, inventories descendants without following symlinks,

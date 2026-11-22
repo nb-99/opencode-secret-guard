@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -140,12 +140,127 @@ describe("registration", () => {
     await expect(elsewhere.call(before("read", { path: "private.txt" }))).resolves.toBeDefined();
   });
 
-  test("says that cleanup_temp is unavailable when a cleanup root is configured", async () => {
+  test("says that cleanup_temp needs a newer OpenCode when plugin tools cannot request permission", async () => {
     const stderr = await captureStderr(() => started({ ...portable, cleanupRoot: path.join(fixture, "scratch") }));
-    expect(stderr).toMatch(/cleanup_temp is not available on OpenCode V2/);
-    expect(stderr).toContain("issues/16");
+    expect(stderr).toMatch(/cleanup_temp needs OpenCode 2\.0\.29 or newer/);
 
     expect(await captureStderr(() => started({ ...portable, cleanupRoot: null }))).not.toMatch(/cleanup_temp/);
+  });
+});
+
+describe.skipIf(!darwin)("cleanup_temp", () => {
+  let root: string;
+  const output = () => path.join(root, "job", "output");
+
+  beforeAll(() => {
+    root = path.join(fixture, "scratch");
+  });
+  beforeEach(() => {
+    fs.mkdirSync(path.join(root, "job"), { recursive: true });
+    fs.writeFileSync(output(), "temporary");
+  });
+
+  type Definition = {
+    name: string;
+    description: string;
+    input: Record<string, unknown>;
+    execute(input: unknown, context: unknown): Promise<{ content: string }>;
+  };
+
+  /** A host with V2.0.29's tool editor and permission assertion. */
+  async function cleanupHost(assert: (input: any) => Promise<void>, transform?: () => Promise<never>) {
+    const fake = host(repo);
+    const tools: Definition[] = [];
+    const ctx = fake.ctx as any;
+    ctx.tool.transform = transform ?? (async (callback: (editor: unknown) => void) =>
+      callback({ add: (tool: Definition) => tools.push(tool) }));
+    ctx.permission.assert = assert;
+    await setupV2(fake.ctx, { ...config, cleanupRoot: root }, packageLib);
+    return { ...fake, tools };
+  }
+
+  const execution = (signal = new AbortController().signal) =>
+    ({ sessionID: "ses_cleanup", agent: "build", messageID: "msg_cleanup", id: "call_cleanup", signal });
+
+  test("registers the tool with a JSON Schema for its arguments", async () => {
+    let tools!: Definition[];
+    const stderr = await captureStderr(async () => {
+      ({ tools } = await cleanupHost(async () => {}));
+    });
+
+    expect(stderr).not.toMatch(/cleanup_temp/);
+    expect(tools.map((tool) => tool.name)).toEqual(["cleanup_temp"]);
+    expect(tools[0]!.input).toEqual({
+      type: "object",
+      properties: {
+        paths: { type: "array", minItems: 1, maxItems: 64, items: { type: "string", minLength: 1, maxLength: 4096 } },
+      },
+      required: ["paths"],
+      additionalProperties: false,
+    });
+  });
+
+  test("requests edit for every path it would delete, attached to the call", async () => {
+    const requests: any[] = [];
+    const { tools } = await cleanupHost(async (input) => {
+      requests.push(input);
+      throw new Error("edit denied");
+    });
+
+    await expect(tools[0]!.execute({ paths: ["job"] }, execution())).rejects.toThrow("edit denied");
+    expect(requests).toEqual([{
+      sessionID: "ses_cleanup",
+      agent: "build",
+      source: { type: "tool", messageID: "msg_cleanup", id: "call_cleanup" },
+      action: "edit",
+      resources: [path.join(root, "job"), output()],
+      save: [],
+      metadata: {
+        operation: "cleanup_temp",
+        filepath: root,
+        diff: expect.stringContaining(`-DELETE ${output()}`),
+      },
+    }]);
+    expect(fs.readFileSync(output(), "utf8")).toBe("temporary");
+  });
+
+  test("validates its arguments before requesting permission", async () => {
+    let asked = false;
+    const { tools } = await cleanupHost(async () => {
+      asked = true;
+    });
+
+    for (const input of [{ paths: [] }, { paths: ["../sentinel"] }, { paths: ["job"], command: "rm -rf /" }]) {
+      await expect(tools[0]!.execute(input, execution())).rejects.toThrow();
+    }
+    expect(asked).toBe(false);
+    expect(fs.readFileSync(output(), "utf8")).toBe("temporary");
+  });
+
+  test("deletes nothing when the call is stopped during approval", async () => {
+    const controller = new AbortController();
+    let asked = false;
+    const { tools } = await cleanupHost(async () => {
+      asked = true;
+      controller.abort();
+    });
+
+    await expect(tools[0]!.execute({ paths: ["job"] }, execution(controller.signal)))
+      .rejects.toMatchObject({ name: "AbortError" });
+    expect(asked).toBe(true);
+    expect(fs.readFileSync(output(), "utf8")).toBe("temporary");
+  });
+
+  test("keeps the guard running when the host rejects the registration", async () => {
+    let fake!: Awaited<ReturnType<typeof cleanupHost>>;
+    const stderr = await captureStderr(async () => {
+      fake = await cleanupHost(async () => {}, async () => {
+        throw new Error("no tools today");
+      });
+    });
+
+    expect(stderr).toContain("could not register cleanup_temp: no tools today");
+    await expect(fake.call(before("read", { path: ".env" }))).rejects.toThrow("blocked");
   });
 });
 

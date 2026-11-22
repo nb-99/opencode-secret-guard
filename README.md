@@ -318,12 +318,9 @@ from your own terminal.
 
 ## Guarded temporary cleanup
 
-> **OpenCode V1 only.** `cleanup_temp` is not registered on V2, and the plugin
-> says so at startup when `cleanupRoot` is set. It asks OpenCode for `edit`
-> permission on every path it will delete, and V2 gives plugin tools no way to
-> ask. Tracked in [#16](https://github.com/nb-99/opencode-secret-guard/issues/16).
-> On V2, leave `cleanupRoot` unset and delete with ordinary `rm`, which the shell
-> guard already confines.
+> **OpenCode V2 needs 2.0.29 or newer.** Older V2 releases give plugin tools no
+> way to request permission, so the plugin does not register `cleanup_temp`
+> there and says so at startup when `cleanupRoot` is set.
 
 Set `cleanupRoot` to an existing directory such as `$TMPDIR/opencode`, the
 scratch directory OpenCode itself uses, to expose the `cleanup_temp` tool. A
@@ -341,7 +338,9 @@ root still exists. Symlinks inside a requested directory are unlinked rather
 than followed.
 
 The tool inventories descendants and awaits OpenCode's `edit` permission for
-every path before deleting anything. Read-only agents and descendant-specific
+every path before deleting anything. V1 requests it through the tool context's
+`ask`, and V2 through `ctx.permission.assert`; the session's permission rules
+decide on both. Read-only agents and descendant-specific
 denials remain effective; approval displays a deletion manifest without file
 contents. To avoid prompting for this root, configure an OpenCode
 `permission.edit` allowance for the expanded path. OpenCode does not expand

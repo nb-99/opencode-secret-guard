@@ -24,11 +24,12 @@ The README uses the V1 `plugin` config key for both versions. V2 rewrites it to
 key still points to this package's wrapper. See the [README](../README.md) for
 installation examples.
 
-`cleanup_temp` remains V1-only. V2 plugin tools cannot open a permission prompt
-for computed deletion paths. Registering the tool without that prompt would
-remove its permission boundary, so the adapter omits it and writes a startup
-notice when `cleanupRoot` is set. This limitation is tracked in
-[#16](https://github.com/nb-99/opencode-secret-guard/issues/16).
+`cleanup_temp` needs V2 2.0.29 or newer, which added `ctx.permission.assert`
+for plugins ([PR][v2-permission-assert]). The tool asks for `edit` on every
+path it will delete, as on V1, and registers through `ctx.tool.transform`.
+On an older V2 release, the adapter omits the tool and writes a startup notice
+when `cleanupRoot` is set: registering it without the permission check would
+remove its permission boundary.
 
 ## Host adapters
 
@@ -37,7 +38,7 @@ payloads at its boundary and translates them into `checkToolCall` arguments.
 The package uses local structural types rather than `@opencode/plugin`.
 `Plugin.define` is an identity function, and the loader accepts the object
 export directly. Avoiding the SDK also avoids vendoring its dependency tree for
-the hermetic typecheck; the package vendors only Zod at runtime, used by the V1 cleanup
+the hermetic typecheck; the package vendors only Zod at runtime, used by the cleanup
 tool and by the V2 permission reviewer.
 
 | Purpose | V1 | V2 |
@@ -47,7 +48,7 @@ tool and by the V2 permission reviewer.
 | Filter search results | parse and rewrite `output.output` | filter `result.output`, rebuild `content` and counts |
 | Search arguments | actual `args` in the after-hook | structured result paths suffice |
 | Working directory | `server()` input's `directory` | `ctx.location.directory` |
-| Register cleanup | returned `tool` map and `context.ask` | unavailable |
+| Register cleanup | returned `tool` map and `context.ask` | `ctx.tool.transform` and `ctx.permission.assert` |
 
 V2 before-hooks cover built-in, plugin and MCP calls, including subagent calls
 at the same location, before the executor's permission checks ([source][v2-tool]).
@@ -266,7 +267,12 @@ after-hook arguments and host directory contract; their behavior on the minimum
 release still needs live confirmation.
 
 V2 checks still unrecorded include a stale `lib/plugin.ts` path, a missing
-configured shell, unsupported policy versions, failed-call event shape, and the interactive PTY boundary. A later rewrite
+configured shell, unsupported policy versions, failed-call event shape, and the interactive PTY boundary. `cleanup_temp`
+on V2 is tested against a stubbed host in the unit and kernel suites; its registration and the native prompt's
+deletion manifest have not been checked in a live session. V2 registers the tool for Code Mode, since the
+definition sets no `codemode` option. Stopping a call while its prompt is open leaves the prompt in place,
+because V2 withdraws a request only when the `assert` call itself is interrupted. Approving it afterwards
+deletes nothing: the tool checks the abort signal after approval. A later rewrite
 to `/bin/sh` was refused live, but the reports do not separately establish the
 TUI presentation for every shell failure. Patch `*** Environment ID:` handling
 also needs confirmation that it does not change the filesystem root used for
@@ -326,6 +332,7 @@ tagged V2.1.4 source. Shared UI runtime mappings were checked against OpenTUI
 [v2-plugin-service]: https://github.com/anomalyco/opencode/blob/v2.0.16/packages/core/src/plugin.ts
 [v2-tool]: https://github.com/anomalyco/opencode/blob/v2.0.16/packages/core/src/tool.ts
 [v2-permission]: https://github.com/anomalyco/opencode/blob/v2.0.20/packages/core/src/permission.ts
+[v2-permission-assert]: https://github.com/anomalyco/opencode/pull/54930
 [v2-plugin-tool]: https://github.com/anomalyco/opencode/blob/v2.0.20/packages/plugin/src/promise/tool.ts
 [v2-plugin-shell]: https://github.com/anomalyco/opencode/blob/v2.0.20/packages/core/src/tool/plugin/shell.ts
 [v2-file-access]: https://github.com/anomalyco/opencode/blob/v2.0.20/packages/core/src/file-access.ts
