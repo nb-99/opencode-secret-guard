@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { MAX_REVIEW_STATUSES, type ReviewScores, type ReviewStatus } from "../src/review-status.ts";
 import {
-  createReviewSummaryStore, lineText, MAX_SKIP_REASONS, panelLines, parseReviewSummary, reviewOutcome, type PanelLine, type ReviewSummary,
+  createReviewSummaryStore, lineText, MAX_SKIP_REASONS, panelSection, parseReviewSummary, reviewOutcome, type PanelLine, type ReviewSummary,
 } from "../src/review-summary.ts";
 
 function completed(overrides: Partial<ReviewStatus> = {}): ReviewStatus {
@@ -164,21 +164,31 @@ describe("parseReviewSummary", () => {
   });
 });
 
-describe("panelLines", () => {
+describe("panelSection", () => {
   test("stays hidden while pending or when no review RPC is registered", () => {
-    expect(panelLines(undefined, undefined, undefined)).toEqual([]);
-    expect(panelLines(undefined, undefined, { ok: false, code: "rpc.unavailable" })).toEqual([]);
+    expect(panelSection(undefined, undefined, undefined)).toBeUndefined();
+    expect(panelSection(undefined, undefined, { ok: false, code: "rpc.unavailable" })).toBeUndefined();
   });
 
   test("shows an empty session and other failures", () => {
-    expect(text(panelLines(undefined, undefined, { ok: true }))).toEqual(["GUARD REVIEW", "No reviews in this session yet."]);
-    expect(text(panelLines(undefined, undefined, { ok: false, code: "timeout" }))).toEqual(["GUARD REVIEW", "Status unavailable (timeout)"]);
+    const empty = panelSection(undefined, undefined, { ok: true })!;
+    expect(empty.title).toBe("Guard Review");
+    expect(empty.collapsed).toBe("no reviews");
+    expect(text(empty.lines)).toEqual(["No reviews in this session yet."]);
+
+    const timedOut = panelSection(undefined, undefined, { ok: false, code: "timeout" })!;
+    expect(timedOut.title).toBe("Guard Review");
+    expect(timedOut.collapsed).toBe("unavailable");
+    expect(text(timedOut.lines)).toEqual(["Status unavailable (timeout)"]);
   });
 
   test("shows the threshold once, outcome totals, skip reasons, one row per check and the latest review", () => {
     const latest = completed({ modelCalled: false, reason: "context-rejected-turn" });
-    expect(text(panelLines(summary(), latest, { ok: true }, clock))).toEqual([
-      "GUARD REVIEW  4 reviews · auto · ≥90%",
+    const section = panelSection(summary(), latest, { ok: true }, clock)!;
+    expect(section.title).toBe("Guard Review");
+    expect(section.collapsed).toBe("4 reviews, 1 manual");
+    expect(text(section.lines)).toEqual([
+      "4 reviews · auto · ≥90%",
       "2 approved · 1 manual · 1 skipped",
       "Skips: context-rejected-turn 1",
       "",
@@ -194,14 +204,16 @@ describe("panelLines", () => {
   });
 
   test("colours a category by whether every review passed it", () => {
-    const rows = panelLines(summary(), undefined, { ok: true }, clock).slice(4, 9);
+    const rows = panelSection(summary(), undefined, { ok: true }, clock)!.lines.slice(4, 9);
     expect(rows.map((row) => row[1]!.tone)).toEqual(["warning", "success", "success", "success", "warning"]);
     expect(rows.map((row) => row[2]!.tone)).toEqual(["faint", "faint", "faint", "faint", "faint"]);
   });
 
   test("keeps cached totals visible beside a failure code", () => {
-    expect(text(panelLines(summary(), undefined, { ok: false, code: "rpc.unavailable" }, clock)).slice(0, 2)).toEqual([
-      "GUARD REVIEW  4 reviews · auto · ≥90%",
+    const section = panelSection(summary(), undefined, { ok: false, code: "rpc.unavailable" }, clock)!;
+    expect(section.collapsed).toBe("4 reviews, unavailable");
+    expect(text(section.lines).slice(0, 2)).toEqual([
+      "4 reviews · auto · ≥90%",
       "Status unavailable (rpc.unavailable); showing cached data",
     ]);
   });
@@ -210,25 +222,41 @@ describe("panelLines", () => {
     const observed = summary({ mode: "observe", reviews: 1, approved: 1, manual: 0, skipped: 0, scored: 1, skips: [],
       passed: passed(1, 1, 1, 1, 1) });
     const latest = completed({ mode: "observe", proposed: "allow", reason: "model-approved", scores: scores(0.96, 0.95, 0.07, 0.04) });
-    const lines = text(panelLines(observed, latest, { ok: true }, clock));
-    expect(lines.slice(0, 2)).toEqual(["GUARD REVIEW  1 review · observe · ≥90%", "1 would approve"]);
+    const observedSection = panelSection(observed, latest, { ok: true }, clock)!;
+    expect(observedSection.collapsed).toBe("1 review");
+    const lines = text(observedSection.lines);
+    expect(lines.slice(0, 2)).toEqual(["1 review · observe · ≥90%", "1 would approve"]);
     expect(lines.at(-1)).toBe("Latest ✓ bash · would approve · 14:04");
     const unscored = summary({ reviews: 1, approved: 0, manual: 0, skipped: 1, scored: 0, skips: [{ reason: "busy", count: 1 }],
       passed: passed(0, 0, 0, 0, 0) });
     delete unscored.average;
-    expect(text(panelLines(unscored, undefined, { ok: true }, clock))).toEqual([
-      "GUARD REVIEW  1 review · auto · ≥90%", "1 skipped", "Skips: busy 1", "", "No scored reviews yet.",
+    const unscoredSection = panelSection(unscored, undefined, { ok: true }, clock)!;
+    expect(unscoredSection.collapsed).toBe("1 review");
+    expect(text(unscoredSection.lines)).toEqual([
+      "1 review · auto · ≥90%", "1 skipped", "Skips: busy 1", "", "No scored reviews yet.",
     ]);
+  });
+
+  test("prioritizes live phase, unavailability and failures in the collapsed summary", () => {
+    const evaluating = completed({ phase: "evaluating", proposed: undefined, applied: undefined, reason: undefined });
+    expect(panelSection(summary(), evaluating, { ok: true }, clock)!.collapsed).toBe("4 reviews, evaluating");
+    const withFailure = summary({ reviews: 3, approved: 1, manual: 1, skipped: 0, failed: 1, scored: 2, skips: [],
+      passed: passed(1, 2, 2, 2, 2) });
+    expect(panelSection(withFailure, undefined, { ok: true }, clock)!.collapsed).toBe("3 reviews, 1 failed");
   });
 
   test("shows a review in progress, remedy text and context warnings", () => {
     const evaluating = completed({ phase: "evaluating", proposed: undefined, applied: undefined, reason: undefined });
-    expect(text(panelLines(undefined, evaluating, undefined, clock))).toEqual([
-      "GUARD REVIEW  auto · ≥90%",
+    const live = panelSection(undefined, evaluating, undefined, clock)!;
+    expect(live.collapsed).toBe("evaluating");
+    expect(text(live.lines)).toEqual([
+      "auto · ≥90%",
       "Latest … bash · evaluating · 14:04",
     ]);
     const failing = completed({ modelCalled: false, reason: "auth-no-connection", contextWarnings: { compacted: true, outside_project: true } });
-    expect(text(panelLines(undefined, failing, { ok: true }, clock)).slice(1)).toEqual([
+    const skipped = panelSection(undefined, failing, { ok: true }, clock)!;
+    expect(skipped.collapsed).toBe("skipped");
+    expect(text(skipped.lines).slice(1)).toEqual([
       "Latest – bash · skipped · 14:04",
       "  auth-no-connection",
       "  Next: no active OpenCode Zen connection; connect OpenCode Zen with an API key in OpenCode, then retry.",

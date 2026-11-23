@@ -137,10 +137,14 @@ The section mounts with the session sidebar; you may need to scroll to see it.
 It is plugin UI, not a slot inside the native permission prompt.
 Hiding the sidebar hides the section, but does not stop reviews or notifications.
 
-The section summarizes the current project-scoped session since the server started:
+The section summarizes the current project-scoped session since the server started.
+Clicking the `Guard Review` header collapses or expands the body, and persists
+the state in OpenCode's plugin storage (`view`), matching OpenCode's built-in
+sidebar sections:
 
 ```text
-GUARD REVIEW  11 reviews · auto · ≥90%
+▼ Guard Review
+11 reviews · auto · ≥90%
 7 approved · 2 manual · 2 skipped
 Skips: context-rejected-turn 1, session-rejected 1
 
@@ -154,7 +158,10 @@ Latest – shell · skipped · 14:04
   context-rejected-turn
 ```
 
-- The header shows the number of completed reviews, the mode and the threshold once.
+When collapsed, the header shows a short muted summary, for example
+`▶ Guard Review (11 reviews, 2 manual)`.
+
+- The first body line shows the number of completed reviews, the mode and the threshold once.
 - The next line counts completed reviews by outcome and omits outcomes with no reviews:
   - `approved` (`would approve` in `observe`): the model passed every check, and the reason is `model-approved`.
   - `manual`: the model scored the request, but approval did not apply. This includes

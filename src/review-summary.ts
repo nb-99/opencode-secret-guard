@@ -163,15 +163,22 @@ export function parseReviewSummary(value: unknown): ReviewSummary | undefined {
   };
 }
 
-export type Tone = "title" | "base" | "muted" | "faint" | "success" | "warning" | "error" | "info";
+export type Tone = "base" | "muted" | "faint" | "success" | "warning" | "error" | "info";
 export type Segment = { text: string; tone: Tone };
 /** One terminal line; a blank line has no segments. */
 export type PanelLine = Segment[];
+export type PanelSection = {
+  title: string;
+  collapsed: string;
+  lines: PanelLine[];
+};
 
+const PANEL_TITLE = "Guard Review";
 const BAR_CELLS = 10;
 const LABEL_WIDTH = 14;
 const SHOWN_SKIPS = 3;
 const percent = (value: number) => `${Math.round(value * 100)}%`;
+const reviewCount = (reviews: number) => `${reviews} ${reviews === 1 ? "review" : "reviews"}`;
 const join = (parts: Segment[], separator = " · "): Segment[] =>
   parts.flatMap((part, index) => index ? [{ text: separator, tone: "muted" as const }, part] : [part]);
 
@@ -180,14 +187,17 @@ function clockTime(ms: number): string {
   return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
 }
 
-function latestLines(status: ReviewStatus, clock: (ms: number) => string): PanelLine[] {
+function latestMeta(status: ReviewStatus): [string, Tone, string] {
   const outcome = reviewOutcome(status);
-  const [symbol, tone, label]: [string, Tone, string] =
-    outcome === "approved" ? ["✓", "success", status.mode === "auto" ? "approved" : "would approve"] :
-    outcome === "manual" ? ["✗", "warning", "needs approval"] :
-    outcome === "skipped" ? ["–", "muted", "skipped"] :
-    outcome === "failed" ? ["!", "error", "failed"] :
-    ["…", "info", status.phase];
+  if (outcome === "approved") return ["✓", "success", status.mode === "auto" ? "approved" : "would approve"];
+  if (outcome === "manual") return ["✗", "warning", "needs approval"];
+  if (outcome === "skipped") return ["–", "muted", "skipped"];
+  if (outcome === "failed") return ["!", "error", "failed"];
+  return ["…", "info", status.phase];
+}
+
+function latestLines(status: ReviewStatus, clock: (ms: number) => string): PanelLine[] {
+  const [symbol, tone, label] = latestMeta(status);
   const lines: PanelLine[] = [[
     { text: "Latest ", tone: "muted" }, { text: `${symbol} `, tone },
     ...join([{ text: status.action, tone: "base" }, { text: label, tone }, { text: clock(status.startedAt), tone: "muted" }]),
@@ -216,32 +226,51 @@ function scoreLine(summary: ReviewSummary & { average: ReviewScores }, key: Chec
   ];
 }
 
+function collapsedSummary(
+  summary: ReviewSummary | undefined,
+  latest: ReviewStatus | undefined,
+  failure: string | undefined,
+): string {
+  if (summary) {
+    const reviews = reviewCount(summary.reviews);
+    if (latest && reviewOutcome(latest) === undefined) return `${reviews}, ${latest.phase}`;
+    if (failure !== undefined) return `${reviews}, unavailable`;
+    if (summary.failed > 0) return `${reviews}, ${summary.failed} failed`;
+    if (summary.manual > 0) return `${reviews}, ${summary.manual} manual`;
+    return reviews;
+  }
+  if (latest) {
+    if (reviewOutcome(latest) === undefined) return latest.phase;
+    return failure !== undefined ? "unavailable" : latestMeta(latest)[2];
+  }
+  return failure !== undefined ? "unavailable" : "no reviews";
+}
+
 /**
- * Sidebar lines; none hides the section. With nothing to show, pending and
- * `rpc.unavailable` stay hidden, because a reviewer that is off registers no RPC.
+ * Collapsible sidebar section; undefined hides it. With nothing to show, pending
+ * and `rpc.unavailable` stay hidden, because a reviewer that is off registers no RPC.
  * `latest` is the newest in-progress status, otherwise the newest completed one.
  */
-export function panelLines(
+export function panelSection(
   summary: ReviewSummary | undefined,
   latest: ReviewStatus | undefined,
   availability: ReviewAvailability,
   clock: (ms: number) => string = clockTime,
-): PanelLine[] {
+): PanelSection | undefined {
   const failure = availability?.ok === false ? availability.code : undefined;
   const empty = !summary && !latest;
-  if (empty && (availability === undefined || failure === "rpc.unavailable")) return [];
+  if (empty && (availability === undefined || failure === "rpc.unavailable")) return undefined;
   const source = summary ?? latest;
-  const reviews = summary ? `${summary.reviews} ${summary.reviews === 1 ? "review" : "reviews"} · ` : "";
-  const lines: PanelLine[] = [[
-    { text: "GUARD REVIEW", tone: "title" },
-    ...(source ? [{ text: `  ${reviews}${source.mode} · ≥${percent(source.threshold)}`, tone: "muted" as const }] : []),
-  ]];
+  const reviews = summary ? `${reviewCount(summary.reviews)} · ` : "";
+  const lines: PanelLine[] = source
+    ? [[{ text: `${reviews}${source.mode} · ≥${percent(source.threshold)}`, tone: "muted" }]]
+    : [];
   if (failure !== undefined) {
     lines.push([{ text: `Status unavailable (${failure})${empty ? "" : "; showing cached data"}`, tone: "warning" }]);
   }
   if (empty) {
     if (failure === undefined) lines.push([{ text: "No reviews in this session yet.", tone: "muted" }]);
-    return lines;
+    return { title: PANEL_TITLE, collapsed: collapsedSummary(summary, latest, failure), lines };
   }
   if (summary) {
     const outcomes: [ReviewOutcome, string, Tone][] = [
@@ -268,7 +297,7 @@ export function panelLines(
     if (summary) lines.push([]);
     lines.push(...latestLines(latest, clock));
   }
-  return lines;
+  return { title: PANEL_TITLE, collapsed: collapsedSummary(summary, latest, failure), lines };
 }
 
 export const lineText = (line: PanelLine) => line.map((segment) => segment.text).join("");
