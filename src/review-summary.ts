@@ -1,7 +1,7 @@
 /** Per-session review totals and the sidebar layout built from them. */
 import { guidanceFor } from "./review-notes.ts";
 import {
-  CHECK_KEYS, MAX_REVIEW_STATUSES, parseReviewStatus, parseScores, SCORE_KEYS, scorePasses,
+  authorizationScore, CHECK_KEYS, MAX_REVIEW_STATUSES, parseReviewStatus, parseScores, SCORE_KEYS, scorePasses,
   type CheckKey, type ReviewAvailability, type ReviewScores, type ReviewStatus,
 } from "./review-status.ts";
 
@@ -30,6 +30,8 @@ export type ReviewSummary = {
   skips: SkipCount[];
   /** Present only when `scored` is above zero. */
   average?: ReviewScores;
+  /** Average of the authorization score that each review compared; present with `average`. */
+  authorization?: number;
   passed: Record<CheckKey, number>;
 };
 
@@ -50,6 +52,7 @@ const reasonPattern = /^[a-z0-9-]{1,60}$/;
 const record = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 const count = (value: unknown): value is number => Number.isSafeInteger(value) && (value as number) >= 0;
+const probability = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1;
 const checkMap = <T>(make: (key: CheckKey) => T) =>
   Object.fromEntries(CHECK_KEYS.map((key) => [key, make(key)])) as Record<CheckKey, T>;
 const scoreMap = <T>(make: (key: keyof ReviewScores) => T) =>
@@ -65,16 +68,20 @@ export function reviewOutcome(status: ReviewStatus): ReviewOutcome | undefined {
 
 /** Running totals that outlive the bounded status store. Memory only, like the statuses. */
 export function createReviewSummaryStore() {
-  type Totals = Omit<ReviewSummary, "average" | "skips"> & { sums: ReviewScores; skipCounts: Map<string, number> };
+  type Totals = Omit<ReviewSummary, "average" | "authorization" | "skips"> &
+    { sums: ReviewScores; authorizationSum: number; skipCounts: Map<string, number> };
   const sessions = new Map<string, Totals>();
   const view = (totals: Totals): ReviewSummary => {
-    const { sums, skipCounts, ...rest } = totals;
+    const { sums, authorizationSum, skipCounts, ...rest } = totals;
     const skips = [...skipCounts].map(([reason, value]) => ({ reason, count: value }))
       .sort((a, b) => b.count - a.count || a.reason.localeCompare(b.reason));
     return structuredClone({
       ...rest,
       skips,
-      ...(totals.scored ? { average: scoreMap((key) => Math.min(1, sums[key] / totals.scored)) } : {}),
+      ...(totals.scored ? {
+        average: scoreMap((key) => Math.min(1, sums[key] / totals.scored)),
+        authorization: Math.min(1, authorizationSum / totals.scored),
+      } : {}),
     });
   };
   return {
@@ -88,7 +95,7 @@ export function createReviewSummaryStore() {
       totals ??= {
         sessionID: status.sessionID, workspaceID: status.workspaceID, mode: status.mode, threshold: status.threshold,
         reviews: 0, approved: 0, manual: 0, skipped: 0, failed: 0, scored: 0, eligible: 0, invalidated: 0, screens: 0,
-        sums: scoreMap(() => 0), passed: checkMap(() => 0), skipCounts: new Map(),
+        sums: scoreMap(() => 0), authorizationSum: 0, passed: checkMap(() => 0), skipCounts: new Map(),
       };
       totals.mode = status.mode;
       totals.threshold = status.threshold;
@@ -104,8 +111,9 @@ export function createReviewSummaryStore() {
       }
       if (status.scores) {
         totals.scored++;
-        const passes = scorePasses(status.scores, status.threshold);
+        const passes = scorePasses(status.scores, status.threshold, status.explicitOnly);
         for (const key of SCORE_KEYS) totals.sums[key] += status.scores[key];
+        totals.authorizationSum += authorizationScore(status.scores, status.threshold, status.explicitOnly);
         for (const key of CHECK_KEYS) if (passes[key]) totals.passed[key]++;
       }
       // Reinsertion keeps the most recently active session last.
@@ -143,13 +151,15 @@ export function parseReviewSummary(value: unknown): ReviewSummary | undefined {
   });
   if (!identity) return undefined;
   const average = value.average === undefined ? undefined : parseScores(value.average);
+  const authorization = value.authorization;
   const { reviews, scored, passed } = value;
   if (!count(reviews) || !count(scored) || scored > reviews || !OUTCOMES.every((outcome) => count(value[outcome])) ||
     OUTCOMES.reduce((total, outcome) => total + (value[outcome] as number), 0) !== reviews ||
     !CHECK_KEYS.every((key) => count(passed[key]) && passed[key] <= scored) ||
     !COUNTS.every((key) => count(value[key]) && value[key] <= reviews) ||
     (value.invalidated as number) > (value.manual as number) ||
-    (value.average !== undefined && !average) || (scored > 0) !== (average !== undefined)) return undefined;
+    (value.average !== undefined && !average) || (scored > 0) !== (average !== undefined) ||
+    (average ? !probability(authorization) : authorization !== undefined)) return undefined;
   const skips = parseSkips(value.skips, value.skipped as number);
   if (!skips) return undefined;
   return {
@@ -158,7 +168,7 @@ export function parseReviewSummary(value: unknown): ReviewSummary | undefined {
     skipped: value.skipped as number, failed: value.failed as number, scored,
     eligible: value.eligible as number, invalidated: value.invalidated as number, screens: value.screens as number,
     skips,
-    ...(average ? { average } : {}),
+    ...(average ? { average, authorization: authorization as number } : {}),
     passed: checkMap((key) => passed[key] as number),
   };
 }
@@ -204,7 +214,7 @@ function latestLines(status: ReviewStatus, clock: (ms: number) => string): Panel
 }
 
 function scoreLine(summary: ReviewSummary & { average: ReviewScores }, key: CheckKey, label: string): PanelLine {
-  const value = summary.average[key];
+  const value = key === "explicitly_authorized" ? summary.authorization ?? summary.average[key] : summary.average[key];
   const filled = Math.round(value * BAR_CELLS);
   const tone: Tone = summary.passed[key] === summary.scored ? "success" : "warning";
   return [

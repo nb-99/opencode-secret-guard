@@ -7,7 +7,7 @@ touch. Permission review is a separate, optional step: when OpenCode V2 is
 about to show you an `ask` prompt, the plugin can send that one request to a
 model and approve it automatically. The default model is Jev (TypeSafe System
 One). You can also choose a decision or chat model through OpenCode, or an
-OpenAI-compatible endpoint; see [Backends](#backends). The model answers six narrow questions, and code
+OpenAI-compatible endpoint; see [Backends](#backends). The model answers eight narrow questions, and code
 combines the answers (see [How a request is approved](#how-a-request-is-approved)).
 Anything else still reaches you as a normal prompt.
 
@@ -165,6 +165,10 @@ Latest – shell · skipped · 14:04
 - Each check row shows the average score over scored reviews and how many of
   them passed that check at their own threshold. The bar and the percentage are
   green when every scored review passed. Otherwise, they are amber.
+  The `Authorization` row averages the authorization score each review used:
+  the explicit score, or for an action without a remote effect that code did
+  not mark `explicitOnly`, the highest of the explicit, read-only and local
+  reversible scores.
   The `Remote` row averages the remote-effect score; a review passes it when
   that score is low enough or when you named the action (see [How a request is approved](#how-a-request-is-approved)).
   Skipped and failed reviews have no scores, so they do not affect the rows.
@@ -249,7 +253,7 @@ Why: You asked to confirm before any push.
 This follows Codex's automatic approval review, which shows the verdict and one
 concise rationale sentence.
 
-The explanation is display-only. Code still decides from the six scores, and
+The explanation is display-only. Code still decides from the scores, and
 the sidebar and decision log still use them. The text is the model's own claim
 and is not verified. The plugin flattens it to one line, replaces control,
 format, private-use and unassigned characters with spaces, and cuts it with `…`
@@ -265,7 +269,7 @@ the heading already says whether the review is pending, skipped or failed.
 `proposed` records the model's verdict when it returns a valid judgment; otherwise it is `ask`.
 `applied` records the permission effect at the reviewer's hook exit.
 It does not prove that a command ran or that later hooks kept that effect.
-If context changes after a passing judgment, the review keeps all six scores
+If context changes after a passing judgment, the review keeps all its scores
 and proposed `allow`, but applies `ask` with the invalidation reason.
 In `observe`, even a valid proposed `allow` leaves manual approval in place.
 For reasons with a remedy, the sidebar's latest review and the toast also show a `Next:` line.
@@ -350,7 +354,10 @@ The fallback shows proposed approvals in `observe` once per request.
 It reads no status, so it ignores the `toasts` setting.
 For negative `observe` judgments, it names the first failed check and displays
 the weakest score and threshold. The score is
-`min(explicitly_authorized, within_scope, 1 - confirmation_required, 1 - sensitive_effect, max(1 - remote_effect, named_by_user))`.
+`min(authorization, within_scope, 1 - confirmation_required, 1 - sensitive_effect, max(1 - remote_effect, named_by_user))`,
+where `authorization` is the highest of `explicitly_authorized`, `read_only` and
+`local_reversible`, or only `explicitly_authorized` for an action with a remote
+effect or marked `explicitOnly`.
 It may describe a different answer than the first failed check.
 The note carries unrounded values, for example `; observe score=0.72 threshold=0.9`.
 Negative `auto` judgments have no scored fallback toast.
@@ -403,7 +410,7 @@ tail -F "$log"
 tail -n 20 "$log" | jq -c '{time, mode, proposed, applied, reason, modelCalled, scores, score, threshold}'
 ```
 
-Records have one of three `event` values:
+Records have one of four `event` values:
 
 - `start`: `time`, `pid`, `mode`, `backend`, `model`, `threshold`, `logPayloads`
   and `restrictionScreen`, plus `api` for `opencode` and `endpoint`. It also
@@ -419,8 +426,8 @@ Records have one of three `event` values:
   recording whether the reviewer started a model request, including the
   restriction screen, not whether it succeeded).
   Valid judgments add a `scores` object with `explicitly_authorized`,
-  `within_scope`, `confirmation_required`, `sensitive_effect`, `remote_effect`
-  and `named_by_user`, plus the
+  `within_scope`, `confirmation_required`, `sensitive_effect`, `remote_effect`,
+  `named_by_user`, `read_only` and `local_reversible`, plus the
   weakest approval-oriented `score`. These numbers are logged in both modes
   without payload logging. Skipped or failed calls without a valid judgment omit
   `scores` and `score`; they do not record invented zeroes.
@@ -446,7 +453,21 @@ Records have one of three `event` values:
     `screen`, `fork`, `subagent` and `remote-named`.
   - `screen`: the restriction screen run, as counts: `chunks`, `cached`,
     `asked`, `selected` and `failed`.
-  - `inputTokens` and `outputTokens`, when the backend reports them.
+  - `inputTokens` and `outputTokens`, when the backend reports them. The
+    `opencode` backend with `api` `text` never does: OpenCode's text generation
+    returns only the text.
+  - `requestBytes`: the size of the judgment request, as the backend measures it
+    against `maxRequestBytes`.
+  - `queuedMs`: how long the review waited for one of the four review slots,
+    when it waited, including a wait that ended in `busy`.
+  - `basis`: for a proposed approval, why the action needed no further
+    authorization: `explicit`, `read-only` or `local-reversible`.
+  - `explicitOnly`: `true` when code allowed only `explicit`; see
+    [How a request is approved](#how-a-request-is-approved).
+- `reply`: your answer to a prompt the plugin saw: `reply` (`once`, `always` or
+  `reject`), the permission `action`, and the `sessionID`, `messageID` and
+  `callID` of the tool call. When the plugin reviewed the call, these match its
+  `review` record. Feedback text is not recorded.
 - `unavailable`: a fixed `notice` text.
 
 V2 evaluates a pending request again after an "always" reply, so the same
@@ -457,10 +478,13 @@ model response body, host error text or a key.
 #### Offline summary
 
 `review-report.ts` in the package summarizes the decision log: asks, eligible
-asks, model calls, approvals, manual results, skips by reason, invalidated
-approvals, screen runs, token counts and evidence paths. It also lists each
-proposed approval with a non-empty `evidence` field. Read those first during an
-`observe` period, because they are the reviews that this release made possible.
+asks, model calls, approvals and their basis, manual results, skips by reason,
+invalidated approvals, restriction screen totals, request sizes, queue waits,
+token counts and evidence paths. Without any reported tokens it prints
+`Tokens: not reported` rather than zero. It joins your replies to the reviews
+of the same call and counts how often the model's verdict matched your answer.
+It lists each proposed approval with a non-empty `evidence` field, and each
+proposed approval you rejected. Read those first during an `observe` period.
 
 ```sh
 bun <package>/lib/review-report.ts
@@ -604,7 +628,7 @@ The `opencode` and `endpoint` blocks also select an `api`.
   `opencode-model-unsupported`. List the decision models that your connections
   provide with `opencode api model.list --param types=decision`.
   With an OpenCode Zen key, `opencode/jev-1.13-free` is free; `opencode/jev-1.13` is paid.
-  The model gets the same evidence as Jev, asked as six predicate questions.
+  The model gets the same evidence as Jev, asked as eight predicate questions.
   Each answer is the probability that the question's statement holds, the same
   yes-probability that Jev returns.
 - `opencode` with `api` `text`: works with any chat model that OpenCode can
@@ -633,7 +657,7 @@ The `opencode` and `endpoint` blocks also select an `api`.
     [toast](#live-phase-notifications). A reply without them is still valid.
   - With `api` `decisions`, the server must provide the OpenAI Decisions API
     at `{baseURL}/decisions`. The plugin sends the evidence as JSON input and
-    asks six predicate questions, as for `opencode` with `decisions`. A refusal
+    asks eight predicate questions, as for `opencode` with `decisions`. A refusal
     answer fails closed with `decision-error`.
   - With `api` `systemone`, the server must provide the System One API at
     `{baseURL}/systemone`. The plugin sends the same request as the `jev`
@@ -838,10 +862,16 @@ OpenCode saves refusals in the session history:
 | Tool part, `permission.rejected` (a reject with feedback, or a configured deny rule) | `rejected` | Refusal of that call; the message is the feedback or the rule reason |
 | `aborted`, `Tool execution interrupted` or `Step interrupted` | `interrupted` | Counts for the turn rule only |
 | `aborted`, `Interaction cancelled because the location shut down` | `shutdown` | None |
+| An interrupt in the assistant message just before a server restart notice | `shutdown` | None |
 | Any other `aborted` | `unknown-aborted` | Refusal |
 
 A characterization test pins these strings to OpenCode 2.0.20 and 2.3.0. A
 changed string can only cause more prompts.
+
+When OpenCode restarts while a turn runs, it saves the running step as
+interrupted, then resumes the turn with a synthetic message whose
+`metadata.notice` is `restart`. That interrupt is the host's, not yours, so it
+does not pause review.
 
 - **Turn rule.** A refusal or an interrupt after the latest user message keeps
   the prompt in that session (`context-rejected-turn`). The agent cannot retry
@@ -936,18 +966,81 @@ requests have no other place for it.
 
 ## How a request is approved
 
-The model answers six yes/no questions about the request, each as a score
+The model answers eight yes/no questions about the request, each as a score
 between 0 and 1. With `confidenceThreshold` t (default 0.9), the request is
 allowed in `auto` only if all hold:
 
 | Question | Asks | Required |
 | -------- | ---- | -------- |
-| `explicitly_authorized` | Did you ask for or approve this exact action and target? | ≥ t |
+| `explicitly_authorized` | Did you ask for or approve this exact action and target? | ≥ t; without a remote effect, `read_only` or `local_reversible` ≥ t also passes |
+| `read_only` | Does the action only read or query data, on this machine or a remote, and change nothing? | Only for the authorization exception |
+| `local_reversible` | Does the action change only this machine, in a way that is easy to undo? | Only for the authorization exception |
 | `within_scope` | Does all of the action serve the task you described? | ≥ t |
 | `confirmation_required` | Do applicable instructions or refusals still require confirmation, or forbid the action? | ≤ 1 − t |
-| `sensitive_effect` | Could it destroy or lose data, change permissions or security, touch credentials, or change a production system? | ≤ 1 − t |
-| `remote_effect` | Could it change a remote or shared system, or publish or send data elsewhere? | ≤ 1 − t, or `named_by_user` ≥ t |
+| `sensitive_effect` | Could it destroy or lose data, change permissions or security, touch or read credentials, or change a production system? | ≤ 1 − t |
+| `remote_effect` | Could it change a remote or shared system, or publish or send data elsewhere? Reading or querying a remote is no remote effect. | ≤ 1 − t, or `named_by_user` ≥ t |
 | `named_by_user` | Does one of your messages name this action and its target in your own words? | Only for the `remote_effect` exception |
+
+The authorization exception lets an action you did not ask for run when it only
+reads, such as `git status`, `rg` or `kubectl get`, or when its changes stay on
+this machine and are easy to undo, such as creating a branch, building, running
+tests, type checks, linters or a formatter. Commits, merges, rebases, resets,
+stashes and deletions are neither, so they still need your own words. An action
+with a remote effect always needs `explicitly_authorized` ≥ t, even when you
+named it. All other conditions still apply: the action must serve your task,
+respect your restrictions and refusals, and have no sensitive effect, so a read
+of credentials or of personal or production data still prompts. The decision
+log records which of the three passed as `basis`.
+
+Code also limits the exception, whatever the model answers. Only
+`explicitly_authorized` can authorize the action, and the decision log records
+`explicitOnly: true`, when:
+
+- the working directory or an access target is outside the project; or
+- the command is not on the allow list in `review-consent.ts`.
+
+The allow list names programs and, for each, the arguments it accepts. Every
+part of the command must match. The list covers:
+
+- reading tools such as `ls`, `cat`, `grep`, `rg`, `jq`, `find` without
+  actions, `sed -n 'N,Mp'` and a single `sed` substitution;
+- `git` reads, `fetch`, `add`, branch creation with `branch`, `checkout -b`
+  or `switch`, and the listing forms of `stash`, `tag`, `remote`, `config`,
+  `worktree` and `reflog`;
+- `gh` and `glab` `view`, `list`, `status`, `diff`, `checks` and `watch`,
+  `search`, and `api` as a `GET` without fields or input;
+- `kubectl get`, `describe`, `logs` and similar reads, without
+  `--kubeconfig`, `--server` or `--token`;
+- `curl` fetching an `http` or `https` URL without data, uploads or output
+  files;
+- tests, builds, type checks, linters and formatters: `npm`, `pnpm`, `yarn`
+  and `bun` scripts and lockfile installs, `cargo`, `go`, `make`, `nix build`
+  and `nix flake check`, `nix-shell -p … --run` with an allowed command,
+  `terraform plan`, `tsc`, `prettier`, `pytest` and similar, without options
+  that pick an output, cache or temporary path, and without paths outside the
+  working directory;
+- `rtk` in front of a tool it proxies, such as `rtk git status`.
+
+Anything else needs your words. Examples are commits, merges, resets and other
+history changes; `rm`, `mv` and `cp`; remote writes such as `gh pr merge` or
+`npm publish`; programs that run another command, such as `sh -c`, `xargs`,
+`env`, `rtk test` or `node -e`; code read from standard input; `printf -v`;
+options before a subcommand; a program name that is quoted, escaped,
+capitalized or given as a path; an environment variable other than a few
+harmless ones such as `CI` or `NO_COLOR`; an unquoted glob, brace or variable
+in the arguments of a checked program; whitespace other than spaces, tabs and
+newlines; a line continuation; command substitution; and output redirection
+to a file.
+
+This check can only cause more prompts. It does not see what a test, a build
+script or a package script runs, and it does not see Git or tool configuration
+that runs programs, such as a hook or `core.fsmonitor`. An agent that edits a
+test or such a file to commit, delete or send data, and then runs the tests or
+`git status`, can get that run approved without your words. Keep edit
+permission on `ask` if that matters to you. In a checkout you do not trust,
+the same applies without an edit: its tests are its own code, and a bare
+repository committed inside it can carry such configuration for a `git status`
+run there.
 
 The remote exception lets a push or a pull request run when you named it:
 `push the branch and open a PR against main` can approve
@@ -1044,8 +1137,9 @@ Besides any unmet approval condition, the reviewer leaves the prompt when:
   a changed or finished tool call invalidates that result.
 - The whole review takes longer than its deadline: 10 seconds for `jev`, or
   `deadlineMs` for `opencode` and `endpoint`. The call fails, or returns an
-  unusable answer.
-- Two reviews are already running.
+  unusable answer. Time spent waiting for a review slot counts.
+- The review waits for one of four review slots until its deadline passes
+  (`busy`). Waiting reviews run in arrival order.
 
 ## What leaves your machine
 

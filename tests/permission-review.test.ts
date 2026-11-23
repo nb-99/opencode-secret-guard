@@ -3,7 +3,7 @@ import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { decide, REVIEW_QUESTIONS, SYSTEM_ONE_ENDPOINT, SYSTEM_ONE_MODEL } from "../src/permission-review.ts";
+import { createSlots, decide, REVIEW_QUESTIONS, SYSTEM_ONE_ENDPOINT, SYSTEM_ONE_MODEL } from "../src/permission-review.ts";
 import { PROMPT_VERSION } from "../src/review-backends.ts";
 import type { ReviewDependencies, ReviewFetch } from "../src/permission-review.ts";
 import { JevRpc, type ReviewSnapshot } from "../src/review-rpc.ts";
@@ -49,7 +49,7 @@ afterAll(() => {
   else process.env.XDG_STATE_HOME = savedStateHome;
 });
 
-const APPROVE = { explicitly_authorized: 0.97, within_scope: 0.96, confirmation_required: 0.02, sensitive_effect: 0.03, remote_effect: 0.02, named_by_user: 0.1 };
+const APPROVE = { explicitly_authorized: 0.97, within_scope: 0.96, confirmation_required: 0.02, sensitive_effect: 0.03, remote_effect: 0.02, named_by_user: 0.1, read_only: 0, local_reversible: 0 };
 type Answers = Record<string, number>;
 
 const answerBody = (answers: Answers) =>
@@ -350,7 +350,7 @@ describe("auto", () => {
   test("never denies, whatever the model says", async () => {
     const fake = await started("auto", {
       fetch: async () =>
-        response(200, answerBody({ explicitly_authorized: 0, confirmation_required: 1, sensitive_effect: 1, within_scope: 0, remote_effect: 1, named_by_user: 0 })),
+        response(200, answerBody({ explicitly_authorized: 0, confirmation_required: 1, sensitive_effect: 1, within_scope: 0, remote_effect: 1, named_by_user: 0, read_only: 0, local_reversible: 0 })),
     });
     expect((await reviewed(fake)).effect).toBe("ask");
   });
@@ -639,7 +639,7 @@ describe("observe", () => {
     const fake = await started("observe", {
       context: scenario === "external directory" ? HUMAN : [compacted(), ...HUMAN],
       fetch: async () => response(200, answerBody({
-        explicitly_authorized: 0.9, within_scope: 0.9, confirmation_required: 0.1, sensitive_effect: 0.1, remote_effect: 0.1, named_by_user: 0,
+        explicitly_authorized: 0.9, within_scope: 0.9, confirmation_required: 0.1, sensitive_effect: 0.1, remote_effect: 0.1, named_by_user: 0, read_only: 0, local_reversible: 0,
       })),
     });
     const call = { ...shellCall(), input: { command: "bun test", workdir } };
@@ -934,7 +934,7 @@ describe("model and transport failures leave the prompt", () => {
     expect(aborted).toBe(true);
   });
 
-  test("reviews beyond the concurrency bound stay prompts", async () => {
+  test("reviews beyond the concurrency bound wait for a slot within their deadline", async () => {
     let release!: () => void;
     const gate = new Promise<void>((resolve) => (release = resolve));
     const fake = await started("auto", {
@@ -943,15 +943,70 @@ describe("model and transport failures leave the prompt", () => {
         return response(200, answerBody(APPROVE));
       },
     });
-    const ids = ["a", "b", "c"];
+    const ids = ["a", "b", "c", "d", "e"];
     for (const id of ids) await fake.call(shellCall("bun test", id));
     const events = ids.map((id) => evaluation({ source: { type: "tool", messageID: "msg_1", id } }));
     const running = events.map((event) => evaluate(fake, event));
     await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(fake.counts.fetch).toBe(4);
     release();
     await Promise.all(running);
-    expect(events.map((event) => event.effect)).toEqual(["allow", "allow", "ask"]);
-    expect(fake.lines).toContain("auto: ask shell (busy)");
+    expect(events.map((event) => event.effect)).toEqual(["allow", "allow", "allow", "allow", "allow"]);
+    expect(fake.counts.fetch).toBe(5);
+    const reviews = fake.records.filter((entry) => entry.event === "review");
+    expect(reviews.filter((entry) => entry.queuedMs !== undefined)).toEqual([expect.objectContaining({ callID: "e" })]);
+    expect(reviews.every((entry) => typeof entry.requestBytes === "number" && entry.requestBytes > 0)).toBe(true);
+  });
+
+  test("a review that leaves the queue records its wait", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const fake = await started("auto", {
+      fetch: async () => {
+        await gate;
+        return response(200, answerBody(APPROVE));
+      },
+    });
+    const ids = ["a", "b", "c", "d"];
+    for (const id of ids) await fake.call(shellCall("bun test", id));
+    await fake.call({ ...shellCall("bun test", "e"), sessionID: "ses_2" });
+    const events = [
+      ...ids.map((id) => evaluation({ source: { type: "tool", messageID: "msg_1", id } })),
+      evaluation({ sessionID: "ses_2", source: { type: "tool", messageID: "msg_1", id: "e" } }),
+    ];
+    const running = events.map((event) => evaluate(fake, event));
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    await fake.events.push("session.deleted", { sessionID: "ses_2" });
+    await running[4];
+    release();
+    await Promise.all(running);
+    expect(fake.counts.fetch).toBe(4);
+    const queued = fake.records.find((entry) => entry.event === "review" && entry.callID === "e")!;
+    expect(queued).toMatchObject({ reason: "session-event", applied: "ask", eligible: false });
+    expect(queued.queuedMs).toBeGreaterThanOrEqual(20);
+  });
+
+  test("the slot queue is first come, first served, and an abort while waiting is busy", async () => {
+    const slots = createSlots(1);
+    const signal = () => new AbortController().signal;
+    expect(await slots.acquire(signal())).toBe(false);
+    const order: string[] = [];
+    const leaving = new AbortController();
+    const left = slots.acquire(leaving.signal).catch((error: Error) => error.message);
+    const second = slots.acquire(signal()).then((waited) => order.push(`second ${waited}`));
+    const third = slots.acquire(signal()).then((waited) => order.push(`third ${waited}`));
+    leaving.abort();
+    expect(await left).toBe("busy");
+    slots.release();
+    await second;
+    slots.release();
+    await third;
+    expect(order).toEqual(["second true", "third true"]);
+    slots.release();
+    expect(await slots.acquire(signal())).toBe(false);
+    const aborted = new AbortController();
+    aborted.abort();
+    expect(await slots.acquire(aborted.signal).catch((error: Error) => error.message)).toBe("busy");
   });
 });
 
@@ -1189,18 +1244,18 @@ describe("re-evaluation", () => {
     expect(fake.counts.fetch).toBe(1);
   });
 
-  test("a call refused as busy is not reviewed on re-evaluation", async () => {
+  test("a repeat of a call that waits for a review slot asks without inference", async () => {
     let release!: () => void;
     const gate = new Promise<void>((resolve) => (release = resolve));
     const fake = await started("auto", { fetch: async () => (await gate, response(200, answerBody(APPROVE))) });
-    for (const id of ["a", "b", "c"]) await fake.call(shellCall("bun test", id));
+    const ids = ["a", "b", "c", "d", "e"];
+    for (const id of ids) await fake.call(shellCall("bun test", id));
     const source = (id: string) => evaluation({ source: { type: "tool", messageID: "msg_1", id } });
-    const running = [evaluate(fake, source("a")), evaluate(fake, source("b"))];
-    expect((await evaluate(fake, source("c"))).effect).toBe("ask");
+    const running = ids.map((id) => evaluate(fake, source(id)));
+    expect((await evaluate(fake, source("e"))).effect).toBe("ask");
     release();
-    await Promise.all(running);
-    expect((await evaluate(fake, source("c"))).effect).toBe("ask");
-    expect(fake.counts.fetch).toBe(2);
+    expect((await Promise.all(running)).map((event) => event.effect)).toEqual(["allow", "allow", "allow", "allow", "allow"]);
+    expect(fake.counts.fetch).toBe(5);
   });
 });
 
@@ -1234,6 +1289,16 @@ describe("working directory", () => {
     expect((await reviewed(fake, call)).effect).toBe("allow");
     expect(fake.counts.fetch).toBe(1);
     expect(fake.records.at(-1)).toMatchObject({ proposed: "allow", applied: "allow", outsideProject: true });
+  });
+
+  test("outside the location, a read the user did not ask for still asks", async () => {
+    const fake = await started("auto", {
+      fetch: async () => response(200, answerBody({ ...APPROVE, explicitly_authorized: 0.2, read_only: 0.99 })),
+    });
+    const call = shellCall();
+    call.input = { ...call.input, workdir: ".." } as any;
+    expect((await reviewed(fake, call)).effect).toBe("ask");
+    expect(fake.records.at(-1)).toMatchObject({ reason: "model-not-authorized", outsideProject: true, explicitOnly: true });
   });
 
   test.each([
@@ -1407,7 +1472,7 @@ describe("lifecycle", () => {
       reviews: [fake.rpc.events[2]!.data],
       summary: {
         sessionID: "ses_1", workspaceID: null, mode: "auto", threshold: 0.9,
-        reviews: 1, approved: 1, manual: 0, skipped: 0, failed: 0, scored: 1, average: APPROVE,
+        reviews: 1, approved: 1, manual: 0, skipped: 0, failed: 0, scored: 1, average: APPROVE, authorization: 0.97,
         eligible: 1, invalidated: 0, screens: 0, skips: [],
         passed: { explicitly_authorized: 1, within_scope: 1, confirmation_required: 1, sensitive_effect: 1, remote_effect: 1 },
       },
@@ -1925,17 +1990,17 @@ describe("availability", () => {
     const answer = (noul: number) => ({ type: "noul" as const, noul });
     const at = (values: Answers, threshold?: number) =>
       decide(Object.fromEntries(Object.entries(values).map(([k, v]) => [k, answer(v)])) as any, threshold);
-    const edge = { explicitly_authorized: 0.9, within_scope: 0.9, confirmation_required: 0.1, sensitive_effect: 0.1, remote_effect: 0.1, named_by_user: 0 };
+    const edge = { explicitly_authorized: 0.9, within_scope: 0.9, confirmation_required: 0.1, sensitive_effect: 0.1, remote_effect: 0.1, named_by_user: 0, read_only: 0, local_reversible: 0 };
     expect(at(edge).allow).toBe(true);
     expect(at(edge, 0.9).allow).toBe(true);
     expect(at({ ...edge, sensitive_effect: 0.1000001 }).reason).toBe("model-sensitive-effect");
     expect(at({ ...edge, within_scope: 0.8999999 }).reason).toBe("model-out-of-scope");
-    const strict = { explicitly_authorized: 0.95, within_scope: 0.95, confirmation_required: 0.05, sensitive_effect: 0.05, remote_effect: 0.05, named_by_user: 0 };
+    const strict = { explicitly_authorized: 0.95, within_scope: 0.95, confirmation_required: 0.05, sensitive_effect: 0.05, remote_effect: 0.05, named_by_user: 0, read_only: 0, local_reversible: 0 };
     expect(at(strict, 0.95).allow).toBe(true);
     expect(at({ ...strict, confirmation_required: 0.06 }, 0.95).reason).toBe("model-confirmation-required");
     expect(at({ ...strict, explicitly_authorized: 0.94 }, 0.95).reason).toBe("model-not-authorized");
     expect(at(APPROVE, 0.95).allow).toBe(true);
-    const certain = { explicitly_authorized: 1, within_scope: 1, confirmation_required: 0, sensitive_effect: 0, remote_effect: 0, named_by_user: 0 };
+    const certain = { explicitly_authorized: 1, within_scope: 1, confirmation_required: 0, sensitive_effect: 0, remote_effect: 0, named_by_user: 0, read_only: 0, local_reversible: 0 };
     expect(at(certain, 1).allow).toBe(true);
     expect(at({ ...certain, within_scope: 0.999 }, 1).allow).toBe(false);
     expect(at({ ...certain, sensitive_effect: 0.001 }, 1).allow).toBe(false);
@@ -1961,7 +2026,7 @@ describe("availability", () => {
     const answer = (noul: number) => ({ type: "noul" as const, noul });
     const at = (values: Answers) =>
       decide(Object.fromEntries(Object.entries(values).map(([k, v]) => [k, answer(v)])) as any, t);
-    const edge = { explicitly_authorized: t, within_scope: t, confirmation_required: limit, sensitive_effect: limit, remote_effect: limit, named_by_user: 0 };
+    const edge = { explicitly_authorized: t, within_scope: t, confirmation_required: limit, sensitive_effect: limit, remote_effect: limit, named_by_user: 0, read_only: 0, local_reversible: 0 };
     expect(at(edge).allow).toBe(true);
     expect(at({ ...edge, sensitive_effect: limit + 1e-9 }).reason).toBe("model-sensitive-effect");
     expect(at({ ...edge, confirmation_required: limit + 1e-9 }).reason).toBe("model-confirmation-required");
@@ -1969,7 +2034,7 @@ describe("availability", () => {
 
   test("at t = 1 any positive negative answer asks, however small", () => {
     const answer = (noul: number) => ({ type: "noul" as const, noul });
-    const certain = { explicitly_authorized: answer(1), within_scope: answer(1), confirmation_required: answer(0), sensitive_effect: answer(0), remote_effect: answer(0), named_by_user: answer(0) };
+    const certain = { explicitly_authorized: answer(1), within_scope: answer(1), confirmation_required: answer(0), sensitive_effect: answer(0), remote_effect: answer(0), named_by_user: answer(0), read_only: answer(0), local_reversible: answer(0) };
     expect(decide(certain as any, 1).allow).toBe(true);
     expect(decide({ ...certain, sensitive_effect: answer(1e-20) } as any, 1).allow).toBe(false);
     expect(decide({ ...certain, confirmation_required: answer(Number.MIN_VALUE) } as any, 1).allow).toBe(false);
@@ -2599,7 +2664,7 @@ describe("observe score warnings", () => {
   });
 
   test("uses a custom threshold and enough decimals to tell values apart", async () => {
-    const fake = await judged({ explicitly_authorized: 0.99, within_scope: 0.99, sensitive_effect: 0.01, confirmation_required: 0.025, remote_effect: 0.01, named_by_user: 0 }, "observe", 0.98);
+    const fake = await judged({ explicitly_authorized: 0.99, within_scope: 0.99, sensitive_effect: 0.01, confirmation_required: 0.025, remote_effect: 0.01, named_by_user: 0, read_only: 0, local_reversible: 0 }, "observe", 0.98);
     const event = (await reviewed(fake)) as { message?: string };
     const { shown, listen } = toasts();
     listen(asked(event.message));
@@ -2694,7 +2759,7 @@ describe("observe score warnings", () => {
 
 describe("opencode backend", () => {
   const OPENCODE = { backend: "opencode", opencode: { model: "opencode/jev-1.13-free" } } as const;
-  const NEGATIVE: Answers = { explicitly_authorized: 0.97, confirmation_required: 0.02, sensitive_effect: 0.97, within_scope: 0.96, remote_effect: 0.02, named_by_user: 0.1 };
+  const NEGATIVE: Answers = { explicitly_authorized: 0.97, confirmation_required: 0.02, sensitive_effect: 0.97, within_scope: 0.96, remote_effect: 0.02, named_by_user: 0.1, read_only: 0, local_reversible: 0 };
   const predicates = (values: Answers, overrides: Record<string, unknown> = {}) => ({
     answers: Object.entries(values).map(([name, probability]) => ({
       type: "predicate",
@@ -3455,6 +3520,84 @@ describe("review reliability", () => {
         expect(named).toContain(NAMED_ONLY_IN_USER_MESSAGES);
       },
     );
+  });
+
+  describe("actions the user did not ask for", () => {
+    const UNASKED = { ...APPROVE, explicitly_authorized: 0.2 };
+    const at = (values: Answers, threshold?: number) =>
+      decide(Object.fromEntries(Object.entries({ ...UNASKED, ...values }).map(([k, v]) => [k, { type: "noul", noul: v }])) as any, threshold);
+
+    test.each([
+      ["a read-only command", { read_only: 0.95 }, "model-approved", "read-only"],
+      ["a local, reversible build", { local_reversible: 0.93 }, "model-approved", "local-reversible"],
+      ["an action the user asked for", { explicitly_authorized: 0.97, read_only: 0.95 }, "model-approved", "explicit"],
+      ["a commit, which is neither", { read_only: 0.02, local_reversible: 0.3 }, "model-not-authorized", undefined],
+      ["a remote read the model rates as a remote effect", { read_only: 0.95, remote_effect: 0.5, named_by_user: 0.2 }, "model-remote-unnamed", undefined],
+      ["a remote write the user named but did not ask for", { local_reversible: 0.95, remote_effect: 0.9, named_by_user: 0.95 }, "model-not-authorized", undefined],
+      ["a read of credentials", { read_only: 0.99, sensitive_effect: 0.6 }, "model-sensitive-effect", undefined],
+      ["a read outside the task", { read_only: 0.99, within_scope: 0.4 }, "model-out-of-scope", undefined],
+      ["a read the user forbade", { read_only: 0.99, confirmation_required: 0.8 }, "model-confirmation-required", undefined],
+    ] as Array<[string, Answers, string, string | undefined]>)("%s gives %s", (_, values, reason, basis) => {
+      const outcome = at(values);
+      expect(outcome.reason).toBe(reason);
+      expect(outcome.basis).toBe(basis as any);
+    });
+
+    test("each basis needs the threshold exactly", () => {
+      expect(at({ read_only: 0.9 }).allow).toBe(true);
+      expect(at({ read_only: 0.8999999, local_reversible: 0.8999999 }).reason).toBe("model-not-authorized");
+      expect(at({ local_reversible: 0.95 }, 0.96).reason).toBe("model-not-authorized");
+      expect(at({ read_only: 0.95 }).score).toBe(0.95);
+    });
+
+    test("an action code marks as explicit-only needs the user's request", () => {
+      const outcome = decide(Object.fromEntries(Object.entries({ ...UNASKED, read_only: 0.99, local_reversible: 0.99 })
+        .map(([k, v]) => [k, { type: "noul", noul: v }])) as any, 0.9, true);
+      expect(outcome).toMatchObject({ allow: false, reason: "model-not-authorized", explicitOnly: true, score: 0.2 });
+      const asked = decide(Object.fromEntries(Object.entries({ ...UNASKED, explicitly_authorized: 0.95 })
+        .map(([k, v]) => [k, { type: "noul", noul: v }])) as any, 0.9, true);
+      expect(asked).toMatchObject({ allow: true, basis: "explicit", explicitOnly: true });
+    });
+
+    test("a commit the model rates read-only still asks, and the log says why", async () => {
+      const fake = await started("auto", {
+        fetch: async () => response(200, answerBody({ ...UNASKED, read_only: 0.97, local_reversible: 0.97 })),
+      });
+      const command = "git commit -m wip";
+      expect((await reviewed(fake, shellCall(command), evaluation({ resources: [command] }))).effect).toBe("ask");
+      expect(fake.records.at(-1)).toMatchObject({ reason: "model-not-authorized", explicitOnly: true });
+      expect(fake.records.at(-1)).not.toHaveProperty("basis");
+    });
+
+    test("an approval records its basis in the decision log", async () => {
+      const fake = await started("auto", {
+        fetch: async () => response(200, answerBody({ ...UNASKED, read_only: 0.97 })),
+      });
+      expect((await reviewed(fake, shellCall("git status"), evaluation({ resources: ["git status"] }))).effect).toBe("allow");
+      expect(fake.records.at(-1)).toMatchObject({ reason: "model-approved", basis: "read-only" });
+    expect(fake.records.at(-1)).not.toHaveProperty("explicitOnly");
+    });
+  });
+
+  describe("replies", () => {
+    test("records the user's reply to a prompt it saw, with identifiers only", async () => {
+      const fake = await started("observe");
+      await reviewed(fake);
+      await asked(fake, "per_1", "call_1");
+      await fake.events.push("permission.replied", { sessionID: "ses_1", requestID: "per_1", reply: "once", message: "private text" });
+      await asked(fake, "per_2", "call_2");
+      await reject(fake, "per_2");
+      // An unknown request and an unknown reply code are not recorded.
+      await fake.events.push("permission.replied", { sessionID: "ses_1", requestID: "per_9", reply: "once" });
+      await asked(fake, "per_3", "call_3");
+      await fake.events.push("permission.replied", { sessionID: "ses_1", requestID: "per_3", reply: "sometimes" });
+      const replies = fake.records.filter((entry) => entry.event === "reply");
+      expect(replies).toEqual([
+        expect.objectContaining({ event: "reply", reply: "once", action: "shell", sessionID: "ses_1", messageID: "msg_1", callID: "call_1" }),
+        expect.objectContaining({ event: "reply", reply: "reject", action: "shell", sessionID: "ses_1", messageID: "msg_1", callID: "call_2" }),
+      ]);
+      expect(JSON.stringify(replies)).not.toContain("private text");
+    });
   });
 
   describe("context", () => {

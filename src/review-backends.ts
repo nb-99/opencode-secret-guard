@@ -1,6 +1,6 @@
 /**
  * The model call behind each permission review backend. A backend answers the
- * six review questions and returns one `answers` object; the text API also
+ * review questions and returns one `answers` object; the text API also
  * returns a display-only explanation. The decision in
  * permission-review.ts applies the threshold to that object, so every backend
  * shares the same contract and the same fail-closed rules.
@@ -269,7 +269,7 @@ function parseJSON(text: string): unknown {
   }
 }
 
-/** The strict contract: one JSON object with exactly the six answers. */
+/** The strict contract: one JSON object with exactly the review answers. */
 function answersOf(parsed: unknown): ReviewAnswers {
   const result = ReviewResponse.safeParse(parsed);
   if (!result.success) throw new Ineligible("response-shape");

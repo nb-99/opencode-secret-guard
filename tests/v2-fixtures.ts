@@ -49,4 +49,9 @@ export const v2 = {
   }),
   /** v2.3.0 prompt.ts `MediaFileAttachment`: the bytes stay on the server, so there is no `data`. */
   mediaFile: (name: string, mime: string) => ({ uri: `media:${"ab".repeat(32)}`, mime, name, source: { type: "inline" } }),
+  /** execution/restart.ts: the notice that resumes a turn a server restart interrupted. */
+  restart: (id: string, created: number) => ({
+    type: "synthetic", id, text: "The server restarted while you were working. Continue from where you left off without repeating completed work.",
+    description: "Continuing after restart", metadata: { notice: "restart" }, time: { created },
+  }),
 };
