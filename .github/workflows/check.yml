@@ -7,8 +7,17 @@ on:
 
 jobs:
   check:
-    # sandbox-exec is macOS-only, and the kernel suite is the point.
-    runs-on: macos-15
+    strategy:
+      fail-fast: false
+      matrix:
+        # The unit tests cover both modes on each system with a fake backend.
+        # The kernel suite runs only where a shell sandbox backend exists.
+        include:
+          - os: macos-15
+            kernel: true
+          - os: ubuntu-latest
+            kernel: false
+    runs-on: ${{ matrix.os }}
     permissions:
       contents: read
     steps:
@@ -23,6 +32,7 @@ jobs:
       - name: Flake checks
         run: nix flake check -L
 
-      # Cannot be a check: the Nix build sandbox has no /usr/bin/sandbox-exec.
+      # Cannot be a check: no sandbox can be applied inside the Nix build sandbox.
       - name: Kernel integration tests
+        if: matrix.kernel
         run: nix run .#integration
