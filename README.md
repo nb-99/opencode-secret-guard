@@ -1,71 +1,46 @@
 # opencode-secret-guard
 
-Keeps secrets out of an [OpenCode](https://opencode.ai) agent's context.
+[![CI](https://github.com/nb-99/opencode-secret-guard/actions/workflows/check.yml/badge.svg)](https://github.com/nb-99/opencode-secret-guard/actions/workflows/check.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-OpenCode's `permission.bash` rules match the command _string_. That is fine for
-"should this be confirmed?" but useless as a boundary: `F=.env; cat $F`,
-`cat .en?`, `base64 < .env` and `python3 -c "open('.env')"` all read the same
-file without containing a matchable pattern. Anything built on string inspection
-is defeated by shell expansion.
+Keeps secrets out of an [OpenCode](https://opencode.ai) agent's context with kernel-level sandboxing and a unified file-tool policy.
 
-This enforces the boundary where expansion cannot reach it:
+OpenCode's `permission.bash` rules match the command string, which shell expansion defeats: `F=.env; cat $F`, `cat .en?`, `base64 < .env`, and `python3 -c "open('.env')"` all read `.env` without matching a string rule. `opencode-secret-guard` enforces one shared policy below shell expansion so that **a credential may be used, never read**.
 
-- **bash** — OpenCode's configured shell runs every command under a generated
-  macOS `sandbox-exec` profile, without rewriting the command shown in the TUI.
-  Enforcement is in the kernel, so it covers variable expansion, globs,
-  redirections, `find -exec`, interpreters, archivers and recursive greps alike.
-- **file tools** — `read`, `write`, `edit`, `patch` (`apply_patch` on V1),
-  `list`, `glob`, `grep` and V1's `lsp` run the same policy as a path predicate, and
-  `glob`/`grep` results are filtered. A patch is checked against every file
-  its headers name. V2's browser tools that open a local file (`files.upload`,
-  `files.drop`, `preview`) are checked as reads.
+`git push` can reach `~/.ssh` because `git` needs it. `cat ~/.ssh/id_ed25519` and `gh auth token` cannot.
 
-Both layers are derived from one policy file, and a test compares their verdicts
-on ordinary paths. File-tool matching is additionally conservative for
-case-insensitive or unknown filesystem lookup modes; the kernel regex profile
-does not implement that alias matching.
+## Features
 
-The rule is: a credential may be **used**, never **read**. `git push` reaches
-`~/.ssh` because git needs it; `cat ~/.ssh/id_ed25519` does not, and neither
-does `gh auth token`, whose whole output is the secret. Anything OpenCode itself
-loads at its next start — its config, plugins, this policy, the directories on
-`PATH` — cannot be written by a command, so one command cannot disable the
-guard for the ones that follow.
+- **Kernel-enforced shell sandbox (macOS):** Runs every shell command under a generated `sandbox-exec` profile via OpenCode's `shell` setting without rewriting the command shown in the TUI. Covers variables, globs, redirections, interpreters, archivers, and `find -exec`.
+- **Unified file and browser tool guard (cross-platform):** Enforces the same policy on `read`, `write`, `edit`, `patch`, `list`, `glob`, `grep`, and browser file tools (`files.upload`, `files.drop`, `preview`). Filters `glob` and `grep` results and honors `.gitignore` with an allowlist for build artifacts.
+- **Scoped credential relaxation:** Grants credential binaries (`git`, `kubectl`, `aws`, `gcloud`, `az`, `docker`, `npm`, and others) access to their own credential paths only when every segment of the command is safe. Prints a one-line hint when a failed command lost its group or hit a guard rule.
+- **Secret-printing refusals and environment scrubbing:** Refuses commands whose output is a secret (`gh auth token`, `kubectl get secret -o yaml`, `aws eks get-token`, `op read`, `sops -d`, and similar) and strips secret environment variables (`*_TOKEN`, `*_SECRET`, `*_API_KEY`, etc.) before execution.
+- **Tamper protection:** Blocks writes to OpenCode's config, plugin and tool directories, caches, this package, the policy file, `~/.zshenv`, user-writable `PATH` directories, and configured `writeProtectedRoots`. Prevents renaming protected directories or hard-linking secrets.
+- **Guarded temporary cleanup (`cleanup_temp`):** Opt-in tool that lets an agent delete task directories under a configured scratch root (such as `$TMPDIR/opencode`) using OpenCode `edit` permissions and a write-confined `/bin/rm` sandbox, without weakening bash `rm` rules.
+- **Optional permission review:** Off by default. Sends eligible shell `ask` prompts to a model (Jev via OpenCode Zen, an OpenCode model, or an OpenAI-compatible endpoint) for one-time auto-approval, with live TUI sidebar status and toasts.
 
-See [docs/design.md](docs/design.md) for the full design and
-[docs/lessons-learned.md](docs/lessons-learned.md) for the empirically verified
-`sandbox-exec` behaviour it depends on.
+## Requirements and modes
 
-## Requirements
+Requires **OpenCode 2**.
 
-OpenCode **V1 1.18.29 or newer**, or **V2**. One package serves both: its entry
-point default-exports `{ id, setup, server }`, and each version calls the one it
-knows. The V2 adapter follows the V2 2.0.16 source and was tested live on
-V2 2.0.20. Directory loading was verified on V1 1.18.31; the minimum V1
-1.18.29 still needs a live check. See [docs/v2-migration.md](docs/v2-migration.md)
-for the tested revisions, coverage and remaining checks.
+| Feature | Minimum OpenCode version |
+| --- | --- |
+| Core file and shell guard | 2.0 |
+| Optional permission review | 2.0.20+ (TUI sidebar: 2.1.4+; `opencode` backend: 2.2.5+) |
+| `cleanup_temp` tool | 2.0.29+ |
 
-| Mode                    | shell tool      | file tools | Requires                  |
-| ----------------------- | --------------- | ---------- | ------------------------- |
-| `shell+files` (default) | kernel-enforced | guarded    | macOS with `sandbox-exec` |
-| `files-only`            | **unguarded**   | guarded    | anything                  |
+| Mode | Shell tool | File tools | Platform |
+| --- | --- | --- | --- |
+| `shell+files` (default) | Kernel-enforced | Guarded | macOS (`sandbox-exec`) |
+| `files-only` | **Unguarded** | Guarded | macOS, Linux |
 
-`files-only` is a real reduction — any command can read any secret — so it must
-be requested explicitly, it announces itself at startup, and the shell wrapper
-refuses to run under it. `shell+files` never degrades to it automatically: a
-guard that looks installed while guarding far less than the reader assumes is
-worse than one that refuses to start.
+`files-only` leaves shell commands completely unguarded, so you must select it explicitly. `shell+files` never falls back to `files-only` automatically, and the shell wrapper refuses to run under `files-only`.
 
-### Upgrading from 1.x
+## Installation
 
-- `lib/plugin.ts` no longer exists. Point the plugin entry at the `lib`
-  directory (`file:///…/lib`); Home Manager users get this from `pluginPath`.
-  A stale path makes OpenCode start without the plugin, so the file tools are
-  unguarded until it is fixed.
-- OpenCode V1 older than 1.18.29 is not supported.
-- Confirm in OpenCode's plugin list that the plugin is active.
+### Home Manager (recommended)
 
-## Install with Home Manager
+Import `homeManagerModules.default` (also exported as `homeModules.default`) and wire the module's read-only `pluginPath` and `shellPath` outputs into `programs.opencode.settings`:
 
 ```nix
 { config, lib, inputs, ... }:
@@ -73,28 +48,34 @@ let
   guard = config.programs.opencode-secret-guard;
 in
 {
-  # flake input: inputs.opencode-secret-guard.url = "github:nb-99/opencode-secret-guard";
+  # Flake input: inputs.opencode-secret-guard.url = "github:nb-99/opencode-secret-guard";
   imports = [ inputs.opencode-secret-guard.homeManagerModules.default ];
 
   programs.opencode-secret-guard = {
     enable = true;
     mode = "shell+files";
-    # Additions to the shipped default; upstream fixes still apply.
+
+    # Append to shipped defaults so upstream policy updates still apply.
     extraRelaxationGroups.oci.binaries = [ "ko" ];
     extraSecretExceptions = [ "/pkg/store/secrets/obfuscator\\.go$" ];
-    # A shipped refusal this host does not want.
+
+    # Drop a shipped secret-printing refusal if this host needs it.
     removeSecretPrintingCommands = [ { binary = "sops"; } ];
-    # An OpenCode installed outside the read-only Nix store.
+
+    # Protect OpenCode installs that live outside the read-only Nix store.
     extraWriteProtectedRoots = [
       "/opt/homebrew/Cellar/opencode"
       "/opt/homebrew/opt/opencode"
       "/opt/homebrew/bin/opencode"
       "/Applications/OpenCode.app"
     ];
-    # Optional model review of V2 shell `ask` prompts; see docs/permission-review.md.
+
+    # Optional model review of shell `ask` prompts.
     permissionReview.mode = "observe";
-    # Whole-key overrides.
+
+    # Whole-key overrides (applied after extra* options).
     settings = {
+      cleanupRoot = "$TMPDIR/opencode";
       denyRoots = [ "~/.config/secrets" ];
       exemptRoots = [ "~/notes/agent-memory" ];
       secretEnvironment = [ "CONTEXT7_API_KEY" ];
@@ -102,340 +83,143 @@ in
   };
 
   programs.opencode.settings = {
-    # V1's key. V2 rewrites `plugin` to its own `plugins` when it loads the config.
-    plugin = lib.optional (guard.pluginPath != null) guard.pluginPath;
+    plugins = lib.optional (guard.pluginPath != null) guard.pluginPath;
   }
-  // lib.optionalAttrs (guard.shellPath != null) { shell = guard.shellPath; };
+  // lib.optionalAttrs (guard.shellPath != null) {
+    shell = guard.shellPath;
+  };
 }
 ```
 
-The module writes the policy and installs the package, but deliberately does not
-write into `programs.opencode` itself: consumers assemble their own OpenCode
-settings, and reaching into another module's option tree invites merge conflicts
-over values this module cannot see.
+- **Additive options** (`extraSecretPatterns`, `extraSecretExceptions`, `extraArtifactAllowlist`, `extraSecretPrintingCommands`, `extraRelaxationGroups`, `extraWriteProtectedRoots`) merge into [`policy/default.json`](policy/default.json). `removeSecretPrintingCommands` removes shipped rules before additions apply.
+- **Whole-key overrides** go in `settings`, except `mode`, `tools` (`gitPackage`), and `permissionReview`, which have typed top-level options.
+- **`shellPath` and `pluginPath`** evaluate to `null` when they do not apply (for example, `shellPath` is `null` in `files-only` mode).
 
-`extraSecretPatterns`, `extraSecretExceptions`, `extraArtifactAllowlist`,
-`extraSecretPrintingCommands`, `extraRelaxationGroups` and
-`extraWriteProtectedRoots` append to the shipped
-default, so a host carries only its deltas. `removeSecretPrintingCommands` drops
-shipped refusal rules before the additions are appended, for a host that needs
-`sops -d` or a narrower `kubectl` rule without giving up the rest of the list.
-`settings` replaces a key wholesale, except `mode`, `tools` and
-`permissionReview`, which have their own options. `permissionReview` is typed,
-and its backend blocks are checked during evaluation. `gitPackage` (default `pkgs.git`) is the
-git the guard itself spawns, written as a store path.
+### Without Nix
 
-`shellPath` and `pluginPath` are **null when they do not apply** — `shellPath`
-whenever the guard is disabled or in `files-only` mode, since the wrapper
-refuses to run there. Wiring them unconditionally therefore fails at evaluation
-rather than producing a configuration that looks installed and aborts every
-command.
-
-## Install without Nix
+Build the package or unpack a release, then install the default policy:
 
 ```sh
-nix build github:nb-99/opencode-secret-guard   # or unpack a release
+nix build github:nb-99/opencode-secret-guard
 cp result/share/opencode-secret-guard/default-policy.json \
-   ~/.config/opencode/secret-guard.json
+  ~/.config/opencode/secret-guard.json
 ```
 
-Then point OpenCode at the package:
+Point OpenCode at the shell wrapper and plugin directory:
 
 ```jsonc
 {
-  // The same key on V1 and V2.
   "shell": "/path/to/opencode-secret-guard/bin/opencode-secret-guard",
-  // The plugin is a directory; both versions load its index.ts. V2's own name
-  // for this key is "plugins", and it accepts "plugin" too.
-  "plugin": ["file:///path/to/opencode-secret-guard/lib"]
+  "plugins": ["file:///path/to/opencode-secret-guard/lib"]
 }
 ```
 
-The wrapper needs `SECRET_GUARD_BUN` set to the absolute path of `bun`; it never
-searches `PATH`, for the same reason its interpreter line is fixed. Without
-Nix the policy's `tools.git` defaults to `/usr/bin/git`; set it to the git you
-want the guard to spawn.
+Outside the Nix wrapper, set `SECRET_GUARD_BUN` to the absolute path of `bun` (the wrapper never searches `PATH`), and set `tools.git` in your policy if you do not want `/usr/bin/git`.
 
 ## Configuration
 
-The plugin reads `~/.config/opencode/secret-guard.json`, or the path in
-`OPENCODE_SECRET_GUARD_CONFIG`. Nothing is substituted at build time.
+The plugin reads `~/.config/opencode/secret-guard.json` (or `$OPENCODE_SECRET_GUARD_CONFIG`). Start from [`policy/default.json`](policy/default.json). Roots may begin with `~`, which expands at runtime.
 
-Start from [`policy/default.json`](policy/default.json). Roots may be written
-with a leading `~`, expanded at runtime, so a policy is portable between hosts.
+Validation fails closed: an unsupported `configVersion`, invalid regex, non-absolute root, or non-`$HOME`-relative `allowPaths` entry aborts startup and refuses guarded tool calls. The current format is **`configVersion` 8**; versions 1 through 7 still load with defaults for newer fields.
 
-| Key                         | Meaning                                                                                 |
-| --------------------------- | --------------------------------------------------------------------------------------- |
-| `configVersion`             | File format, currently 8; 1 to 7 still load; anything else is rejected                  |
-| `mode`                      | `shell+files` or `files-only`                                                           |
-| `cleanupRoot`               | Opt-in root for `cleanup_temp`, may start with `~` or `$TMPDIR`; `null` disables it and files-only mode cannot enable it |
-| `tools.git`                 | Absolute path of the git the guard spawns; never resolved through `PATH`                |
-| `secretPatterns`            | JavaScript regexes; alias paths use the bounded grammar described below                  |
-| `secretExceptions`          | Naming allowances; alias paths require a proved universal match                         |
-| `artifactAllowlist`         | Proved component-name allowances against Git ignore rules, not secret patterns           |
-| `relaxationGroups`          | Per-binary credential access, e.g. `git` → `~/.ssh`, plus `allowEnvironment`            |
-| `secretPrintingCommands`    | Invocations refused outright because their output is the credential                    |
-| `denyRoots`                 | Never relaxed, never excepted                                                           |
-| `exemptRoots`               | Explicit subtree exemptions; file tools require an existing directory, and cache/write-tamper protection takes precedence |
-| `writeProtectedRoots`       | Trees no command or file tool may write, such as a Homebrew or app-bundle OpenCode install; reads and execution stay allowed (version 4) |
-| `secretEnvironment`         | Variable names scrubbed before a command runs, always                                   |
-| `secretEnvironmentPatterns` | Regexes; every inherited variable whose name matches is scrubbed                        |
-| `cacheTtlMs`                | How often a profile is regenerated                                                      |
-| `permissionReview.mode`     | `off` (default), `observe`, or `auto`; optional, approval-only model review of OpenCode V2 shell `ask` prompts; requires `configVersion` 5 or later. See [docs/permission-review.md](docs/permission-review.md) |
-| `permissionReview.logPayloads` | `false` (default) or `true`; also logs review request and response bodies to a private local file |
-| `permissionReview.confidenceThreshold` | `0.9` (default); t above 0.5 and at most 1. Authorization and scope answers must reach t; confirmation, sensitive-effect and remote-effect answers must stay at or below 1 − t, except that a remote action you named passes. The scores are uncalibrated; see [docs/permission-review.md](docs/permission-review.md#how-a-request-is-approved) |
-| `permissionReview.backend`  | `jev` (default, Jev through OpenCode Zen), `opencode` (a decision or chat model OpenCode can reach; OpenCode 2.2.5 or later) or `endpoint` (an OpenAI-compatible server). See [Backends](docs/permission-review.md#backends) |
-| `permissionReview.toasts`   | `all` (default) or `attention`; `attention` shows only completed reviews that need you and leaves progress and automatic approvals to the sidebar; needs `configVersion` 7. See [Live phase notifications](docs/permission-review.md#live-phase-notifications) |
-| `permissionReview.restrictionScreen` | `true` (default) or `false`; asks the review backend which left-out skill, attachment and summary text states rules for the agent; needs `configVersion` 8. See [Restriction screen](docs/permission-review.md#restriction-screen) |
-| `permissionReview.opencode` | `{ "model", "api", "deadlineMs", "maxRequestBytes" }`; `model` is `provider/model`, optionally `#variant`; `api` is `decisions` (default, a decision model such as `opencode/jev-1.13-free`) or `text` (any chat model; its scores are less reliable); `deadlineMs` defaults to 10000; `maxRequestBytes` is `null` (default) or 32000 to 360000 and needs `configVersion` 8; required with backend `opencode` and rejected otherwise. `api` and `deadlineMs` need `configVersion` 6 |
-| `permissionReview.endpoint` | `{ "baseURL", "model", "apiKeyFile", "deadlineMs", "api", "maxRequestBytes" }`; HTTPS, or HTTP on loopback only; `api` is `text` (default, `/chat/completions`), `decisions` (`/decisions`, the OpenAI Decisions API) or `systemone` (`/systemone`, the System One API of Jev and local decision-model servers); `api` needs `configVersion` 6; `maxRequestBytes` as for `opencode` (see [Request size](docs/permission-review.md#request-size)); required with backend `endpoint` and rejected otherwise |
+| Key | Description |
+| --- | --- |
+| `configVersion` | Format version (`8`; `1` to `7` remain accepted). |
+| `mode` | `"shell+files"` (default) or `"files-only"`. |
+| `cleanupRoot` | Opt-in root for `cleanup_temp` (supports `~` and `$TMPDIR`), or `null` to disable. Requires `shell+files`. |
+| `tools.git` | Absolute path to `git` spawned by the guard (never resolved via `PATH`). |
+| `secretPatterns` | Regexes matching protected files and directories. |
+| `secretExceptions` | Regexes carving out non-secret lookalikes (for example `.env.example`). |
+| `artifactAllowlist` | Directory and file names allowed despite `.gitignore` (still subject to `secretPatterns`). |
+| `relaxationGroups` | Maps group names (`aws`, `azure`, `gcp`, `kube`, `npm`, `oci`, `ssh`, etc.) to `binaries`, `$HOME`-relative `allowPaths`, and `allowEnvironment` regexes. |
+| `secretPrintingCommands` | `{ "binary", "args" }` rules refused outright because their output is a secret. |
+| `denyRoots` | Absolute paths that are never relaxed and never excepted. |
+| `exemptRoots` | Existing directory trees exempted from secret checks (tamper and cache protection still win). |
+| `writeProtectedRoots` | Trees no command or file tool may modify, such as non-Nix OpenCode installs. Reads and execution stay allowed. |
+| `secretEnvironment` | Exact environment variable names always stripped before a command runs. |
+| `secretEnvironmentPatterns` | Regexes for environment variables stripped unless a group's `allowEnvironment` keeps them. |
+| `cacheTtlMs` | Milliseconds before a cached sandbox profile is regenerated (`2000` by default). |
+| `permissionReview` | Optional model reviewer for shell `ask` prompts (see below). |
 
-Validation fails closed: an unsupported version, a wrong type, a non-absolute
-root, an `allowPaths` entry that is not `$HOME`-relative, or a pattern that does
-not compile all abort startup. Patterns are compiled at load time because the
-matcher treats an uncompilable pattern as "no match" — an unvalidated typo in a
-deny pattern would otherwise silently stop guarding.
+### Guarded temporary cleanup (`cleanup_temp`)
 
-Tracked regular `templates/**/secret.yaml` and `secret.yml` files belonging to
-a chart (`Chart.yaml` beside its `templates/` directory) are readable and
-editable, including by `helm lint`. Ignored or untracked lookalikes keep the
-usual secret-file restriction. Other secret patterns and denied roots still
-apply. Chart templates should not contain plaintext credentials; the guard
-checks their path and Git status, not their contents.
-
-### Filesystem case aliases
-
-File tools obtain per-directory lookup metadata from the bundled `path-lookup`
-helper. Known-sensitive paths keep JavaScript regex semantics. Insensitive or
-unknown paths use a bounded ASCII path-pattern grammar: a possible deny match
-protects every alias, while a naming exception must cover every spelling.
-Unsupported syntax, Unicode ambiguity, and evaluation limits cannot grant an
-exception. A proved prefix exception is independent of unknown descendants.
-An unsupported custom deny pattern conservatively refuses every alias-bearing
-path unless an explicit root exemption applies. Unsupported custom naming
-exceptions never grant access there. Policy loading retains arbitrary valid
-JavaScript regexes for known-sensitive paths rather than rejecting them globally.
-Plugin startup writes a diagnostic to stderr for each unsupported path
-pattern, naming its field, expression, and consequence. A warning does not
-change the policy or make unsupported syntax safe on alias-bearing paths.
-The per-command shell resolver loads policy silently.
-
-The helper queries per-directory casefold flags on ext4 and tmpfs. Linux 6.13
-added tmpfs casefold support, so filesystem type alone cannot prove sensitivity.
-Unsupported or failed metadata queries remain unknown, including on currently
-unrecognized Btrfs, XFS, and OverlayFS mounts. Darwin uses volume capabilities.
-Search-result classification sends up to 256 paths per helper invocation,
-bounded by 64 KiB input. Malformed output or helper failure cannot grant access.
-There is no filesystem metadata cache between calls.
-
-The tested WSL mount exposes no usable directory case attribute. Its mode is
-unknown. Naming exceptions, ignored artifacts, and Helm-template allowances can
-be refused on both unknown and known-insensitive filesystems, including default
-macOS APFS. An artifact allowance can still apply when the artifact component
-has a proved universal match, despite case aliases in other components. It only
-overrides Git ignore rules; secret patterns still apply within the artifact.
-A tracked Helm allowance similarly requires a universal filename match and
-the existing Git and chart checks. Fully insensitive names remain restricted.
-Explicit existing-directory exemptions remain available, but a missing exemption root
-grants no file-tool access until it exists and the policy is reloaded. Loaded
-file-tool policies pin each exempt directory's identity and drop its grant if
-the root is replaced or retargeted. The shell profile does not have this lasting
-identity binding; inode reuse and filesystem check/use races also remain.
-Root exemptions are broader than artifact allowances: they precede secret
-patterns. Do not use them as an equivalent replacement for an artifact allowance.
-
-See [the supported grammar and decision](docs/adr/0001-case-alias-policy.md)
-and [the WSL verification and limits](docs/wsl-case-matching.md). This does not
-add shell isolation to `files-only` mode.
-
-The current policy format is version 5. Version-1 to version-4 policies still
-load, with permission review off: `tools.git` defaults to `/usr/bin/git`, and `secretEnvironmentPatterns`,
-`secretPrintingCommands`, `allowEnvironment` and `writeProtectedRoots` default to empty. Home Manager
-writes the current version automatically.
-
-## What a command can and cannot do
-
-**Credentials are usable, not readable.** A command whose every segment is a
-credential binary of one group (`git`, `kubectl`, `aws`, …), an inert builtin
-(`cd`, `echo`, …) or a stdin-only filter (`head`, `cut -d=`, `rg` as a direct
-pipe consumer, `awk '{print $1}'`, …) runs with that group's credential
-directory readable. Any other shape — a path operand, a redirection, a second
-group, an environment assignment, command substitution — runs under the strict
-profile, where the credentials are unreadable. If such a command fails, the
-wrapper prints one line saying which segment cost the group, so the fix is to
-split the command, not to retry it.
-
-**Some invocations are refused outright.** `gh auth token`,
-`aws eks get-token`, `kubectl config view --raw`,
-`kubectl get secret … -o yaml`, `security find-generic-password -w` and the rest
-of `secretPrintingCommands` never run, wrapped in `sudo`/`env`/`sh -c`/`$(…)` or
-not: their output *is* the secret. Use the credential through the tool that
-needs it. Output formats that carry no values — `kubectl get secrets -o name`,
-`-o wide` — are not refused. Heredoc bodies passed to `cat` or
-`git commit -F -` may describe a refused invocation; bodies passed to other
-consumers remain scanned because those programs may execute stdin. A host
-that needs one of the shipped rules gone drops it with
-`removeSecretPrintingCommands` rather than replacing the key.
-
-**The environment is scrubbed.** Names in `secretEnvironment`, and every
-inherited variable matching `secretEnvironmentPatterns` (`*_TOKEN`,
-`*_SECRET`, `*_PASSWORD`, `*_API_KEY`, …), are removed before the command
-starts. A group's `allowEnvironment` re-admits pattern hits its binaries need
-(`aws` keeps `AWS_*`); explicitly named variables are never re-admitted. A
-command may expand any variable the group does not keep — `echo $PWD && git
-status` keeps its group — because the rest are gone before it runs.
-
-**The guard's inputs are immutable.** No command can write OpenCode's global or
-project config, its plugin and tool directories, the `package.json` that makes
-it run `bun install`, the npm plugin cache, this package, the policy, `~/.zshenv`
-(which the interpreter sources before every command), or any user-writable
-directory on `PATH` outside the repository (`/opt/homebrew/bin`,
-`/usr/local/bin`, …). Each of those is protected at the path it is named by
-*and* at the path it resolves to, so replacing a Home Manager symlink is denied
-too. A `PATH` directory is protected as a set of links, not as the programs
-they lead to: name an OpenCode installed by Homebrew or as an app bundle in
-`writeProtectedRoots`. Reads are unaffected; prompts, skills, commands and `~/.zshrc` stay
-editable. Practically: `brew install` and `npm i -g` from the agent shell fail —
-install tools from your own terminal.
-
-**A failed command explains relevant restrictions.** When a command exits non-zero, the
-wrapper adds one line if the guard is a plausible cause: a setuid binary that
-cannot run at all, the segment that cost the relaxation, the protected path a
-write was denied on, the installer that targets a `PATH` directory, or the
-scrubbed variable the command asked for. It knows the exit status and not what
-failed, so every line is worded as a condition. Status 127 suppresses all but
-the setuid hint: zsh uses that status for both missing and denied executables.
-
-**Renaming does not move a secret out from under its rule.** The directory
-nodes that carry a protected name (`~/.kube`, `secrets/`) and the ancestors a
-credential path leads through (`~/.config` for `~/.config/gcloud`) cannot be
-renamed; hard links to protected files are refused by the kernel.
-
-**setuid binaries do not run under `sandbox-exec`.** `ps`, `top`, `sudo`, `su`,
-`crontab`, `at` and `traceroute` fail with `operation not permitted`. Use
-`pgrep -fl PATTERN` and `lsof -i :PORT` instead of `ps`, and do privileged work
-from your own terminal.
-
-## Guarded temporary cleanup
-
-> **OpenCode V2 needs 2.0.29 or newer.** Older V2 releases give plugin tools no
-> way to request permission, so the plugin does not register `cleanup_temp`
-> there and says so at startup when `cleanupRoot` is set.
-
-Set `cleanupRoot` to an existing directory such as `$TMPDIR/opencode`, the
-scratch directory OpenCode itself uses, to expose the `cleanup_temp` tool. A
-leading `$TMPDIR` expands to the OpenCode process's temporary directory, so the
-root follows macOS's randomized per-user `TMPDIR`:
+Set `cleanupRoot` (for example `"$TMPDIR/opencode"`) to expose `cleanup_temp`. The tool accepts paths relative to that root, checks OpenCode's `edit` permission for every inventoried entry, and deletes them with `/bin/rm` inside a write-confined `sandbox-exec` profile that keeps the secret policy active.
 
 ```json
-{"paths": ["my-task/output", "my-task/download"]}
+{ "paths": ["my-task/output", "my-task/download"] }
 ```
 
-Paths are relative to the configured root. Keep each task's files in its own
-subdirectory. The tool rejects absolute paths, `..`, deletion of the root,
-and symlink operands or ancestors. Missing targets are safe to repeat if the
-root still exists. Symlinks inside a requested directory are unlinked rather
-than followed.
+To skip interactive confirmation for that scratch root, add an OpenCode `permission.edit` rule for the expanded path (OpenCode does not expand `$TMPDIR`): `/var/folders/*/*/T/opencode/**` on macOS, or `/tmp/opencode/**` for a `/tmp` root.
 
-The tool inventories descendants and awaits OpenCode's `edit` permission for
-every path before deleting anything. V1 requests it through the tool context's
-`ask`, and V2 through `ctx.permission.assert`; the session's permission rules
-decide on both. Read-only agents and descendant-specific
-denials remain effective; approval displays a deletion manifest without file
-contents. To avoid prompting for this root, configure an OpenCode
-`permission.edit` allowance for the expanded path. OpenCode does not expand
-variables in permission patterns, so write it out: `/tmp/opencode/**` for a
-`/tmp` root, or `/var/folders/*/*/T/opencode/**` for `$TMPDIR/opencode` on
-macOS. The worker independently resolves macOS aliases such as `/private/tmp`.
-Keep ordinary bash `rm` rules at `ask`; no command-string exemption is needed.
+### Optional permission review
 
-Deletion runs as fixed `/bin/rm` arguments under `sandbox-exec`, not as shell
-text or a filesystem call in the plugin process. Its profile retains the
-secret policy and additionally denies writes outside the inventoried entries,
-writes to the root, and file creation or data writes. There is no credential
-relaxation or automatic fallback to an unguarded worker.
+Permission review is off by default. It never denies requests, never saves persistent "always" rules, and never relaxes the sandbox. It only evaluates eligible shell `ask` prompts:
 
-New entries that appear after approval are not deletable. Requests are bounded
-to 4,096 entries and a 128 KiB generated profile; select smaller subtrees when a
-request exceeds those limits.
+- `off`: Disabled (default).
+- `observe`: Reviews prompts, logs judgments, and displays results in the TUI while still asking you.
+- `auto`: Grants a one-time `allow` when every check clears `confidenceThreshold`; otherwise falls back to the normal prompt.
 
-All requested paths are validated before execution, but deletion itself is
-not transactional. A protected `.env` inside a requested directory can produce
-a partial-cleanup error while remaining intact. A refusal is not a reason to
-retry through unrestricted bash. This feature confines the cleanup tool, not
-all writes by ordinary shell commands.
+| Option | Default | Description |
+| --- | --- | --- |
+| `mode` | `"off"` | `"off"`, `"observe"`, or `"auto"`. |
+| `backend` | `"jev"` | `"jev"` (Jev via OpenCode Zen), `"opencode"` (any model OpenCode can reach), or `"endpoint"` (OpenAI-compatible server). |
+| `confidenceThreshold` | `0.9` | Number in `(0.5, 1]`. Positive checks must reach `t`; negative checks must stay at or below `1 - t`. |
+| `toasts` | `"all"` | `"all"` shows every review phase; `"attention"` shows toasts only when you need to act (progress and auto-approvals stay in the sidebar). |
+| `restrictionScreen` | `true` | Screens omitted context chunks for agent rules when evidence exceeds the request size limit. |
+| `logPayloads` | `false` | When `true`, also writes review request and response bodies to a private local log file. |
+| `opencode` | unset | Required when `backend` is `"opencode"`: `{ "model": "provider/model[#variant]", "api": "decisions" \| "text", "deadlineMs": 10000, "maxRequestBytes": null }`. |
+| `endpoint` | unset | Required when `backend` is `"endpoint"`: `{ "baseURL": "https://...", "model": "...", "apiKeyFile": null, "api": "text" \| "decisions" \| "systemone", "deadlineMs": 20000, "maxRequestBytes": null }`. `baseURL` must be HTTPS or loopback HTTP. |
 
-## Tests
+Example policy snippet using an OpenCode-configured decision model:
+
+```json
+{
+  "configVersion": 8,
+  "permissionReview": {
+    "mode": "auto",
+    "backend": "opencode",
+    "toasts": "attention",
+    "opencode": {
+      "model": "opencode/jev-1.13-free",
+      "api": "decisions"
+    }
+  }
+}
+```
+
+## How shell commands behave
+
+- **One credential group per command:** A command keeps its group's credential paths when every segment is a binary in that group, an inert builtin (`cd`, `echo`, `true`), or a safe pipe consumer (`head`, `tail`, `sort`, `cut`, `wc`, `rg`, `grep`, `jq`, `awk` without file operands). Mixing groups, leading `VAR=value` assignments, command substitution, `sed`, `tee`, or `xargs` drops the command to the strict profile.
+- **Actionable failure hints:** When a command exits non-zero, the wrapper adds a conditional one-line note if a guard rule likely caused it (lost relaxation group, refused write path, `PATH` installer, scrubbed variable, or setuid binary). Split compound commands instead of retrying the same shape.
+- **No secret-printing invocations:** Commands like `gh auth token`, `kubectl get secret -o yaml`, and `aws eks get-token` are refused even behind `sudo`, `env`, `sh -c`, or `$(...)`. Value-free listings like `kubectl get secrets -o name` work normally.
+- **No global installs from the agent shell:** Because user-writable `PATH` directories and OpenCode's runtime files are write-protected, `brew install` and `npm i -g` fail in the agent shell. Run those from your own terminal. Prompts, skills, commands, and `~/.zshrc` remain editable.
+- **No setuid binaries under `sandbox-exec`:** `ps`, `top`, `sudo`, `su`, `crontab`, `at`, and `traceroute` fail with `operation not permitted`. Use `pgrep -fl` and `lsof -i` instead of `ps`, and run privileged commands from your own terminal.
+
+## Limitations
+
+- **Out-of-band processes:** MCP servers, the LSP, and interactive PTY terminals run outside the sandbox. Commands run with `!` in the prompt use the configured shell and are guarded.
+- **Network and macOS keychain:** Network access is unrestricted (defense relies on preventing secret reads). Credentials in the macOS keychain are not guarded by file rules.
+- **Plugin load failures:** If OpenCode cannot load the plugin (for example due to a wrong path), file tools run unguarded while the shell wrapper still enforces its sandbox. Verify the plugin appears in OpenCode's plugin list. Once loaded, policy or startup errors fail closed on every guarded tool call.
+- **Credential scoping, not capability isolation:** A relaxed binary's own extension mechanisms (for example a `git` alias) remain in scope for that binary.
+- **Case-insensitive and unknown filesystems:** On case-insensitive or unknown filesystems (including default macOS APFS and WSL DrvFS), file-tool pattern matching is conservative across case aliases; some naming exceptions such as `.env.example` may be refused unless covered by an explicit `exemptRoots` directory.
+- **`sandbox-exec` snapshot semantics:** Apple formally deprecates `sandbox-exec` (still present in macOS 26). Generated profiles are snapshots until `cacheTtlMs` expires, so newly created directories may wait for a rebuild before enumeration.
+
+## Development and tests
 
 ```sh
-nix flake check        # typecheck, unit tests, default-policy and layout checks
-nix run .#integration  # + kernel tests
+nix flake check -L      # Typecheck, unit tests, default-policy, and package layout checks
+nix run .#integration   # macOS kernel sandbox tests (run from an unsandboxed terminal)
 ```
 
-Nix tests provide the native lookup helper automatically. For direct Bun tests
-from a checkout, install the locked npm dependencies and link the built helper
-at its fixed location first:
+For direct Bun runs from a checkout, install locked dependencies and link the compiled `path-lookup` helper first:
 
 ```sh
 npm ci
 nix build .#default
 ln -s ../result/bin/path-lookup bin/path-lookup
+bun test tests/*.test.ts
 ```
-
-Without that helper, a checkout deliberately treats lookup metadata as unknown.
-The generated helper link is ignored by Git.
-
-The kernel suite must run from a plain terminal. `sandbox-exec` refuses to apply
-a profile inside an existing sandbox, and the suite's fixtures are exactly what
-an outer guard denies, so both entry points probe first and exit 2 with an
-explanation rather than failing later as an unexplained `EPERM`.
-
-## Limitations
-
-- MCP servers and the LSP run outside the sandbox.
-- The guard's hooks and other plugins' hooks run in the order OpenCode
-  registers them, and neither version lets a plugin choose its place. On V2 the
-  guard pins what it checked: a hook that runs later and assigns a new tool
-  name, input or shell gets it checked again, and one that changes a checked
-  input in place fails and rejects the call. On V1 a hook that runs later can
-  still change a tool's arguments. A plugin runs unsandboxed in OpenCode's
-  process either way, so this protects against plugins that rewrite calls, not
-  against a plugin that renames a tool for the model, replaces a tool or reads
-  files itself. The shell environment is not checked, so a plugin that sets a
-  variable the wrapper reads (`OPENCODE_SECRET_GUARD_CONFIG`,
-  `SECRET_GUARD_BUN`) can redirect it.
-- The interactive terminal (V2's PTY service) is not a model tool and is not
-  guarded, on V1 or V2. On V2, commands the user runs with `!` in the prompt go
-  through the configured shell and are guarded.
-- If OpenCode cannot load the plugin (a bad path) it starts without it, and the
-  file tools are unguarded. The configured shell wrapper still applies its
-  sandbox profile to commands. Confirm in OpenCode's plugin list that the
-  plugin is active. If the plugin loads but cannot start (an invalid policy,
-  `shell+files` off macOS), it refuses every shell and file tool call with the
-  reason instead. In `shell+files` mode, V1 also refuses `bash` until its
-  `config` hook has validated the shell, and rechecks the wrapper file before
-  each call.
-- If OpenCode gives no project directory, the plugin still starts but refuses
-  every relative path and every search result.
-- A file tool call whose arguments the guard cannot read is refused, and so is a
-  search result it cannot check, so an OpenCode update that renames a field
-  shows up as an error instead of an unguarded tool.
-- OpenCode V2's `read` lists sibling names in its "file not found" message and
-  in directory listings, and the guard does not filter those. File names are not
-  treated as secret; file contents are.
-- Network access is unrestricted; the mitigation is that a process which cannot
-  read a secret cannot exfiltrate it.
-- A relaxed binary's own extension mechanisms are in scope for that binary. This
-  is a credential-scoping boundary, not a capability sandbox. The refusal list
-  covers the invocations that print a credential by design; a `git` alias that
-  runs a shell is still git.
-- Credentials held in the macOS keychain are reachable through Security.framework
-  by any process the keychain trusts; the guard covers files, not the keychain.
-- `sandbox-exec` is formally deprecated by Apple. It still ships in macOS 26 and
-  is still used by Chrome and Claude Code.
-- A profile is a snapshot, so a directory created after generation is not
-  enumerable until the profile is rebuilt.
 
 ## License
 
-MIT
+[MIT](LICENSE)
