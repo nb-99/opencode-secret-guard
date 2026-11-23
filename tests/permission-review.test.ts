@@ -98,6 +98,7 @@ interface World {
   experimentalText?: (input: unknown) => Promise<unknown>;
   rpc?: false | "register-throws" | "register-rejects" | "register-hangs" | "register-late" | "emit-throws" | "emit-rejects" | "emit-hangs";
   hang?: string;
+  cleanupRoot?: string | null;
 }
 
 const root = () => ({ id: "ses_1", location: { directory: repo } });
@@ -227,7 +228,15 @@ async function started(
       },
     },
   });
-  const cleanup = await setupV2(fake.ctx, { ...base, permissionReview: { ...DEFAULT_PERMISSION_REVIEW, ...settings, mode } }, packageLib, {
+  const cleanup = await setupV2(
+    fake.ctx,
+    {
+      ...base,
+      ...(world.cleanupRoot === undefined ? {} : { cleanupRoot: world.cleanupRoot }),
+      permissionReview: { ...DEFAULT_PERMISSION_REVIEW, ...settings, mode },
+    },
+    packageLib,
+    {
     fetch: fetcher,
     log: (line) => lines.push(line),
     record: (entry) => records.push(entry),
@@ -2754,6 +2763,145 @@ describe("observe score warnings", () => {
     { score: 0, threshold: 1 },
   ])("score and threshold round-trip exactly: %o", (observed) => {
     expect(parseNote(formatNote("manual approval", "model-sensitive-effect", observed))?.observed).toEqual(observed);
+  });
+});
+
+describe("credential exemptions, subagent rollup, text thresholds and scratch directory", () => {
+  test("OPENCODE_SECRET_GUARD_CONFIG and pure non-secret variable references are not skipped as credentials", async () => {
+    const fake = await started("auto");
+    for (const [id, command] of [
+      ["c1", 'OPENCODE_SECRET_GUARD_CONFIG="$TMPDIR/opencode/policy.json" bun test'],
+      ["c2", "GITHUB_TOKEN=$VAR bun test"],
+    ] as const) {
+      const result = await reviewed(fake, shellCall(command, id), evaluation({ resources: [command], source: { type: "tool", messageID: "msg_1", id } }));
+      expect(result.effect).toBe("allow");
+    }
+    const secretRef = "GITHUB_TOKEN=$SECRET_TOKEN bun test";
+    const blocked = await reviewed(fake, shellCall(secretRef, "c3"), evaluation({ resources: [secretRef], source: { type: "tool", messageID: "msg_1", id: "c3" } }));
+    expect(blocked.effect).toBe("ask");
+    expect(fake.records.at(-1)?.reason).toBe("resource-credential");
+  });
+
+  test("subagent reviews attach rootSessionID for both evaluated and skipped shell asks and roll up to root snapshots", async () => {
+    let clock = 1_000;
+    const fake = await started("auto", {
+      sessions: {
+        ses_root: { id: "ses_root", location: { directory: repo } },
+        ses_child: { id: "ses_child", parentID: "ses_root", location: { directory: repo } },
+      },
+      contexts: {
+        ses_root: HUMAN,
+        ses_child: [v2.user("cm1", "Run bun test.", 10)],
+      },
+    }, { now: () => (clock += 100) });
+    const evaluated = await reviewed(
+      fake,
+      { ...shellCall("bun test", "call_sub_1"), sessionID: "ses_child" },
+      evaluation({ sessionID: "ses_child", source: { type: "tool", messageID: "msg_1", id: "call_sub_1" } }),
+    );
+    expect(evaluated.effect).toBe("allow");
+    // A second shell ask that skips early (secret token) still resolves/uses cached rootSessionID.
+    const skipped = await reviewed(
+      fake,
+      { ...shellCall("TOKEN=ghp_abcdefghijklmnopqrstuvwxyz bun test", "call_sub_2"), sessionID: "ses_child" },
+      evaluation({
+        sessionID: "ses_child",
+        resources: ["TOKEN=ghp_abcdefghijklmnopqrstuvwxyz bun test"],
+        source: { type: "tool", messageID: "msg_1", id: "call_sub_2" },
+      }),
+    );
+    expect(skipped.effect).toBe("ask");
+    const rootSnap = await fake.rpc.registrations[0]!.handlers.snapshot({ sessionID: "ses_root" });
+    expect(rootSnap.reviews.map((item) => ({ sessionID: item.sessionID, rootSessionID: item.rootSessionID, reason: item.reason }))).toEqual([
+      { sessionID: "ses_child", rootSessionID: "ses_root", reason: "resource-credential" },
+      { sessionID: "ses_child", rootSessionID: "ses_root", reason: "model-approved" },
+    ]);
+    expect(rootSnap.summary).toMatchObject({ sessionID: "ses_root", reviews: 2, approved: 1, skipped: 1 });
+  });
+
+  test("an uncached early-skipped subagent shell review still resolves rootSessionID once", async () => {
+    const fake = await started("auto", {
+      sessions: {
+        ses_root: { id: "ses_root", location: { directory: repo } },
+        ses_child: { id: "ses_child", parentID: "ses_root", location: { directory: repo } },
+      },
+    });
+    const skipped = await evaluate(fake, evaluation({ sessionID: "ses_child", action: "shell", resources: ["bun test"], source: { type: "tool", messageID: "msg_1", id: "missing" } }));
+    expect(skipped.effect).toBe("ask");
+    const rootSnap = await fake.rpc.registrations[0]!.handlers.snapshot({ sessionID: "ses_root" });
+    expect(rootSnap.reviews).toHaveLength(1);
+    expect(rootSnap.reviews[0]).toMatchObject({ sessionID: "ses_child", rootSessionID: "ses_root", reason: "call-unknown" });
+    expect(rootSnap.summary).toMatchObject({ sessionID: "ses_root", reviews: 1, skipped: 1 });
+  });
+
+  test("text API relaxes positive checks for uncalibrated chat scores while keeping safety checks strict", async () => {
+    const prompts: string[] = [];
+    const reply = (answers: Answers) => JSON.stringify({
+      answers: Object.fromEntries(Object.entries(answers).map(([k, v]) => [k, { type: "noul", noul: v }])),
+      summary: "Runs the repository tests.",
+      rationale: "You asked to run the tests locally.",
+    });
+    let next = { ...APPROVE, explicitly_authorized: 0.84, within_scope: 0.85 };
+    const fake = await started("auto", {
+      text: async (input: any) => {
+        prompts.push(String(input.prompt));
+        return { text: reply(next) };
+      },
+    }, {}, { backend: "opencode", opencode: { model: "p/chat", api: "text", deadlineMs: 10_000, maxRequestBytes: null } });
+    expect((await reviewed(fake, shellCall("bun test", "t1"), evaluation({ source: { type: "tool", messageID: "msg_1", id: "t1" } }))).effect)
+      .toBe("allow");
+    expect(prompts[0]).toContain("Do not hedge a clearly false risk to 0.15-0.25");
+    // Negative safety check stays strict at <= 0.10.
+    next = { ...APPROVE, explicitly_authorized: 0.84, within_scope: 0.85, confirmation_required: 0.12 };
+    expect((await reviewed(fake, shellCall("bun test", "t2"), evaluation({ source: { type: "tool", messageID: "msg_1", id: "t2" } }))).effect)
+      .toBe("ask");
+    expect(fake.records.at(-1)?.reason).toBe("model-confirmation-required");
+  });
+
+  test("configured cleanupRoot is treated as project-adjacent scratch rather than outsideProject", async () => {
+    const scratch = path.join(fixture, "scratch");
+    const taskDir = path.join(scratch, "task-1");
+    const outside = path.join(fixture, "outside");
+    fs.mkdirSync(taskDir, { recursive: true });
+    fs.mkdirSync(outside, { recursive: true });
+    const escapeLink = path.join(scratch, "escape");
+    fs.symlinkSync(outside, escapeLink);
+
+    const readOnlyScores = { ...APPROVE, explicitly_authorized: 0.2, read_only: 0.96 };
+    const fake = await started("auto", {
+      cleanupRoot: scratch,
+      fetch: async () => response(200, answerBody(readOnlyScores)),
+    });
+
+    // Scratch external_directory + shell read passes with read-only basis (not explicitOnly / outsideProject).
+    await fake.call({ ...shellCall(`cat ${path.join(taskDir, "out.txt")}`, "s1"), input: { command: `cat ${path.join(taskDir, "out.txt")}` } });
+    const extScratch = await evaluate(fake, evaluation({
+      action: "external_directory",
+      resources: [`${taskDir}/*`],
+      source: { type: "tool", messageID: "msg_1", id: "s1" },
+    }));
+    expect(extScratch.effect).toBe("allow");
+    const shScratch = await evaluate(fake, evaluation({
+      action: "shell",
+      resources: [`cat ${path.join(taskDir, "out.txt")}`],
+      source: { type: "tool", messageID: "msg_1", id: "s1" },
+    }));
+    expect(shScratch.effect).toBe("allow");
+    const scratchBody = JSON.parse(fake.requests[0]!.init.body);
+    expect(scratchBody.state.pending_action.scratch_directory).toBe(scratch);
+    expect(scratchBody.state.context_warnings.outside_project).toBe(false);
+    expect(fake.records.at(-1)).toMatchObject({ outsideProject: false, basis: "read-only" });
+    expect(fake.records.at(-1)?.explicitOnly).toBeUndefined();
+
+    // Symlink escape inside scratch still triggers outsideProject + explicitOnly.
+    await fake.call({ ...shellCall(`cat ${path.join(escapeLink, "secret.txt")}`, "s2"), input: { command: `cat ${path.join(escapeLink, "secret.txt")}` } });
+    const extEscape = await evaluate(fake, evaluation({
+      action: "external_directory",
+      resources: [`${escapeLink}/*`],
+      source: { type: "tool", messageID: "msg_1", id: "s2" },
+    }));
+    expect(extEscape.effect).toBe("ask");
+    expect(fake.records.at(-1)).toMatchObject({ outsideProject: true, explicitOnly: true, reason: "model-not-authorized" });
   });
 });
 

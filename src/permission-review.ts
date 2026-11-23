@@ -14,11 +14,12 @@
 import { randomUUID } from "node:crypto";
 import * as path from "node:path";
 import { GUARD_REVISION } from "./build-info.ts";
+import { realpath } from "./paths.ts";
 import { DEFAULT_PERMISSION_REVIEW, type PermissionReviewMode, type PermissionReviewSettings } from "./policy.ts";
 import { formatNote, LOG_UNAVAILABLE_NOTE, PAYLOAD_LOG_UNAVAILABLE_NOTE } from "./review-notes.ts";
 import { fileReviewLog, PAYLOAD_LOG_LIMITS, payloadLogPath, reviewLogPath, type ReviewLogWriter, type ReviewRecord } from "./review-log.ts";
 import {
-  approvalBasis, authorizationScore, explanationText, MAX_RATIONALE_CHARS, MAX_SUMMARY_CHARS, negativeThreshold,
+  approvalBasis, authorizationScore, explanationText, MAX_RATIONALE_CHARS, MAX_SUMMARY_CHARS, negativeThreshold, positiveThreshold,
   type ApprovalBasis, type ReviewExplanation, type ReviewScores,
 } from "./review-status.ts";
 import { setupReviewStatus, type ReviewRpcContext } from "./review-rpc.ts";
@@ -76,6 +77,9 @@ const MAX_REFUSED_CALL_SESSIONS = 1_024;
 const MAX_REFUSED_CALLS = 8;
 /** Parent lookups from a subagent session to its root. */
 const MAX_ANCESTRY = 4;
+/** Display-only cache of subagent -> root session IDs for TUI rollup. */
+const MAX_DISPLAY_ROOTS = 1_024;
+const DISPLAY_ROOT_TIMEOUT_MS = 500;
 /** Attempts to shrink the evidence until the request fits the backend's limit. */
 const FIT_ATTEMPTS = 4;
 
@@ -231,6 +235,7 @@ function actionEvidence(
   input: unknown,
   location: string,
   credentials: CredentialCheck,
+  scratchDirectory?: string,
 ): { action: ActionEvidence; redacted: boolean } {
   let redacted = false;
   const field = (value: unknown, limit: number, what: string): string => {
@@ -262,6 +267,7 @@ function actionEvidence(
       requested_command: command,
       requested_cwd: cwd,
       project_directory: location,
+      ...(scratchDirectory !== undefined && !credentials.any(scratchDirectory) ? { scratch_directory: scratchDirectory } : {}),
       permission_resources: resources,
     },
     redacted,
@@ -279,11 +285,17 @@ function actionEvidence(
  * its target. Data loss, security, credentials and production stay manual.
  * An action the user did not ask for passes only when it reads, or changes
  * only local state that can be undone, and has no remote effect. With
- * `explicitOnly`, only the user's request authorizes it.
+ * `explicitOnly`, only the user's request authorizes it. With `explains`
+ * (the `text` API), positive checks use `positiveThreshold(threshold, true)`
+ * while negative safety checks keep the strict `negativeThreshold(threshold)`.
  */
 export function decide(
-  answers: ReviewAnswers, threshold = DEFAULT_PERMISSION_REVIEW.confidenceThreshold, explicitOnly = false,
+  answers: ReviewAnswers,
+  threshold = DEFAULT_PERMISSION_REVIEW.confidenceThreshold,
+  explicitOnly = false,
+  explains = false,
 ): ReviewOutcome {
+  const positive = positiveThreshold(threshold, explains);
   const negativeLimit = negativeThreshold(threshold);
   const scores = Object.fromEntries(QUESTION_NAMES.map((name) => [name, answers[name].noul])) as ReviewScores;
   const remote = scores.remote_effect > negativeLimit;
@@ -297,12 +309,12 @@ export function decide(
   );
   const only = explicitOnly ? { explicitOnly } : {};
   const scored = (reason: string): ReviewOutcome => ({ allow: false, reason, score, scores, ...only });
-  const basis = approvalBasis(scores, threshold, explicitOnly);
+  const basis = approvalBasis(scores, threshold, explicitOnly, explains);
   if (scores.confirmation_required > negativeLimit) return scored("model-confirmation-required");
   if (scores.sensitive_effect > negativeLimit) return scored("model-sensitive-effect");
-  if (remote && scores.named_by_user < threshold) return scored("model-remote-unnamed");
+  if (remote && scores.named_by_user < positive) return scored("model-remote-unnamed");
   if (!basis) return scored("model-not-authorized");
-  if (scores.within_scope < threshold) return scored("model-out-of-scope");
+  if (scores.within_scope < positive) return scored("model-out-of-scope");
   return { allow: true, reason: "model-approved", score, scores, basis, ...only, ...(remote ? { remoteNamed: true } : {}) };
 }
 
@@ -485,7 +497,7 @@ export async function setupPermissionReview(
   ctx: ReviewContext,
   settings: PermissionReviewSettings & { mode: Exclude<PermissionReviewMode, "off"> },
   location: string | undefined,
-  secrets: SecretNames,
+  secrets: SecretNames & { readonly cleanupRoot?: string | null },
   overrides: Partial<ReviewDependencies> = {},
 ): Promise<ReviewCleanup | undefined> {
   const dependencies = { ...defaultDependencies(), ...overrides };
@@ -551,6 +563,37 @@ export async function setupPermissionReview(
   // A local endpoint can need longer than the 10 second default; see review-backends.ts.
   const deadlineMs = settings.endpoint?.deadlineMs ?? settings.opencode?.deadlineMs ?? dependencies.deadlineMs;
   const credentials = credentialCheck(secrets);
+  const scratchRoot = secrets.cleanupRoot ? realpath(secrets.cleanupRoot) : undefined;
+  const inScratchDir = (target: string) =>
+    scratchRoot !== undefined && path.isAbsolute(target) && inside(scratchRoot, realpath(target));
+  const inScratchResource = (resource: string) => {
+    if (scratchRoot === undefined) return false;
+    const candidate = resource.endsWith("/*") ? resource.slice(0, -2) : resource;
+    if (!candidate || !path.isAbsolute(candidate) || /[*?[]/.test(candidate)) return false;
+    return inside(scratchRoot, realpath(candidate));
+  };
+  // Display-only cache for rolling subagent statuses/summaries up to their root
+  // session. Security checks always call uncached `resolveSession`.
+  const displayRoots = new Map<string, string | null>();
+  const rememberDisplayRoot = (sessionID: string, rootID: string | undefined) => {
+    displayRoots.delete(sessionID);
+    displayRoots.set(sessionID, rootID ?? null);
+    if (displayRoots.size > MAX_DISPLAY_ROOTS) displayRoots.delete(displayRoots.keys().next().value!);
+  };
+  const lookupDisplayRoot = async (sessionID: string): Promise<string | undefined> => {
+    if (displayRoots.has(sessionID)) return displayRoots.get(sessionID) ?? undefined;
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort("deadline"), Math.min(DISPLAY_ROOT_TIMEOUT_MS, deadlineMs));
+    try {
+      const chain = await resolveSession(sessions, sessionID, location, controller.signal);
+      rememberDisplayRoot(sessionID, chain.rootID);
+      return chain.rootID;
+    } catch {
+      return undefined;
+    } finally {
+      clearTimeout(timer);
+    }
+  };
   const screenCache = createScreenCache();
   const statuses = await setupReviewStatus(ctx);
   const pending = new Map<string, PendingCall>();
@@ -641,6 +684,7 @@ export async function setupPermissionReview(
     started: number,
     info: ReviewInfo,
     onRequest: () => void,
+    onRoot: (rootID: string | undefined) => void,
   ): Promise<ReviewOutcome> => {
     if (!live) return ask("events-unavailable");
     const source = evaluation.source;
@@ -677,7 +721,7 @@ export async function setupPermissionReview(
       });
     try {
       const before = snapshot(call.event);
-      const { action, redacted } = actionEvidence(evaluation, before.tool, before.input, location, credentials);
+      const { action, redacted } = actionEvidence(evaluation, before.tool, before.input, location, credentials, scratchRoot);
       const queuedAt = dependencies.now();
       let waited = !signal.aborted;
       try {
@@ -687,10 +731,14 @@ export async function setupPermissionReview(
       }
       holding = true;
       info.eligible = true;
-      const outsideProject = !inside(location, action.requested_cwd) || call.externalAccess === true;
+      const outsideProject = (!inside(location, action.requested_cwd) && !inScratchDir(action.requested_cwd)) || call.externalAccess === true;
       const explicitOnly = outsideProject || needsExplicitConsent((before.input as { command: string }).command);
       const chain = await resolveSession(sessions, sessionID, location, signal);
-      if (chain.rootID !== undefined) active.rootSessionID = chain.rootID;
+      rememberDisplayRoot(sessionID, chain.rootID);
+      if (chain.rootID !== undefined) {
+        active.rootSessionID = chain.rootID;
+        onRoot(chain.rootID);
+      }
       // Credentials come before the transcript, so a missing credential never
       // causes the context to be read.
       const channel = await backend.prepare(signal);
@@ -780,7 +828,7 @@ export async function setupPermissionReview(
       const judgment = await channel.judge(request, { signal, trace, onRequest });
       if (judgment.usage) info.usage = judgment.usage;
       const explanation = shownExplanation(judgment.explanation, credentials);
-      const outcome = judged = { ...decide(judgment.answers, threshold, explicitOnly), ...(explanation ? { explanation } : {}) };
+      const outcome = judged = { ...decide(judgment.answers, threshold, explicitOnly, backend.api === "text"), ...(explanation ? { explanation } : {}) };
       if (outcome.remoteNamed) evidence.tags.add("remote-named");
       if (!outcome.allow) return withWarnings(outcome);
       // What was reviewed must still be what runs, in the same session state:
@@ -878,6 +926,10 @@ export async function setupPermissionReview(
             continue;
           }
           if (!INVALIDATING_EVENTS.has(event.type)) continue;
+          if (event.type === "session.deleted" || event.type === "session.moved") {
+            if (sessionID === undefined) displayRoots.clear();
+            else displayRoots.delete(sessionID);
+          }
           // An event the reviewer cannot attribute could concern any session.
           cancelSession(sessionID, "session-event");
         }
@@ -913,13 +965,16 @@ export async function setupPermissionReview(
         const key = pendingKey(evaluation.sessionID, evaluation.source.messageID, evaluation.source.id);
         const call = key === undefined ? undefined : pending.get(key);
         if (call && (evaluation.agent === undefined || call.event.agent === undefined || evaluation.agent === call.event.agent)) {
-          call.externalAccess = true;
+          const external = evaluation.resources.length === 0 || evaluation.resources.some((resource) => !inScratchResource(resource));
+          if (external) call.externalAccess = true;
         }
       }
       if (evaluation.effect !== "ask") return;
       const started = dependencies.now();
       const reviewID = randomUUID();
       const action = safeAction(evaluation.action);
+      let rootSessionID = safeID(displayRoots.get(evaluation.sessionID)) ?? undefined;
+      const withRoot = () => (rootSessionID && rootSessionID !== evaluation.sessionID ? { rootSessionID } : {});
       const identity = {
         reviewID, sessionID: evaluation.sessionID,
         workspaceID: safeID(ctx.location?.workspaceID),
@@ -929,16 +984,35 @@ export async function setupPermissionReview(
       };
       let modelCalled = false;
       const info: ReviewInfo = { eligible: false };
-      statuses.publish({ ...identity, phase: "checking", modelCalled, elapsedMs: 0 });
+      statuses.publish({ ...identity, ...withRoot(), phase: "checking", modelCalled, elapsedMs: 0 });
       let outcome: ReviewOutcome;
       try {
-        outcome = await review(evaluation, reviewID, started, info, () => {
-          if (modelCalled) return;
-          modelCalled = true;
-          statuses.publish({ ...identity, phase: "evaluating", modelCalled, elapsedMs: Math.max(0, dependencies.now() - started) });
-        });
+        outcome = await review(
+          evaluation,
+          reviewID,
+          started,
+          info,
+          () => {
+            if (modelCalled) return;
+            modelCalled = true;
+            statuses.publish({ ...identity, ...withRoot(), phase: "evaluating", modelCalled, elapsedMs: Math.max(0, dependencies.now() - started) });
+          },
+          (rootID) => {
+            rootSessionID = safeID(rootID) ?? rootSessionID;
+          },
+        );
       } catch {
         outcome = ask("error");
+      }
+      if (
+        rootSessionID === undefined &&
+        !info.eligible &&
+        !displayRoots.has(evaluation.sessionID) &&
+        live &&
+        (evaluation.action === "shell" || evaluation.action === "external_directory") &&
+        dependencies.now() - started < deadlineMs
+      ) {
+        rootSessionID = safeID(await lookupDisplayRoot(evaluation.sessionID)) ?? undefined;
       }
       const verdict = outcome.proposed ?? (outcome.allow ? "allow" : "ask");
       say(`${mode}: ${outcome.allow ? "allow" : "ask"} ${action} (${outcome.reason})`);
@@ -978,7 +1052,7 @@ export async function setupPermissionReview(
         callID: safeID(evaluation.source?.id),
       });
       statuses.publish({
-        ...identity, phase: "completed", modelCalled, elapsedMs: Math.max(0, dependencies.now() - started),
+        ...identity, ...withRoot(), phase: "completed", modelCalled, elapsedMs: Math.max(0, dependencies.now() - started),
         proposed: verdict, applied: evaluation.effect, reason: outcome.reason,
         eligible: info.eligible, screened: info.screen !== undefined,
         ...(outcome.scores ? { scores: outcome.scores } : {}),
