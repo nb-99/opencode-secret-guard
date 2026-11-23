@@ -163,7 +163,7 @@ describe("review RPC boundary", () => {
     });
     expect(Object.keys(JevRpc.events.review.schema.properties).sort()).toEqual([
       "action", "applied", "callID", "contextWarnings", "elapsedMs", "eligible", "explains", "explanation", "explicitOnly", "messageID", "mode", "modelCalled",
-      "phase", "proposed", "reason", "reviewID", "scores", "screened", "sessionID", "startedAt", "threshold", "toasts", "workspaceID",
+      "phase", "proposed", "reason", "reviewID", "rootSessionID", "scores", "screened", "sessionID", "startedAt", "threshold", "toasts", "workspaceID",
     ]);
     publisher.dispose();
   });
@@ -674,6 +674,37 @@ describe("review display boundary", () => {
     ]);
     expect(ui.display.snapshot("session-2")).toEqual([other]);
     expect(ui.toasts).toHaveLength(3);
+    ui.display.dispose();
+  });
+
+  test("subagent reviews roll up into root RPC snapshots, summaries and root-session toasts", async () => {
+    const rpc = rpcHarness();
+    const publisher = await setupReviewStatus(rpc.ctx);
+    const sub = completed({
+      reviewID: "sub-review-1", sessionID: "child-1", rootSessionID: "session-1",
+      scores: { ...reviewedScores },
+    });
+    publisher.publish(sub);
+    expect(rpc.emitted.map((event) => ({ name: event.name, sessionID: event.data.sessionID }))).toEqual([
+      { name: "review", sessionID: "child-1" },
+      { name: "summary", sessionID: "child-1" },
+      { name: "summary", sessionID: "session-1" },
+    ]);
+    const rootSnap = await rpc.snapshot({ sessionID: "session-1" });
+    expect(rootSnap.reviews).toEqual([sub]);
+    expect(rootSnap.summary).toMatchObject({ sessionID: "session-1", reviews: 1, manual: 1 });
+    publisher.dispose();
+
+    const ui = displayHarness({ snapshot: async () => rootSnap });
+    const listener = mock(() => {});
+    ui.display.subscribe(listener);
+    ui.emit(sub);
+    expect(ui.display.snapshot("session-1")).toEqual([sub]);
+    expect(ui.toasts[0]).toMatchObject({ sessionID: "session-1" });
+    expect(ui.toasts[0]!.message).toContain("Auto mode · bash · subagent");
+    expect(listener).toHaveBeenCalled();
+    expect(await ui.display.refresh("session-1")).toEqual({ ok: true });
+    expect(ui.display.snapshot("session-1")).toEqual([sub]);
     ui.display.dispose();
   });
 

@@ -49,6 +49,7 @@ const status = {
   type: "object",
   properties: {
     reviewID: id, sessionID: id,
+    rootSessionID: id,
     workspaceID: { anyOf: [id, { type: "null" }] },
     messageID: { anyOf: [id, { type: "null" }] },
     callID: { anyOf: [id, { type: "null" }] },
@@ -152,8 +153,13 @@ export async function setupReviewStatus(ctx: ReviewRpcContext) {
       if (!data) return;
       // The store accepts each phase once, so each completion is counted once.
       const summary = summaries.add(data);
+      const rootSummary = data.rootSessionID ? summaries.add(data, data.rootSessionID) : undefined;
       if (!registration) return;
-      const events: ReviewEvent[] = [{ name: "review", data }, ...(summary ? [{ name: "summary" as const, data: summary }] : [])];
+      const events: ReviewEvent[] = [
+        { name: "review", data },
+        ...(summary ? [{ name: "summary" as const, data: summary }] : []),
+        ...(rootSummary ? [{ name: "summary" as const, data: rootSummary }] : []),
+      ];
       for (const event of events) {
         try { void registration.events.emit(event.name, event.data).catch(() => {}); } catch { /* Display only. */ }
       }

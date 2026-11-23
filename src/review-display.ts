@@ -1,5 +1,5 @@
 import { JevRpc } from "./review-rpc.ts";
-import { createReviewStatusStore, MAX_REVIEW_STATUSES, MAX_SESSION_REVIEWS, parseReviewStatus, reviewLines, wantsToast, type ReviewAvailability, type ReviewStatus } from "./review-status.ts";
+import { createReviewStatusStore, MAX_REVIEW_STATUSES, MAX_SESSION_REVIEWS, parseReviewStatus, reviewLines, statusForSession, wantsToast, type ReviewAvailability, type ReviewStatus } from "./review-status.ts";
 import { parseReviewSummary, type ReviewSummary } from "./review-summary.ts";
 
 type Location = { directory: string; workspaceID?: string };
@@ -80,9 +80,12 @@ export function createReviewDisplay(ctx: ReviewDisplayContext, refreshTimeoutMs 
     const status = parseReviewStatus(event.data);
     if (!status || status.workspaceID !== (current.workspaceID ?? null)) return;
     for (const request of requests) {
-      if (request.sessionID === status.sessionID) request.live.update(status);
+      if (statusForSession(status, request.sessionID)) request.live.update(status);
     }
-    if (store.update(status)) changed(status.sessionID);
+    if (store.update(status)) {
+      changed(status.sessionID);
+      if (status.rootSessionID) changed(status.rootSessionID);
+    }
     // Snapshots cannot consume a live phase's notification.
     if (!notified.update(status) || !wantsToast(status)) return;
     try {
@@ -91,7 +94,7 @@ export function createReviewDisplay(ctx: ReviewDisplayContext, refreshTimeoutMs 
         message: reviewLines(status).join("\n"),
         variant: status.phase !== "completed" ? "info" : status.applied === "allow" ? "success" : "warning",
         duration: status.phase === "completed" ? 10_000 : 4_000,
-        sessionID: status.sessionID,
+        sessionID: status.rootSessionID ?? status.sessionID,
       });
     } catch { /* Display only. */ }
   });
@@ -122,7 +125,7 @@ export function createReviewDisplay(ctx: ReviewDisplayContext, refreshTimeoutMs 
         const statuses: ReviewStatus[] = [];
         for (const value of result.reviews) {
           if (!record(value) || typeof value.sessionID !== "string") return failed("invalid-response");
-          if (value.sessionID !== sessionID) continue;
+          if (value.sessionID !== sessionID && value.rootSessionID !== sessionID) continue;
           const status = parseReviewStatus(value);
           if (!status) return failed("invalid-response");
           if (status.workspaceID !== (current.workspaceID ?? null)) return failed("invalid-response");

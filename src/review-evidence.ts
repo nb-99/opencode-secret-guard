@@ -12,6 +12,7 @@ import { createHash } from "node:crypto";
 import * as os from "node:os";
 import * as path from "node:path";
 import { matchesAny } from "./paths.ts";
+import { CONFIG_ENVIRONMENT } from "./policy.ts";
 import { Ineligible } from "./review-backends.ts";
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -38,10 +39,10 @@ const TOKEN = new RegExp(
   ].join("|"),
   "i",
 );
-/** A generic `name=value` credential. Also matches prefixed and suffixed names such as AWS_SECRET_ACCESS_KEY=. A removed value is no credential. */
-const GENERIC = /(?:password|passwd|secret|token|api[_-]?key|access[_-]?key)\w*\s*[=:]\s*(?!\[value removed\])\S+/i;
+/** A generic credential name, including prefixed and suffixed forms such as AWS_SECRET_ACCESS_KEY or x-api-key. */
 const GENERIC_NAME = /(?:password|passwd|secret|token|api[_-]?key|access[_-]?key)\w*$/i;
-const ASSIGNMENT = /([A-Za-z_][A-Za-z0-9_]*)\s*[=:](?!\s*\[value removed\])/g;
+/** At each word start: a name, `=` or `:`, and the rest of that word, unless already redacted. Zero-width so nested assignments are found too. */
+const ASSIGNMENT = /(?=\b([A-Za-z0-9_][A-Za-z0-9_-]*)\s*[=:]\s*(?!\[value removed\])(\S*))/g;
 /** A name, `=` or `:` with no space, and the rest of that word. */
 const ASSIGNED_WORD = /\b([A-Za-z_][A-Za-z0-9_-]*)([=:])(\S*)/g;
 /**
@@ -50,6 +51,14 @@ const ASSIGNED_WORD = /\b([A-Za-z_][A-Za-z0-9_-]*)([=:])(\S*)/g;
  * the secret.
  */
 const PLAIN_VALUE = /^(["']?)[\w.~+/@%,:=-]+\1$/;
+/**
+ * A pure shell variable reference or path rooted at one, optionally
+ * double-quoted (`$VAR`, `${VAR}`, `$VAR/path`, `"$VAR/path"`). No command
+ * substitution, backticks, single quotes, parameter operators, or shell
+ * metacharacters.
+ */
+const VAR_REFERENCE = /^("?)\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*\})(?:\/(?:[\w.~+@%:-]|\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][A-Za-z0-9_]*\}))*)*\1$/;
+const VAR_TOKEN = /\$(?:([A-Za-z_][A-Za-z0-9_]*)|\{([A-Za-z_][A-Za-z0-9_]*)\})/g;
 /** At each word start: a name, then `=` or `:`, then a word, with optional spaces. Zero-width, so nested names are found too. */
 const NAMED_WORD = /(?=\b([A-Za-z_][A-Za-z0-9_-]*)\s*[=:]\s*(\S+))/g;
 /** A word that looks like a secret rather than prose: quoted, or a digit and at least 6 characters, or at least 20. */
@@ -77,10 +86,20 @@ export interface CredentialCheck {
 
 export function credentialCheck(secrets: SecretNames): CredentialCheck {
   const secretName = (name: string) =>
-    GENERIC_NAME.test(name) || secrets.secretEnvironment.includes(name) || matchesAny(name, [...secrets.secretEnvironmentPatterns]);
+    name !== CONFIG_ENVIRONMENT &&
+    (GENERIC_NAME.test(name) || secrets.secretEnvironment.includes(name) || matchesAny(name, [...secrets.secretEnvironmentPatterns]));
+  const isNonSecretVarRef = (value: string) => {
+    if (!VAR_REFERENCE.test(value)) return false;
+    for (const match of value.matchAll(VAR_TOKEN)) {
+      if (secretName(match[1] ?? match[2]!)) return false;
+    }
+    return true;
+  };
   const any = (text: string) => {
-    if (TOKEN.test(text) || GENERIC.test(text)) return true;
-    for (const [, name] of text.matchAll(ASSIGNMENT)) if (secretName(name!)) return true;
+    if (TOKEN.test(text)) return true;
+    for (const [, name, value] of text.matchAll(ASSIGNMENT)) {
+      if (secretName(name!) && !isNonSecretVarRef(value!)) return true;
+    }
     return false;
   };
   const redactValues = (text: string) =>
@@ -89,7 +108,7 @@ export function credentialCheck(secrets: SecretNames): CredentialCheck {
   const secretLine = (line: string) => {
     if (TOKEN.test(line)) return true;
     for (const [, name, value] of line.matchAll(NAMED_WORD)) {
-      if (!secretName(name!)) continue;
+      if (!secretName(name!) || isNonSecretVarRef(value!)) continue;
       // Prose rarely quotes a value after a credential name.
       if (/^["']/.test(value!) || SECRET_WORD.test(value!.replace(/["'`,;.)]+$/, ""))) return true;
     }
@@ -140,6 +159,7 @@ export type ActionEvidence = {
   requested_command: string;
   requested_cwd: string;
   project_directory: string;
+  scratch_directory?: string;
   permission_resources: string[];
 };
 

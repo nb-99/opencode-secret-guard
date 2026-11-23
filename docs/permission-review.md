@@ -137,10 +137,11 @@ The section mounts with the session sidebar; you may need to scroll to see it.
 It is plugin UI, not a slot inside the native permission prompt.
 Hiding the sidebar hides the section, but does not stop reviews or notifications.
 
-The section summarizes the current project-scoped session since the server started.
-Clicking the `Guard Review` header collapses or expands the body, and persists
-the state in OpenCode's plugin storage (`view`), matching OpenCode's built-in
-sidebar sections:
+The section summarizes the current project-scoped session since the server started,
+including reviews from subagent sessions spawned under it (tagged `subagent` in
+`Latest` and in toasts). Clicking the `Guard Review` header collapses or expands
+the body, and persists the state in OpenCode's plugin storage (`view`), matching
+OpenCode's built-in sidebar sections:
 
 ```text
 ▼ Guard Review
@@ -744,13 +745,15 @@ context, validates it, and fills it within the backend's evidence limit:
   `requested_command` (the command from the tool input, after host rewrites
   such as `rtk`), `requested_cwd` (the directory that input asked for, resolved
   against the project directory; not proof of where the command finally runs),
-  `project_directory` and `permission_resources` (parsed commands for `shell`,
+  `project_directory`, optional `scratch_directory` (the resolved `cleanupRoot`
+  when configured), and `permission_resources` (parsed commands for `shell`,
   or access targets for `external_directory`).
 - `context_warnings`: `compacted`, `outside_project`, `forked`, `subagent`,
   `credential_removed`, `binary_attachments` and `screen_failed` booleans.
   `outside_project` covers the requested working directory or prior
   external-access permission checks for the same tool call, including `cd`
-  targets within the command.
+  targets within the command, excluding paths inside the configured
+  `cleanupRoot` scratch directory.
 - `user_messages`: the text of the user-role messages, oldest first, and live
   refusal feedback (see [Refusals](#refusals)). In a subagent session they come
   from the root session.
@@ -970,6 +973,8 @@ requests have no other place for it.
   `rtk` runs, and the prefix alone does not lower trust.
   The reviewer sends the rewritten command unchanged, because `rtk` renames some
   commands and their flags. Removing the prefix would show a command that does not run.
+  The same guidance explains `nix-shell -p <packages> --run '<command>'`, so the
+  model judges the inner command without treating temporary Nix packages as a global install.
 
 ## How a request is approved
 
@@ -1061,7 +1066,12 @@ prompts. The reasons for a negative judgment are `model-confirmation-required`,
 `model-out-of-scope`, checked in that order.
 
 At the default that is ≥ 0.9 and ≤ 0.1; at 0.95 it is ≥ 0.95 and ≤ 0.05;
-at 1 only certain answers pass. A value of 0.5 or below is rejected, because
+at 1 only certain answers pass. Because chat models using the `text` API
+self-report uncalibrated probabilities and often hedge clear yes answers around
+0.80–0.88, the `text` API relaxes only the positive checks to
+`max((t + 0.5) / 2, 1 - 2 * (1 - t))` (0.80 at t = 0.9, 0.90 at t = 0.95, 1.0 at t = 1)
+while keeping the negative safety checks (`confirmation_required`,
+`sensitive_effect`, `remote_effect`) at the strict `≤ 1 - t`. A value of 0.5 or below is rejected, because
 it would approve answers the model is undecided about. The scores are the
 model's yes-probabilities, not calibrated confidence: no labeled evaluation
 set backs any threshold, so a higher value makes approvals rarer, not
@@ -1185,9 +1195,12 @@ separate boundary.
   only when the value is one plain word, without quoting, `$`, backticks,
   backslashes or shell operators: `MY_VAULT=abc` becomes
   `MY_VAULT=[value removed]`, and the review continues with
-  `credential_removed` set. Any other match keeps the prompt, so the removal
-  never hides part of what runs. For example, `TOKEN="$(curl … | sh)" true`
-  and `x-api-key: abc` keep the prompt.
+  `credential_removed` set. `OPENCODE_SECRET_GUARD_CONFIG` (which names the
+  guard's own policy path, not a secret) and pure variable references to
+  non-secret variables such as `$VAR` or `"$TMPDIR/path"` are not treated as
+  literal credentials. Any other match keeps the prompt, so the removal
+  never hides part of what runs. For example, `TOKEN="$(curl … | sh)" true`,
+  `GITHUB_TOKEN=$SECRET_TOKEN` and `x-api-key: abc` keep the prompt.
 
 Recognition covers common token formats, private-key headers, inline passwords
 and URL credentials, and assignments to variable names in the guard's
