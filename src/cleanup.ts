@@ -4,7 +4,7 @@ import * as path from "node:path";
 import { spawn } from "node:child_process";
 import { z } from "zod";
 import { findRepoRoot, gitignoreRules } from "./gitignore.ts";
-import { isInside } from "./paths.ts";
+import { inspectScratchRoot, sameScratchRoot, scratchDescendant, type ScratchRoot } from "./scratch-paths.ts";
 import type { GuardConfig } from "./policy.ts";
 import type { SandboxBackend } from "./sandbox.ts";
 import { selectBackend } from "./sandbox.ts";
@@ -29,10 +29,7 @@ export type CleanupContext = {
   }): Promise<void>;
 };
 
-export type CleanupPlan = {
-  root: string;
-  device: number;
-  inode: number;
+export type CleanupPlan = ScratchRoot & {
   targets: string[];
   entries: string[];
   permissionPaths: string[];
@@ -48,44 +45,8 @@ function missing(error: unknown): boolean {
 
 /** Resolve existing ancestors strictly; never traverse an operand symlink. */
 export function prepareCleanup(root: string, paths: string[]): CleanupPlan {
-  const rootStat = fs.lstatSync(root);
-  if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) {
-    fail("cleanupRoot must be an existing directory, not a symlink");
-  }
-  const canonicalRoot = fs.realpathSync(root);
-  if (canonicalRoot === path.parse(canonicalRoot).root) fail("refusing filesystem root");
-
-  const targets = paths.map((relative) => {
-    const parts = relative.split("/");
-    if (
-      path.isAbsolute(relative) ||
-      /[\0\r\n\\]/.test(relative) ||
-      parts.some((part) => !part || part === "." || part === "..")
-    ) {
-      fail(`expected a relative descendant path, got ${JSON.stringify(relative)}`);
-    }
-
-    let current = canonicalRoot;
-    for (let i = 0; i < parts.length; i++) {
-      current = path.join(current, parts[i]!);
-      let stat: fs.Stats;
-      try {
-        stat = fs.lstatSync(current);
-      } catch (error) {
-        if (!missing(error)) throw error;
-        // The existing ancestor is known; missing descendants are safe no-ops.
-        current = path.join(current, ...parts.slice(i + 1));
-        break;
-      }
-      if (stat.isSymbolicLink()) fail(`symlink operand or ancestor: ${relative}`);
-      if (i < parts.length - 1 && !stat.isDirectory()) fail(`not a directory: ${relative}`);
-      if (fs.realpathSync(current) !== current || !isInside(current, canonicalRoot)) {
-        fail(`target changed during validation: ${relative}`);
-      }
-    }
-    if (current === canonicalRoot || !isInside(current, canonicalRoot)) fail("target escapes cleanupRoot");
-    return current;
-  });
+  const scratch = inspectScratchRoot(root);
+  const targets = paths.map((relative) => scratchDescendant(scratch.root, relative));
 
   const inventory = new Set<string>();
   const pending = [...targets];
@@ -121,15 +82,13 @@ export function prepareCleanup(root: string, paths: string[]): CleanupPlan {
   const entries = [...inventory].sort();
 
   return {
-    root: canonicalRoot,
-    device: rootStat.dev,
-    inode: rootStat.ino,
+    ...scratch,
     targets: [...new Set(targets)],
     entries,
     // OpenCode matches these strings, not realpaths; retain the configured /tmp alias.
     permissionPaths: [...new Set([
       ...paths.map((relative) => path.join(root, relative)),
-      ...entries.map((entry) => path.join(root, path.relative(canonicalRoot, entry))),
+      ...entries.map((entry) => path.join(root, path.relative(scratch.root, entry))),
     ])].sort(),
   };
 }
@@ -215,9 +174,7 @@ export function createCleanupTool(config: GuardConfig, shellValidated: () => boo
 
       const current = prepareCleanup(config.cleanupRoot, paths);
       if (
-        current.root !== plan.root ||
-        current.device !== plan.device ||
-        current.inode !== plan.inode ||
+        !sameScratchRoot(current, plan) ||
         JSON.stringify(current.targets) !== JSON.stringify(plan.targets) ||
         JSON.stringify(current.entries) !== JSON.stringify(plan.entries)
       ) {

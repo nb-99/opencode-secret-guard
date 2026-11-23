@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -2858,6 +2858,8 @@ describe("credential exemptions, subagent rollup, text thresholds and scratch di
     expect(fake.records.at(-1)?.reason).toBe("model-confirmation-required");
   });
 
+  const scratchRead = () => response(200, answerBody({ ...APPROVE, explicitly_authorized: 0.2, read_only: 0.96 }));
+
   test("configured cleanupRoot is treated as project-adjacent scratch rather than outsideProject", async () => {
     const scratch = path.join(fixture, "scratch");
     const taskDir = path.join(scratch, "task-1");
@@ -2867,10 +2869,9 @@ describe("credential exemptions, subagent rollup, text thresholds and scratch di
     const escapeLink = path.join(scratch, "escape");
     fs.symlinkSync(outside, escapeLink);
 
-    const readOnlyScores = { ...APPROVE, explicitly_authorized: 0.2, read_only: 0.96 };
     const fake = await started("auto", {
       cleanupRoot: scratch,
-      fetch: async () => response(200, answerBody(readOnlyScores)),
+      fetch: async () => scratchRead(),
     });
 
     // Scratch external_directory + shell read passes with read-only basis (not explicitOnly / outsideProject).
@@ -2902,6 +2903,62 @@ describe("credential exemptions, subagent rollup, text thresholds and scratch di
     }));
     expect(extEscape.effect).toBe("ask");
     expect(fake.records.at(-1)).toMatchObject({ outsideProject: true, explicitOnly: true, reason: "model-not-authorized" });
+  });
+
+  test("a missing scratch output qualifies, but EACCES at the same path requires explicit consent", async () => {
+    const scratch = fs.mkdtempSync(path.join(fixture, "scratch-lookup-"));
+    const output = path.join(scratch, "new-output");
+    const fake = await started("auto", { cleanupRoot: scratch, fetch: async () => scratchRead() });
+    const check = (id: string) => reviewed(fake, shellCall("ls", id), evaluation({ action: "external_directory",
+      resources: [output], source: { type: "tool", messageID: "msg_1", id } }));
+    expect((await check("first")).effect).toBe("allow");
+    const lstat = fs.lstatSync;
+    const denied = spyOn(fs, "lstatSync").mockImplementation((target, ...args) => {
+      if (target === output) throw Object.assign(new Error("fixture lookup denied"), { code: "EACCES" });
+      return lstat(target, ...args);
+    });
+    try {
+      expect((await check("second")).effect).toBe("ask");
+      expect(fake.records.at(-1)).toMatchObject({ outsideProject: true, explicitOnly: true });
+    } finally { denied.mockRestore(); }
+  });
+
+  test("scratch cwd accepts parent aliases and the root itself, but not traversal or a symlink root", async () => {
+    const parent = fs.mkdtempSync(path.join(fixture, "scratch-alias-"));
+    const scratch = path.join(parent, "scratch");
+    fs.mkdirSync(scratch);
+    const alias = `${parent}-alias`;
+    fs.symlinkSync(parent, alias);
+    const check = async (configured: string, workdir: string) => {
+      const fake = await started("auto", { cleanupRoot: configured, fetch: async () => scratchRead() });
+      await fake.call({ ...shellCall("ls"), input: { command: "ls", workdir } });
+      const event = await evaluate(fake, evaluation({ resources: ["ls"] }));
+      return { effect: event.effect, root: JSON.parse(fake.requests[0]!.init.body).state.pending_action.scratch_directory };
+    };
+    expect(await check(scratch, path.join(alias, "scratch"))).toEqual({ effect: "allow", root: scratch });
+    expect(await check(scratch, `${scratch}/new/../`)).toEqual({ effect: "ask", root: scratch });
+    fs.symlinkSync(scratch, `${scratch}-link`);
+    expect(await check(`${scratch}-link/`, scratch)).toEqual({ effect: "ask", root: undefined });
+  });
+
+  test.each(["cwd root", "previous external resource"])("rechecks the %s after model approval", async (which) => {
+    const scratch = fs.mkdtempSync(path.join(fixture, "scratch-recheck-"));
+    const target = path.join(scratch, "task");
+    const fake = await started("auto", { cleanupRoot: scratch, fetch: async () => {
+      if (which === "cwd root") {
+        fs.renameSync(scratch, `${scratch}-old`);
+        fs.mkdirSync(scratch);
+      } else {
+        fs.symlinkSync(repo, target);
+      }
+      return scratchRead();
+    } });
+    await fake.call({ ...shellCall("ls"), input: { command: "ls", workdir: which === "cwd root" ? scratch : repo } });
+    if (which === "previous external resource") {
+      await evaluate(fake, evaluation({ action: "external_directory", resources: [`${target}/*`], effect: "allow" }));
+    }
+    expect((await evaluate(fake, evaluation({ resources: ["ls"] }))).effect).toBe("ask");
+    expect(fake.records.at(-1)).toMatchObject({ reason: "scratch-changed", proposed: "allow", applied: "ask" });
   });
 });
 
