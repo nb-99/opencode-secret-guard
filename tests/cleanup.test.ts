@@ -2,10 +2,17 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { cleanupProfile, createCleanupTool, prepareCleanup } from "../src/cleanup.ts";
+import { cleanupCommand, createCleanupTool, prepareCleanup } from "../src/cleanup.ts";
+import type { CleanupPlan } from "../src/cleanup.ts";
 import { loadConfig, validateConfig } from "../src/policy.ts";
+import type { GuardConfig } from "../src/policy.ts";
+import { sandboxExec } from "../src/sandbox-exec.ts";
+import { fakeBackend, stubHostSandbox } from "./support.ts";
 
 const base = loadConfig(process.env.OPENCODE_SECRET_GUARD_CONFIG);
+const host = stubHostSandbox();
+/** The SBPL profile the macOS backend would confine a cleanup with. */
+const cleanupProfile = (config: GuardConfig, plan: CleanupPlan) => cleanupCommand(config, plan, sandboxExec)[2]!;
 let fixture: string;
 let root: string;
 beforeEach(() => {
@@ -96,6 +103,19 @@ describe("cleanup tool and profile", () => {
       abort: new AbortController().signal,
       ask: async () => { throw new Error("must not ask"); },
     })).rejects.toThrow("has not been validated");
+  });
+  test("asks for approval only after the backend has confined the planned entries", async () => {
+    const backend = fakeBackend();
+    const tool = createCleanupTool({ ...base, cleanupRoot: root }, () => true);
+    const asked = host.during({ backend }, () => tool.execute({ paths: ["job"] }, {
+      abort: new AbortController().signal,
+      ask: async () => { throw new Error("denied"); },
+    }));
+    await expect(asked).rejects.toThrow("denied");
+    expect(backend.deletionConfinements).toHaveLength(1);
+    expect(backend.deletionConfinements[0]!.root).toBe(root);
+    expect(backend.deletionConfinements[0]!.entries).toEqual([path.join(root, "job"), path.join(root, "job/output")]);
+    expect(fs.existsSync(path.join(root, "job/output"))).toBe(true);
   });
   test("only adds denies after the original secret and cache rules", () => {
     const profile = cleanupProfile({ ...base, cleanupRoot: root }, prepareCleanup(root, ["job"]));

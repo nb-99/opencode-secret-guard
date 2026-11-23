@@ -1,13 +1,23 @@
+/**
+ * The macOS backend: a Sandbox Profile Language (SBPL) profile applied by
+ * `/usr/bin/sandbox-exec`.
+ */
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import { createHash } from "node:crypto";
 import type { GitignoreRules } from "./gitignore.ts";
 import { findRepoRoot, gitignoreRules, HELM_SECRET_FILENAME_PATTERN } from "./gitignore.ts";
 import { realpath } from "./paths.ts";
 import type { GuardConfig } from "./policy.ts";
+import { cacheDirectory } from "./policy.ts";
+import type { DeletionConfinement, SandboxBackend, ShellConfinement } from "./sandbox.ts";
 import type { TamperTargets } from "./tamper.ts";
-import { protectedNodes, tamperTargets } from "./tamper.ts";
+import { protectedNodes } from "./tamper.ts";
+
+export const SANDBOX_EXEC = "/usr/bin/sandbox-exec";
+/** macOS's own shell, which every guarded command runs under. */
+const SHELL = "/bin/zsh";
+const MAX_DELETION_PROFILE_BYTES = 128 * 1024;
 
 export const PROFILE_VERSION = 9;
 
@@ -164,36 +174,16 @@ export function buildProfile(options: {
   return lines.join("\n") + "\n";
 }
 
-// ---------------------------------------------------------------------------
-// Path predicate (file tools)
-// ---------------------------------------------------------------------------
-
-export function cacheDirectory(): string {
-  const base = process.env.XDG_CACHE_HOME || path.join(os.homedir(), ".cache");
-  return path.join(base, "opencode-secret-guard");
-}
-
-export function profilePath(options: {
-  config: GuardConfig;
-  home: string;
-  cwd: string;
-  group: string | null;
+/** Writes the profile for one shell confinement, or reuses a fresh cached one, and returns its path. */
+export function profilePath(options: ShellConfinement & {
+  /** Overrides the cache directory. */
   directory?: string;
-  /** Reuses the caller's targets; recomputed when absent. */
-  tamper?: TamperTargets;
 }): string {
-  const { config, home, cwd, group } = options;
+  const { config, home, cwd, group, tamper } = options;
   const directory = options.directory ?? cacheDirectory();
   const repoRoot = findRepoRoot(cwd);
   // PATH differs between invocations (direnv, per-project shells), and the
   // writable entries become deny rules, so they are part of the identity.
-  const tamper = options.tamper ?? tamperTargets({
-    repoRoot,
-    pathEnvironment: process.env.PATH,
-    home,
-    writeProtectedRoots: config.writeProtectedRoots,
-  });
-
   const key = createHash("sha256")
     .update(JSON.stringify({ version: PROFILE_VERSION, repoRoot, group, home, config, tamper }))
     .digest("hex")
@@ -219,6 +209,32 @@ export function profilePath(options: {
   return target;
 }
 
-// ---------------------------------------------------------------------------
-// Plugin
-// ---------------------------------------------------------------------------
+/** The strict profile, narrowed so that a process may only unlink the listed entries. */
+export function deletionProfile(confinement: DeletionConfinement): string {
+  const { config, home, gitignore, tamper, entries, root } = confinement;
+  const profile = buildProfile({ config, home, group: null, gitignore, tamper });
+  const targets = entries.map((target) => `(literal ${sbplString(target)})`).join(" ");
+  const confined = profile +
+    "\n;; Cleanup only narrows the base policy; secrets and the cache remain protected.\n" +
+    (targets ? `(deny file-write* (require-not (require-any ${targets})))\n` : "(deny file-write*)\n") +
+    `(deny file-write* (literal ${sbplString(root)}))\n` +
+    "(deny file-write-data file-write-create)\n";
+  if (Buffer.byteLength(confined) > MAX_DELETION_PROFILE_BYTES) {
+    throw new Error("secret-guard: cleanup_temp: cleanup profile is too large; select a smaller subtree");
+  }
+  return confined;
+}
+
+export const sandboxExec: SandboxBackend = {
+  name: "sandbox-exec",
+  blocksSetuid: true,
+  probe() {
+    if (process.platform !== "darwin") {
+      return { available: false, reason: "needs macOS" };
+    }
+    if (!fs.existsSync(SANDBOX_EXEC)) return { available: false, reason: `needs ${SANDBOX_EXEC}, which is missing` };
+    return { available: true };
+  },
+  shellCommand: (confinement) => [SANDBOX_EXEC, "-f", profilePath(confinement), SHELL, "-c"],
+  deletionCommand: (confinement) => [SANDBOX_EXEC, "-p", deletionProfile(confinement)],
+};

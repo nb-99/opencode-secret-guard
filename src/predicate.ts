@@ -4,7 +4,7 @@ import { findRepoRoot, HELM_SECRET_FILENAME_PATTERN, isGitIgnored, isPossiblyGit
 import { hasAliasLookup, inspectPath, inspectPaths, isExistingDirectory, isInside, realpath, type PathEvidence } from "./paths.ts";
 import { matchPathPattern, mayBeInside } from "./path-pattern.ts";
 import type { GuardConfig } from "./policy.ts";
-import { cacheDirectory } from "./profile.ts";
+import { cacheDirectory } from "./policy.ts";
 import { mayBeTamperProtected, tamperTargets } from "./tamper.ts";
 import { validExemptRoots } from "./exemptions.ts";
 

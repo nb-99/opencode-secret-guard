@@ -1,9 +1,10 @@
 /**
  * Resolver entry point for the shell wrapper.
  *
- * Prints the profile path on the first line and the environment variables to
- * scrub on the following ones. Every failure exits non-zero so the wrapper
- * aborts rather than running a command unsandboxed.
+ * Prints the sandbox command, the failure hint and the environment variables
+ * to scrub, in the line protocol `resolveForShell` describes. Every failure
+ * exits non-zero so the wrapper aborts rather than running a command
+ * unsandboxed.
  */
 import { loadConfig } from "./policy.ts";
 import { resolveForShell } from "./shell.ts";

@@ -6,11 +6,10 @@ import { analyzeCommand, analyzeSegments, parseCommand, shellWords } from "./com
 import { findRepoRoot } from "./gitignore.ts";
 import { matchesAny, realpath } from "./paths.ts";
 import type { GuardConfig } from "./policy.ts";
-import { profilePath } from "./profile.ts";
+import type { SandboxBackend } from "./sandbox.ts";
+import { selectBackend } from "./sandbox.ts";
 import type { TamperTargets } from "./tamper.ts";
 import { isTamperProtected, tamperTargets } from "./tamper.ts";
-
-export const SANDBOX_EXEC = "/usr/bin/sandbox-exec";
 
 /**
  * The wrapper ships beside this module in one package, at <package>/bin. That
@@ -49,32 +48,6 @@ export function requireWrapperFile(moduleDirectory: string): void {
   }
 }
 
-/**
- * "shell+files" promises kernel enforcement, so it must not start where that
- * cannot be delivered. Reporting the reason here is the difference between a
- * named refusal at startup and every command failing later with an EPERM that
- * names neither the guard nor the cause.
- */
-export function validatePlatform(config: GuardConfig): void {
-  if (config.mode !== "shell+files") return;
-  if (process.platform !== "darwin") {
-    throw new Error(
-      `secret-guard: mode "shell+files" needs macOS, but this host is ${process.platform}. ` +
-        'Set "mode": "files-only" to run with the weaker file-tool layer alone.',
-    );
-  }
-  if (!fs.existsSync(SANDBOX_EXEC)) {
-    throw new Error(
-      `secret-guard: mode "shell+files" needs ${SANDBOX_EXEC}, which is missing. ` +
-        'Set "mode": "files-only" to run with the weaker file-tool layer alone.',
-    );
-  }
-}
-
-export function resolveProfile(command: string, guardConfig: GuardConfig): string {
-  return resolveShellPlan(command, guardConfig).profile;
-}
-
 /** The guard's own variables: their names contain "SECRET" and hold no secret. */
 export const OWN_ENVIRONMENT = /^(SECRET_GUARD_|OPENCODE_SECRET_GUARD_)/;
 
@@ -105,7 +78,7 @@ export function scrubbedEnvironment(
 export function resolveShellPlan(
   command: string,
   guardConfig: GuardConfig,
-): { profile: string; group: string | null; hint: FailureHint; scrub: string[] } {
+): { sandbox: string[]; group: string | null; hint: FailureHint; scrub: string[] } {
   // The wrapper only exists to enforce the shell layer. Being invoked while the
   // policy disables that layer means the two disagree about what is guarded, so
   // it refuses rather than running the command under no profile at all.
@@ -114,11 +87,7 @@ export function resolveShellPlan(
       'the policy sets mode "files-only", so this shell must not be configured as opencode\'s shell.',
     );
   }
-  if (!fs.existsSync(SANDBOX_EXEC)) {
-    throw new Error(
-      `${SANDBOX_EXEC} is missing, refusing to run an unsandboxed command.`,
-    );
-  }
+  const backend = selectBackend(guardConfig)!;
 
   const analysis = analyzeCommand(command, guardConfig);
   if (analysis.refusal) throw new Error(refusalMessage(analysis.refusal));
@@ -130,18 +99,12 @@ export function resolveShellPlan(
     home,
     writeProtectedRoots: guardConfig.writeProtectedRoots,
   });
-  const profile = profilePath({
-    config: guardConfig,
-    home,
-    cwd,
-    group: analysis.group,
-    tamper,
-  });
+  const sandbox = backend.shellCommand({ config: guardConfig, home, cwd, group: analysis.group, tamper });
   const scrub = scrubbedEnvironment(guardConfig, analysis.group);
   return {
-    profile,
+    sandbox,
     group: analysis.group,
-    hint: failureHint({ analysis, command, tamper, scrub, home, cwd }),
+    hint: failureHint({ analysis, command, tamper, scrub, home, cwd, backend }),
     scrub,
   };
 }
@@ -179,9 +142,10 @@ export function strictHint(analysis: CommandAnalysis): string {
 }
 
 /**
- * Common system binaries that are setuid on macOS. Their sandbox denial looks
- * like a denied file, so the hint names an alternative. A matching name does
- * not prove that this command reached the system binary.
+ * Common system binaries that are setuid on macOS. Under a backend that
+ * refuses setuid binaries, their denial looks like a denied file, so the hint
+ * names an alternative. A matching name does not prove that this command
+ * reached the system binary.
  */
 export const SETUID_BINARIES: Record<string, string> = {
   ps: "use `pgrep -fl PATTERN` to find a process and `lsof -i :PORT` for a port",
@@ -307,17 +271,18 @@ export function failureHint(options: {
   scrub: string[];
   home: string;
   cwd: string;
+  backend: Pick<SandboxBackend, "name" | "blocksSetuid">;
 }): FailureHint {
-  const { analysis, command, tamper, scrub, home, cwd } = options;
+  const { analysis, command, tamper, scrub, home, cwd, backend } = options;
   const conditional = (text: string): FailureHint => ({ text, showOn127: false });
 
   // An exec denial needs a different remedy than a lost credential group.
-  const setuid = setuidBinary(command);
+  const setuid = backend.blocksSetuid ? setuidBinary(command) : null;
   if (setuid) {
     return {
       text:
-        `secret-guard: if this failed while executing the macOS system \`${setuid}\`, that binary is setuid ` +
-        `and sandbox-exec refuses to execute it regardless of the profile. Instead, ${SETUID_BINARIES[setuid]}.`,
+        `secret-guard: if this failed while executing the system \`${setuid}\`, that binary is setuid ` +
+        `and ${backend.name} refuses to execute it regardless of the policy. Instead, ${SETUID_BINARIES[setuid]}.`,
       showOn127: true,
     };
   }
@@ -362,12 +327,29 @@ export function encodeHint(hint: FailureHint): string {
 }
 
 /**
- * The shell wrapper's side of the contract: the profile path, then the hint
- * with its exit-127 marker (an empty line when there is nothing to say), then
- * one environment variable to scrub per line. All come from one invocation
- * because the wrapper pays the interpreter's startup cost on every command.
+ * The shell wrapper's side of the contract: the number of words in the sandbox
+ * command, those words one per line, then the hint with its exit-127 marker (an
+ * empty line when there is nothing to say), then one environment variable to
+ * scrub per line. All come from one invocation because the wrapper pays the
+ * interpreter's startup cost on every command.
  */
 export function resolveForShell(command: string, guardConfig: GuardConfig): string {
   const plan = resolveShellPlan(command, guardConfig);
-  return [plan.profile, encodeHint(plan.hint), ...plan.scrub].join("\n");
+  const words = plan.sandbox;
+  // The wrapper runs the words through env, which would take a first word
+  // containing "=" as an assignment and run the second one unsandboxed.
+  if (
+    words.length === 0 || words.length > 99 || !words[0]!.startsWith("/") || words[0]!.includes("=") ||
+    words.some((word) => word === "" || /[\0\r\n]/.test(word))
+  ) {
+    throw new Error("the sandbox command cannot be passed to the wrapper one word per line, refusing to run it.");
+  }
+  // An inherited name the protocol would split could not be unset.
+  const unsafe = plan.scrub.find((name) => name === "" || /[\0\r\n=]/.test(name));
+  if (unsafe !== undefined) {
+    throw new Error(
+      `the inherited variable ${JSON.stringify(unsafe)} cannot be removed from the environment, refusing to run the command.`,
+    );
+  }
+  return [String(words.length), ...words, encodeHint(plan.hint), ...plan.scrub].join("\n");
 }

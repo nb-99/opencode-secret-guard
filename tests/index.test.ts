@@ -5,14 +5,14 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { loadConfig } from "../src/policy.ts";
 import plugin from "../src/index.ts";
-import { host } from "./support.ts";
+import { host, stubHostSandbox } from "./support.ts";
 
 const policyPath = process.env.OPENCODE_SECRET_GUARD_CONFIG;
 if (!policyPath) throw new Error("OPENCODE_SECRET_GUARD_CONFIG must be set");
 
 // `server` and `setup` load the shipped policy, which is shell+files and so
-// starts only on macOS; the shape test runs anywhere.
-const darwin = process.platform === "darwin";
+// needs a shell sandbox; a fake one stands in for the host's.
+stubHostSandbox();
 
 let fixture: string;
 
@@ -35,7 +35,7 @@ describe("the default export", () => {
     expect(typeof plugin.server).toBe("function");
   });
 
-  test.skipIf(!darwin)("server guards relative paths against the directory V1 passes", async () => {
+  test("server guards relative paths against the directory V1 passes", async () => {
     const hooks = await plugin.server({ directory: fixture });
 
     await expect(hooks["tool.execute.before"]({ tool: "read" }, { args: { filePath: "private.txt" } })).rejects.toThrow(
@@ -43,7 +43,7 @@ describe("the default export", () => {
     );
   });
 
-  test.skipIf(!darwin)("server starts without a directory and refuses relative paths rather than guessing", async () => {
+  test("server starts without a directory and refuses relative paths rather than guessing", async () => {
     for (const input of [{}, { directory: "relative" }, { directory: 3 }, undefined]) {
       const hooks = await plugin.server(input as { directory?: unknown });
 
@@ -53,7 +53,7 @@ describe("the default export", () => {
     }
   });
 
-  test.skipIf(!darwin)("setup registers the shell check and both tool hooks on V2", async () => {
+  test("setup registers the shell check and both tool hooks on V2", async () => {
     const fake = host(fixture);
     await plugin.setup(fake.ctx);
 

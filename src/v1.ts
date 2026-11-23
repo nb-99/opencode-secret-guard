@@ -3,7 +3,8 @@ import { createCleanupTool } from "./cleanup.ts";
 import { checkToolCall, FILES_ONLY_WARNING, guardsTool, isRecord } from "./guard.ts";
 import type { GuardConfig } from "./policy.ts";
 import { classifyPaths } from "./predicate.ts";
-import { requireWrapperFile, validatePlatform, validateShell } from "./shell.ts";
+import { selectBackend } from "./sandbox.ts";
+import { requireWrapperFile, validateShell } from "./shell.ts";
 
 const GREP_SUMMARY = /^Found (\d+) matches( \(more matches available\))?$/;
 const GREP_TRUNCATION = "(Results truncated. Consider using a more specific path or pattern.)";
@@ -105,7 +106,7 @@ export function createRefusingV1Hooks(message: string) {
  * are relative to; undefined when V1 gave none.
  */
 export function createV1Hooks(guardConfig: GuardConfig, moduleDirectory: string, directory: string | undefined) {
-  validatePlatform(guardConfig);
+  selectBackend(guardConfig);
   if (guardConfig.permissionReview.mode !== "off") {
     process.stderr.write("secret-guard: permission review is only available on OpenCode V2; prompts are unchanged.\n");
   }

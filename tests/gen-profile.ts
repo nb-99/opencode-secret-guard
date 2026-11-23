@@ -1,21 +1,24 @@
 /**
- * Prints a sandbox profile for the given repo/home/group. Used by
+ * Prints the host backend's sandbox command for the given repo/home/group, one
+ * word per line, as the resolver hands it to the shell wrapper. Used by
  * sandbox.test.sh so the integration tests exercise the real generator rather
  * than a hand-written profile.
  *
  * Usage: bun gen-profile.ts <config.json> <repoRoot> <home> <group|->
  * Env:   SG_EXEMPT_ROOTS, SG_DENY_ROOTS — colon-separated overrides.
  */
-import { gitignoreRules } from "../src/gitignore.ts";
 import { loadConfig } from "../src/policy.ts";
 import type { GuardConfig } from "../src/policy.ts";
-import { buildProfile } from "../src/profile.ts";
+import { hostSandbox } from "../src/sandbox.ts";
 import { tamperTargets } from "../src/tamper.ts";
 
 const [policyPath, repoRoot, home, groupArgument] = process.argv.slice(2);
 if (!policyPath || !repoRoot || !home || !groupArgument) {
   throw new Error("usage: gen-profile.ts <config.json> <repoRoot> <home> <group|->");
 }
+
+const host = hostSandbox();
+if (!host.backend) throw new Error(`this host has no shell sandbox: ${host.reason}`);
 
 const split = (value: string | undefined) =>
   value ? value.split(":").filter((entry) => entry.length > 0) : undefined;
@@ -27,18 +30,17 @@ const config: GuardConfig = {
   denyRoots: split(process.env.SG_DENY_ROOTS) ?? base.denyRoots,
 };
 
-process.stdout.write(
-  buildProfile({
-    config,
+const words = host.backend.shellCommand({
+  config,
+  home,
+  cwd: repoRoot,
+  group: groupArgument === "-" ? null : groupArgument,
+  tamper: tamperTargets({
+    repoRoot,
+    pathEnvironment: process.env.PATH,
     home,
-    group: groupArgument === "-" ? null : groupArgument,
-    gitignore: gitignoreRules(config.tools.git, repoRoot, config.artifactAllowlist),
-    tamper: tamperTargets({
-      repoRoot,
-      pathEnvironment: process.env.PATH,
-      home,
-      policyPath,
-      writeProtectedRoots: config.writeProtectedRoots,
-    }),
+    policyPath,
+    writeProtectedRoots: config.writeProtectedRoots,
   }),
-);
+});
+process.stdout.write(words.map((word) => `${word}\n`).join(""));
