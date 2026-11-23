@@ -1,0 +1,19 @@
+docs/wsl-case-matching.md
+  s_c6210a6758b05e::t_dac376a64f8561 63-65
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.7",
+  "base_commit_sha": "b6a232c5f21addb3df785049cc76132ca94861f3",
+  "prompts": {},
+  "sessions": {
+    "s_c6210a6758b05e": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_df75aa567ffe8C0tIX9VAM0OSE",
+        "model": "github-copilot/claude-opus-5.5"
+      },
+      "human_author": "nb99 <niklas@beilmann.dev>"
+    }
+  }
+}
