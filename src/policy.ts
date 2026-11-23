@@ -168,7 +168,7 @@ const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
 /**
  * "shell+files" is the real boundary: the kernel enforces it, so it covers
  * variable expansion, interpreters and anything else a command can reach for.
- * It needs sandbox-exec and therefore macOS.
+ * It needs a shell sandbox backend for the host (see sandbox.ts).
  *
  * "files-only" drops the shell layer and keeps the path predicate, which is
  * portable. It is genuinely weaker — the shell tool becomes unguarded, and any
@@ -203,6 +203,12 @@ export function opencodeConfigDirectory(): string {
 export function opencodeCacheDirectory(): string {
   const base = process.env.XDG_CACHE_HOME || path.join(os.homedir(), ".cache");
   return path.join(base, "opencode");
+}
+
+/** Where sandbox backends keep what they generate. Neither commands nor file tools may write here. */
+export function cacheDirectory(): string {
+  const base = process.env.XDG_CACHE_HOME || path.join(os.homedir(), ".cache");
+  return path.join(base, "opencode-secret-guard");
 }
 
 /** OpenCode's data directory; `bin/` below it holds tools it installs. */

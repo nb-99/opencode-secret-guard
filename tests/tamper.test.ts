@@ -7,8 +7,9 @@ import { createV1Hooks } from "../src/v1.ts";
 import { loadConfig } from "../src/policy.ts";
 import type { GuardConfig } from "../src/policy.ts";
 import { classifyPath } from "../src/predicate.ts";
-import { profilePath } from "../src/profile.ts";
+import { profilePath } from "../src/sandbox-exec.ts";
 import { PACKAGE_DIRECTORY, isTamperProtected, protectedNodes, tamperTargets, writablePathDirectories } from "../src/tamper.ts";
+import { stubHostSandbox } from "./support.ts";
 
 const policyPath = process.env.OPENCODE_SECRET_GUARD_CONFIG;
 if (!policyPath) throw new Error("OPENCODE_SECRET_GUARD_CONFIG must be set");
@@ -17,6 +18,7 @@ let fixture: string;
 let repo: string;
 let config: GuardConfig;
 let previousXdg: string | undefined;
+stubHostSandbox();
 
 /** The V1 hooks for a project at `repo`, installed under the fixture. */
 const v1 = (guardConfig: GuardConfig, moduleDirectory: string) => createV1Hooks(guardConfig, moduleDirectory, repo);
@@ -41,21 +43,25 @@ afterAll(() => {
 });
 
 describe("writablePathDirectories", () => {
-  test("keeps writable and missing entries, drops read-only and in-repo ones", () => {
+  // Root may write a read-only directory, so the fixture proves nothing there.
+  test.skipIf(process.getuid?.() === 0)("keeps writable and missing entries, drops read-only and in-repo ones", () => {
     const writable = path.join(fixture, "bin");
     fs.mkdirSync(writable);
+    const readOnly = path.join(fixture, "read-only-bin");
+    fs.mkdirSync(readOnly, { mode: 0o555 });
+    fs.chmodSync(readOnly, 0o555);
     const missing = path.join(fixture, "not-yet");
     const inRepo = path.join(repo, "node_modules", ".bin");
     fs.mkdirSync(inRepo, { recursive: true });
 
     const found = writablePathDirectories(
-      [writable, "/usr/bin", missing, inRepo, "relative/bin", ""].join(":"),
+      [writable, readOnly, missing, inRepo, "relative/bin", ""].join(":"),
       repo,
     );
 
     expect(found).toContain(writable);
     expect(found).toContain(missing);
-    expect(found).not.toContain("/usr/bin");
+    expect(found).not.toContain(readOnly);
     expect(found).not.toContain(inRepo);
     expect(found.some((entry) => !path.isAbsolute(entry))).toBe(false);
   });
@@ -215,18 +221,20 @@ describe("writeProtectedRoots", () => {
   test("an upgrade that re-points a protected link yields a new profile naming the new target", () => {
     const link = path.join(brew, "opt", "upgraded");
     fs.symlinkSync(path.join(keg, "1.0"), link);
-    const options = {
-      config: { ...config, writeProtectedRoots: [link] },
+    const protectedConfig = { ...config, writeProtectedRoots: [link] };
+    const profile = () => profilePath({
+      config: protectedConfig,
       home: fixture,
       cwd: repo,
       group: null,
+      tamper: tamperTargets({ repoRoot: repo, pathEnvironment: process.env.PATH, home: fixture, writeProtectedRoots: [link] }),
       directory: path.join(fixture, "profiles"),
-    };
-    const before = profilePath(options);
+    });
+    const before = profile();
     fs.mkdirSync(path.join(keg, "2.0"));
     fs.unlinkSync(link);
     fs.symlinkSync(path.join(keg, "2.0"), link);
-    const after = profilePath(options);
+    const after = profile();
 
     expect(after).not.toBe(before);
     expect(fs.readFileSync(after, "utf8")).toContain(`(subpath "${path.join(keg, "2.0")}")`);

@@ -58,12 +58,14 @@ in
         touch $out
       '';
 
-  # Pure unit tests. The kernel suite needs /usr/bin/sandbox-exec, which is
-  # absent from the Nix build sandbox — run `nix run .#integration` for it.
+  # Pure unit tests. A fake backend stands in for the host's sandbox, so both
+  # modes are tested on every system. The kernel suite cannot apply a sandbox
+  # inside the Nix build sandbox; run `nix run .#integration` for it.
   unit =
     pkgs.runCommand "secret-guard-unit"
       {
         nativeBuildInputs = [
+          pkgs.bash
           pkgs.bun
           pkgs.git
         ];
@@ -78,6 +80,7 @@ in
         cp -r ${../policy} pkg/policy
         mkdir -p pkg/bin
         ln -s ${package}/bin/path-lookup pkg/bin/path-lookup
+        cp ${../bin/opencode-secret-guard} pkg/bin/opencode-secret-guard
         mkdir -p node_modules
         ln -s ${zod} node_modules/zod
         export HOME="$TMPDIR"
@@ -387,6 +390,8 @@ in
     test -f ${package}/lib/index.ts
     test -f ${package}/lib/cli.ts
     test -f ${package}/lib/cleanup.ts
+    test -f ${package}/lib/sandbox.ts
+    test -f ${package}/lib/sandbox-exec.ts
     test -f ${package}/lib/tui.ts
     test -f ${package}/lib/review-panel.ts
     test -f ${package}/lib/review-display.ts

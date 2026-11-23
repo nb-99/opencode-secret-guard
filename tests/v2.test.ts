@@ -6,7 +6,7 @@ import * as path from "node:path";
 import { loadConfig } from "../src/policy.ts";
 import type { GuardConfig } from "../src/policy.ts";
 import { setupV2 } from "../src/v2.ts";
-import { host } from "./support.ts";
+import { host, NO_SANDBOX, stubHostSandbox } from "./support.ts";
 
 const policyPath = process.env.OPENCODE_SECRET_GUARD_CONFIG;
 if (!policyPath) throw new Error("OPENCODE_SECRET_GUARD_CONFIG must be set");
@@ -15,12 +15,7 @@ let fixture: string;
 let repo: string;
 let packageLib: string;
 let config: GuardConfig;
-/**
- * shell+files needs macOS, so elsewhere the suite runs the file-tool layer under
- * files-only and skips what only exists in shell+files mode.
- */
-const darwin = process.platform === "darwin";
-let portable: GuardConfig;
+const sandbox = stubHostSandbox();
 
 beforeAll(() => {
   fixture = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "secret-guard-v2-")));
@@ -38,7 +33,6 @@ beforeAll(() => {
   fs.writeFileSync(path.join(repo, ".gitignore"), "private.txt\n");
   fs.symlinkSync(path.join(repo, ".env"), path.join(repo, "link-to-env"));
   config = loadConfig(policyPath);
-  portable = darwin ? config : { ...config, mode: "files-only" };
   spawnSync(config.tools.git, ["init", "-q", repo]);
 });
 
@@ -46,7 +40,7 @@ afterAll(() => {
   fs.rmSync(fixture, { recursive: true, force: true });
 });
 
-async function started(guardConfig: GuardConfig = portable, directory: string | undefined = repo) {
+async function started(guardConfig: GuardConfig = config, directory: string | undefined = repo) {
   const fake = host(directory);
   await setupV2(fake.ctx, guardConfig, packageLib);
   return fake;
@@ -76,7 +70,7 @@ const completed = (tool: string, result: Record<string, unknown>) => ({ tool, st
 };
 
 describe("registration", () => {
-  test.skipIf(!darwin)("registers the shell check and both tool hooks", async () => {
+  test("registers the shell check and both tool hooks", async () => {
     const { registered } = await started();
     expect([...registered.keys()].sort()).toEqual(["shell.create.before", "tool.execute.after", "tool.execute.before"]);
   });
@@ -84,7 +78,7 @@ describe("registration", () => {
   test("files-only announces the reduced boundary and registers no shell check", async () => {
     let fake!: ReturnType<typeof host>;
     const stderr = await captureStderr(async () => {
-      fake = await started({ ...portable, mode: "files-only" });
+      fake = await started({ ...config, mode: "files-only" });
     });
 
     expect(stderr).toMatch(/files-only/);
@@ -92,14 +86,10 @@ describe("registration", () => {
     await expect(fake.call(before("read", { path: ".env" }))).rejects.toThrow("blocked");
   });
 
-  test("shell+files refuses to start off macOS rather than pretending", async () => {
-    const original = process.platform;
-    Object.defineProperty(process, "platform", { value: "linux", configurable: true });
-    try {
-      await expect(setupV2(host(repo).ctx, config, packageLib)).rejects.toThrow(/needs macOS/);
-    } finally {
-      Object.defineProperty(process, "platform", { value: original, configurable: true });
-    }
+  test("shell+files refuses to start without a shell sandbox rather than pretending", async () => {
+    await expect(sandbox.during(NO_SANDBOX, () => setupV2(host(repo).ctx, config, packageLib))).rejects.toThrow(
+      /needs a shell sandbox/,
+    );
   });
 
   test("starts without a project directory, refusing what it cannot place", async () => {
@@ -108,7 +98,7 @@ describe("registration", () => {
     for (const directory of ["relative/dir", ""]) {
       let fake!: ReturnType<typeof host>;
       const stderr = await captureStderr(async () => {
-        fake = await started(portable, directory);
+        fake = await started(config, directory);
       });
       expect(stderr).toMatch(/did not provide an absolute project directory/);
 
@@ -133,22 +123,22 @@ describe("registration", () => {
   });
 
   test("resolves relative paths against the plugin's directory, not the process's", async () => {
-    const inRepo = await started(portable, repo);
-    const elsewhere = await started(portable, fixture);
+    const inRepo = await started(config, repo);
+    const elsewhere = await started(config, fixture);
 
     await expect(inRepo.call(before("read", { path: "private.txt" }))).rejects.toThrow("blocked");
     await expect(elsewhere.call(before("read", { path: "private.txt" }))).resolves.toBeDefined();
   });
 
   test("says that cleanup_temp needs a newer OpenCode when plugin tools cannot request permission", async () => {
-    const stderr = await captureStderr(() => started({ ...portable, cleanupRoot: path.join(fixture, "scratch") }));
+    const stderr = await captureStderr(() => started({ ...config, cleanupRoot: path.join(fixture, "scratch") }));
     expect(stderr).toMatch(/cleanup_temp needs OpenCode 2\.0\.29 or newer/);
 
-    expect(await captureStderr(() => started({ ...portable, cleanupRoot: null }))).not.toMatch(/cleanup_temp/);
+    expect(await captureStderr(() => started({ ...config, cleanupRoot: null }))).not.toMatch(/cleanup_temp/);
   });
 });
 
-describe.skipIf(!darwin)("cleanup_temp", () => {
+describe("cleanup_temp", () => {
   let root: string;
   const output = () => path.join(root, "job", "output");
 
@@ -264,7 +254,7 @@ describe.skipIf(!darwin)("cleanup_temp", () => {
   });
 });
 
-describe.skipIf(!darwin)("shell check", () => {
+describe("shell check", () => {
   const create = (shell: unknown) => ({ command: "echo hi", cwd: repo, timeout: 0, shell, env: {} });
 
   test("rejects a shell that is not this package's wrapper", async () => {
@@ -421,7 +411,7 @@ describe("a hook that runs after the guard", () => {
     expect(result.input).toEqual({ url: "https://example.org/" });
   });
 
-  test.skipIf(!darwin)("cannot replace the checked shell", async () => {
+  test("cannot replace the checked shell", async () => {
     const fake = await started();
     const wrapper = path.join(fixture, "package", "bin", "opencode-secret-guard");
     later(fake, "shell.create.before", (event) => {
@@ -433,7 +423,7 @@ describe("a hook that runs after the guard", () => {
     ).rejects.toThrow("must be");
   });
 
-  test.skipIf(!darwin)("leaves the shell environment writable, which V2 sets after the hooks", async () => {
+  test("leaves the shell environment writable, which V2 sets after the hooks", async () => {
     const { emit } = await started();
     const wrapper = path.join(fixture, "package", "bin", "opencode-secret-guard");
 
@@ -443,7 +433,7 @@ describe("a hook that runs after the guard", () => {
     expect(event.shell).toBe(wrapper);
   });
 
-  test.skipIf(!darwin)("keeps checking the shell when a second guard instance is loaded", async () => {
+  test("keeps checking the shell when a second guard instance is loaded", async () => {
     const fake = host(repo);
     await setupV2(fake.ctx, config, packageLib);
     await setupV2(fake.ctx, config, packageLib);
@@ -455,7 +445,7 @@ describe("a hook that runs after the guard", () => {
     }).toThrow("must be");
   });
 
-  test.skipIf(!darwin)("refuses a shell event another plugin locked, since the check could not hold", async () => {
+  test("refuses a shell event another plugin locked, since the check could not hold", async () => {
     const { emit } = await started();
     const wrapper = path.join(fixture, "package", "bin", "opencode-secret-guard");
 

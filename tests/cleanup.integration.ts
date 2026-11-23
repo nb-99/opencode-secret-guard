@@ -3,8 +3,12 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { spawnSync } from "node:child_process";
-import { cleanupProfile, prepareCleanup } from "../src/cleanup.ts";
+import { cleanupCommand, prepareCleanup } from "../src/cleanup.ts";
+import type { CleanupPlan } from "../src/cleanup.ts";
 import { loadConfig } from "../src/policy.ts";
+import type { GuardConfig } from "../src/policy.ts";
+import { hostSandbox } from "../src/sandbox.ts";
+import type { SandboxBackend } from "../src/sandbox.ts";
 import { host } from "./support.ts";
 
 const base = loadConfig(process.env.OPENCODE_SECRET_GUARD_CONFIG);
@@ -15,10 +19,21 @@ const { createV1Hooks } = await import(path.join(moduleDirectory, "v1.ts"));
 const { setupV2 } = await import(path.join(moduleDirectory, "v2.ts"));
 let fixture: string;
 let root: string;
+let backend: SandboxBackend;
 
 beforeAll(() => {
-  const probe = spawnSync("/usr/bin/sandbox-exec", ["-p", "(version 1)(allow default)", "/usr/bin/true"]);
-  if (probe.status !== 0) throw new Error("Cleanup integration requires an unsandboxed macOS terminal");
+  const host = hostSandbox();
+  if (!host.backend) throw new Error(`Cleanup integration needs a shell sandbox: ${host.reason}`);
+  backend = host.backend;
+  // A backend that is present may still refuse to start, for example inside
+  // another sandbox; every test below would then fail without saying why.
+  const empty = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "cleanup-probe-")));
+  try {
+    const probe = confined(cleanupCommand(base, prepareCleanup(empty, ["absent"]), backend), "/usr/bin/true", []);
+    if (probe.status !== 0) throw new Error(`Cleanup integration requires an unsandboxed terminal: ${probe.stderr}`);
+  } finally {
+    fs.rmSync(empty, { recursive: true, force: true });
+  }
 });
 beforeEach(() => {
   fixture = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "cleanup-kernel-")));
@@ -35,8 +50,11 @@ async function tool(cleanupRoot = root) {
   return hooks.tool.cleanup_temp;
 }
 const context = (ask = async (_input: any) => {}) => ({ abort: new AbortController().signal, ask });
-const sandbox = (profile: string, binary: string, args: string[]) =>
-  spawnSync("/usr/bin/sandbox-exec", ["-p", profile, binary, ...args], { encoding: "utf8" });
+/** Runs `binary` under a deletion command, as the cleanup tool runs `/bin/rm`. */
+function confined(command: string[], binary: string, args: string[]) {
+  return spawnSync(command[0]!, [...command.slice(1), binary, ...args], { encoding: "utf8" });
+}
+const deletion = (config: GuardConfig, plan: CleanupPlan) => cleanupCommand(config, plan, backend);
 
 /** The installed tool as OpenCode V2 registers it, with `assert` standing in for the permission rules. */
 async function v2Tool(assert: (input: any) => Promise<void>) {
@@ -141,9 +159,9 @@ test("a descendant-specific native edit denial rejects recursive cleanup", async
 });
 
 test("kernel preserves entries that appear after the approved inventory", () => {
-  const profile = cleanupProfile({ ...base, cleanupRoot: root }, prepareCleanup(root, ["job"]));
+  const command = deletion({ ...base, cleanupRoot: root }, prepareCleanup(root, ["job"]));
   fs.writeFileSync(path.join(root, "job/late"), "unapproved");
-  const result = sandbox(profile, "/bin/rm", ["-rf", "--", path.join(root, "job")]);
+  const result = confined(command, "/bin/rm", ["-rf", "--", path.join(root, "job")]);
   expect(result.status).not.toBe(0);
   expect(fs.readFileSync(path.join(root, "job/late"), "utf8")).toBe("unapproved");
 });
@@ -190,10 +208,10 @@ test("root replacement during approval is rejected", async () => {
 });
 
 test("kernel stops mixed operands and sibling-prefix deletion even with a broad base exemption", () => {
-  const profile = cleanupProfile({ ...base, cleanupRoot: root, exemptRoots: [fixture] }, prepareCleanup(root, ["job"]));
+  const command = deletion({ ...base, cleanupRoot: root, exemptRoots: [fixture] }, prepareCleanup(root, ["job"]));
   const sibling = root + "-backup";
   fs.writeFileSync(sibling, "keep sibling");
-  const result = sandbox(profile, "/bin/rm", ["-rf", "--", path.join(root, "job"), path.join(fixture, "sentinel"), sibling, root]);
+  const result = confined(command, "/bin/rm", ["-rf", "--", path.join(root, "job"), path.join(fixture, "sentinel"), sibling, root]);
   expect(result.status).not.toBe(0);
   expect(fs.readFileSync(sibling, "utf8")).toBe("keep sibling");
   expect(fs.readFileSync(path.join(fixture, "sentinel"), "utf8")).toBe("keep");
@@ -201,17 +219,17 @@ test("kernel stops mixed operands and sibling-prefix deletion even with a broad 
 });
 
 test("kernel stops an ancestor symlink swapped after target validation", () => {
-  const profile = cleanupProfile({ ...base, cleanupRoot: root }, prepareCleanup(root, ["job"]));
+  const command = deletion({ ...base, cleanupRoot: root }, prepareCleanup(root, ["job"]));
   fs.renameSync(path.join(root, "job"), path.join(fixture, "moved"));
   fs.symlinkSync(path.join(fixture, "moved"), path.join(root, "job"));
-  const result = sandbox(profile, "/bin/rm", ["-f", "--", path.join(root, "job/output")]);
+  const result = confined(command, "/bin/rm", ["-f", "--", path.join(root, "job/output")]);
   expect(result.status).not.toBe(0);
   expect(fs.readFileSync(path.join(fixture, "moved/output"), "utf8")).toBe("temporary");
 });
 
-test("cleanup profile cannot truncate or create files", () => {
-  const profile = cleanupProfile({ ...base, cleanupRoot: root }, prepareCleanup(root, ["job"]));
-  const result = sandbox(profile, "/bin/sh", ["-c", 'printf changed > "$1"; printf changed > "$2"',
+test("the deletion command cannot truncate or create files", () => {
+  const command = deletion({ ...base, cleanupRoot: root }, prepareCleanup(root, ["job"]));
+  const result = confined(command, "/bin/sh", ["-c", 'printf changed > "$1"; printf changed > "$2"',
     "test", path.join(root, "job/output"), path.join(root, "job/new")]);
   expect(result.status).not.toBe(0);
   expect(fs.readFileSync(path.join(root, "job/output"), "utf8")).toBe("temporary");

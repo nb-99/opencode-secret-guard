@@ -8,12 +8,13 @@ let
     cp -r ${../policy} "$out/policy"
     mkdir -p "$out/bin"
     ln -s ${package}/bin/path-lookup "$out/bin/path-lookup"
+    cp ${../bin/opencode-secret-guard} "$out/bin/opencode-secret-guard"
     ln -s ${package}/lib/node_modules/zod "$out/node_modules/zod"
   '';
   testPolicy = import ./test-policy.nix { inherit pkgs; };
 in
-# Kernel-level tests. sandbox-exec refuses to apply a profile inside an existing
-# sandbox, so this cannot be a check and must not run from a guarded shell.
+# Kernel-level tests. A sandbox cannot be applied inside an existing one, so
+# this cannot be a check and must not run from a guarded shell.
 pkgs.writeShellApplication {
   name = "test-secret-guard";
   runtimeInputs = [
@@ -22,23 +23,27 @@ pkgs.writeShellApplication {
     pkgs.ripgrep
   ];
   text = ''
-    # Probe first: the fixtures this suite writes (a .env, ignored trees) are
-    # exactly what an outer guard profile denies, so without this the run fails
-    # during fixture setup as an unexplained EPERM.
-    probe_directory="$(mktemp -d)"
-    trap 'rm -rf "$probe_directory"' EXIT
-    probe="$probe_directory/probe.sb"
-    printf '(version 1)\n(allow default)\n' > "$probe"
-    if ! /usr/bin/sandbox-exec -f "$probe" /usr/bin/true 2>/dev/null; then
-      echo "test-secret-guard: cannot apply a sandbox profile." >&2
-      echo "  Run this outside opencode's guarded shell, from a plain terminal." >&2
-      exit 2
-    fi
-
     REPO_ROOT="''${REPO_ROOT:-${testSource}}"
     export REPO_ROOT
     export OPENCODE_SECRET_GUARD_CONFIG="''${OPENCODE_SECRET_GUARD_CONFIG:-${testPolicy}}"
     export SECRET_GUARD_SHELL=${package}/bin/opencode-secret-guard
+
+    # Probe first: the fixtures this suite writes (a .env, ignored trees) are
+    # exactly what an outer guard sandbox denies, so without this the run fails
+    # during fixture setup as an unexplained EPERM.
+    probe_directory="$(mktemp -d)"
+    trap 'rm -rf "$probe_directory"' EXIT
+    if ! XDG_CACHE_HOME="$probe_directory/cache" bun "$REPO_ROOT/tests/gen-profile.ts" \
+      "$OPENCODE_SECRET_GUARD_CONFIG" "$probe_directory" "$probe_directory" - > "$probe_directory/probe.cmd"; then
+      echo "test-secret-guard: could not generate a sandbox command; the error above says why." >&2
+      exit 2
+    fi
+    mapfile -t sandbox < "$probe_directory/probe.cmd"
+    if ((''${#sandbox[@]} == 0)) || ! "''${sandbox[@]}" true 2>/dev/null; then
+      echo "test-secret-guard: cannot apply a sandbox." >&2
+      echo "  Run this outside opencode's guarded shell, from a plain terminal." >&2
+      exit 2
+    fi
 
     bun test "$REPO_ROOT"/tests/*.test.ts "$REPO_ROOT/tests/cleanup.integration.ts"
     bash "$REPO_ROOT/tests/sandbox.test.sh"

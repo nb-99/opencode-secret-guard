@@ -5,13 +5,11 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { findRepoRoot, gitignoreRules, ignoreCache } from "../src/gitignore.ts";
 import { createV1Hooks, filterSearchOutput as filterSearchResult } from "../src/v1.ts";
-import type { CommandAnalysis } from "../src/command-policy.ts";
-import { configPath, loadConfig, opencodeConfigDirectory } from "../src/policy.ts";
+import { configPath, loadConfig } from "../src/policy.ts";
 import type { GuardConfig } from "../src/policy.ts";
 import { classifyPath, classifyPaths } from "../src/predicate.ts";
-import { buildProfile } from "../src/profile.ts";
 import * as lookup from "../src/lookup.ts";
-import { encodeHint, expectedShell, failureHint, resolveForShell, resolveProfile, scrubbedEnvironment } from "../src/shell.ts";
+import { MODES, NO_SANDBOX, stubHostSandbox } from "./support.ts";
 
 const policyPath = process.env.OPENCODE_SECRET_GUARD_CONFIG;
 if (!policyPath) {
@@ -25,6 +23,7 @@ let repo: string;
 let config: GuardConfig;
 let restoreModes: () => void;
 let setMode: (mode: lookup.LookupMode) => void;
+const host = stubHostSandbox();
 
 /** Writes a file, creating parents. */
 function put(relative: string, contents = "x\n"): string {
@@ -348,34 +347,12 @@ describe("guard modes", () => {
     ).rejects.toThrow("blocked");
   });
 
-  test("files-only refuses to act as the configured shell", () => {
-    // The wrapper exists only to enforce the shell layer; running a command
-    // under no profile would be worse than refusing.
-    expect(() => resolveProfile("echo hi", { ...config, mode: "files-only" })).toThrow(
-      /must not be configured as opencode's shell/,
-    );
+  test("shell+files refuses to start without a shell sandbox rather than pretending", () => {
+    expect(() => host.during(NO_SANDBOX, () => v1(config))).toThrow(/needs a shell sandbox/);
   });
 
-  test("shell+files refuses to start off macOS rather than pretending", () => {
-    const original = process.platform;
-    Object.defineProperty(process, "platform", { value: "linux", configurable: true });
-    try {
-      expect(() => v1(config, path.join(repo, "package", "lib"))).toThrow(/needs macOS/);
-    } finally {
-      Object.defineProperty(process, "platform", { value: original, configurable: true });
-    }
-  });
-
-  test("files-only starts anywhere", () => {
-    const original = process.platform;
-    Object.defineProperty(process, "platform", { value: "linux", configurable: true });
-    try {
-      expect(() =>
-        v1({ ...config, mode: "files-only" }, path.join(repo, "package", "lib")),
-      ).not.toThrow();
-    } finally {
-      Object.defineProperty(process, "platform", { value: original, configurable: true });
-    }
+  test("files-only starts without a shell sandbox", () => {
+    expect(() => host.during(NO_SANDBOX, () => v1({ ...config, mode: "files-only" }))).not.toThrow();
   });
 });
 
@@ -662,394 +639,6 @@ describe("findRepoRoot", () => {
   });
 });
 
-describe("shell resolver protocol", () => {
-  const quiet = () => ({ ...config, secretEnvironment: [], secretEnvironmentPatterns: [] });
-
-  test("returns the profile path, then the hint, then one name to scrub per line", () => {
-    const payload: string = resolveForShell("echo hi", {
-      ...quiet(),
-      secretEnvironment: ["CONTEXT7_API_KEY", "HOMEASSISTANT_TOKEN"],
-    });
-    const lines = payload.split("\n");
-
-    expect(lines[0]).toMatch(/\.sb$/);
-    expect(fs.existsSync(lines[0])).toBe(true);
-    expect(lines[1]).toBe("");
-    expect(lines.slice(2)).toEqual(["CONTEXT7_API_KEY", "HOMEASSISTANT_TOKEN"]);
-  });
-
-  test("emits the profile path and an empty hint when nothing needs scrubbing", () => {
-    expect(resolveForShell("echo hi", quiet()).split("\n")).toEqual([
-      expect.stringMatching(/\.sb$/),
-      "",
-    ]);
-  });
-
-  test("a newline in a protected path cannot become a scrub entry", () => {
-    const target = path.join(opencodeConfigDirectory(), "plugins/a\nb");
-    const lines = resolveForShell(`touch '${target}'`, {
-      ...quiet(), secretEnvironment: ["TEST_TOKEN"],
-    }).split("\n");
-    expect(lines).toHaveLength(3);
-    expect(lines[1]).toContain("plugins/a b");
-    expect(lines.slice(2)).toEqual(["TEST_TOKEN"]);
-  });
-
-  test("explains a strict fallback on one line, naming the group that was lost", () => {
-    const lines = resolveForShell("kubectl get pods && cat ~/.kube/config", quiet()).split("\n");
-    expect(lines).toHaveLength(2);
-    expect(lines[1]).toMatch(/^\?secret-guard: if this failed on a permission error/);
-    expect(lines[1]).toContain("`kube`");
-    expect(lines[1]).toContain("`cat ~/.kube/config`");
-  });
-
-  test("stays silent about strict commands that never named a credential binary", () => {
-    expect(resolveForShell("cat README.md", quiet()).split("\n")[1]).toBe("");
-  });
-
-  test("refuses to plan a credential-printing command at all", () => {
-    // No profile would make `gh auth token` safe: its output is the secret.
-    expect(() => resolveForShell("gh auth token", quiet())).toThrow(/refusing to run `gh auth token`/);
-    expect(() => resolveForShell("echo $(aws eks get-token)", quiet())).toThrow(/aws eks get-token/);
-  });
-
-  test("the shipped default refuses the usual token printers and nothing routine", () => {
-    for (const command of ["gh auth token", "aws eks get-token", "kubectl config view --raw", "kubectl get secret x -o yaml", "security find-generic-password -w -s x"]) {
-      expect(() => resolveForShell(command, quiet())).toThrow(/refusing/);
-    }
-    for (const command of ["gh pr list", "aws sts get-caller-identity", "kubectl config view", "kubectl get secrets", "git status"]) {
-      expect(() => resolveForShell(command, quiet())).not.toThrow();
-    }
-  });
-
-  test("the wrapper's expected location is a sibling of this module", () => {
-    expect(expectedShell("/opt/secret-guard/lib")).toBe(
-      "/opt/secret-guard/bin/opencode-secret-guard",
-    );
-  });
-});
-
-describe("scrubbedEnvironment", () => {
-  const environment = {
-    PATH: "/usr/bin",
-    SSH_AUTH_SOCK: "/tmp/agent.sock",
-    GITHUB_TOKEN: "t",
-    AWS_SECRET_ACCESS_KEY: "k",
-    AWS_ACCESS_KEY_ID: "i",
-    ZPLUG_SUDO_PASSWORD: "p",
-    MY_API_KEY: "a",
-    TOKENIZER: "not a token",
-    EXPLICIT: "named in the policy",
-  };
-  const withDefaults = () => ({ ...config, secretEnvironment: ["EXPLICIT"] });
-
-  test("names every inherited variable matching a pattern plus the explicit list", () => {
-    expect(scrubbedEnvironment(withDefaults(), null, environment)).toEqual([
-      "AWS_ACCESS_KEY_ID",
-      "AWS_SECRET_ACCESS_KEY",
-      "EXPLICIT",
-      "GITHUB_TOKEN",
-      "MY_API_KEY",
-      "ZPLUG_SUDO_PASSWORD",
-    ]);
-  });
-
-  test("leaves paths and near-misses alone", () => {
-    const scrubbed = scrubbedEnvironment(withDefaults(), null, environment);
-    // An agent socket path is not a secret, and losing it breaks every git push.
-    expect(scrubbed).not.toContain("SSH_AUTH_SOCK");
-    expect(scrubbed).not.toContain("TOKENIZER");
-    expect(scrubbed).not.toContain("PATH");
-  });
-
-  test("never scrubs the guard's own variables, whose names merely contain SECRET", () => {
-    const own = { SECRET_GUARD_BUN: "/bin/bun", OPENCODE_SECRET_GUARD_CONFIG: "/p.json", X_SECRET: "s" };
-    expect(scrubbedEnvironment(withDefaults(), null, own)).toEqual(["EXPLICIT", "X_SECRET"]);
-  });
-
-  test("a group keeps what its binaries need and nothing else", () => {
-    const aws = scrubbedEnvironment(withDefaults(), "aws", environment);
-    expect(aws).not.toContain("AWS_SECRET_ACCESS_KEY");
-    expect(aws).not.toContain("AWS_ACCESS_KEY_ID");
-    expect(aws).toContain("GITHUB_TOKEN");
-
-    const ssh = scrubbedEnvironment(withDefaults(), "ssh", environment);
-    expect(ssh).not.toContain("GITHUB_TOKEN");
-    expect(ssh).toContain("AWS_SECRET_ACCESS_KEY");
-  });
-
-  test("the explicit list is scrubbed even where a group would keep it", () => {
-    const named = { ...config, secretEnvironment: ["GITHUB_TOKEN"], secretEnvironmentPatterns: [] };
-    // allowEnvironment only re-admits pattern hits: an explicitly named
-    // variable is the user saying "never", and the group must not override it.
-    expect(scrubbedEnvironment(named, "ssh", environment)).toEqual(["GITHUB_TOKEN"]);
-  });
-});
-
-describe("failureHint", () => {
-  const tamper = {
-    literals: ["/Users/test/.config/opencode/opencode.json", "/Users/test/.zshenv"],
-    subpaths: ["/Users/test/.config/opencode/plugins", "/opt/homebrew/bin"],
-  };
-  const quiet: CommandAnalysis = { group: "ssh", reason: null, candidates: ["ssh"], refusal: null };
-  const full = (command: string, scrub: string[] = [], analysis: CommandAnalysis = quiet) =>
-    failureHint({ analysis, command, tamper, scrub, home: "/Users/test", cwd: "/Users/test/repo" });
-  const hint = (command: string, scrub: string[] = [], analysis: CommandAnalysis = quiet) =>
-    full(command, scrub, analysis).text;
-
-  test("says nothing about an ordinary failure", () => {
-    expect(hint("git push origin HEAD")).toBe("");
-    expect(hint("cat README.md")).toBe("");
-  });
-
-  test("the strict reason wins, because it explains the denial the command hit first", () => {
-    const strict: CommandAnalysis = {
-      group: null,
-      reason: "`npm test` belongs to no credential group",
-      candidates: ["ssh"],
-      refusal: null,
-    };
-    expect(hint("git status && npm test", ["GITHUB_TOKEN"], strict)).toContain("strict profile");
-  });
-
-  test("a possible setuid exec denial outranks the strict reason", () => {
-    const strict: CommandAnalysis = {
-      group: null,
-      reason: "`sudo` belongs to no credential group",
-      candidates: ["ssh"],
-      refusal: null,
-    };
-    expect(hint("ps aux | rg node")).toContain("system `ps`, that binary is setuid");
-    expect(hint("ps aux")).toContain("pgrep");
-    expect(hint("git log && sudo tee /etc/hosts", [], strict)).toContain("system `sudo`, that binary is setuid");
-    expect(hint("git log --format=%h")).toBe("");
-    expect(hint("ping -c 1 unreachable.invalid")).toBe("");
-    expect(hint("false && ps aux")).toContain("if this failed while executing");
-  });
-
-  test("only the setuid hint survives a 127 exit, without asserting a cause", () => {
-    // zsh reports both a missing binary and a binary it may not execute as
-    // 127, so the marker, not the status, decides which line the wrapper
-    // prints. `!` survives it; `?` does not.
-    expect(full("ps aux").showOn127).toBe(true);
-    expect(encodeHint(full("ps aux")).startsWith("!")).toBe(true);
-    expect(full("brew install jq").showOn127).toBe(false);
-    expect(encodeHint(full("brew install jq")).startsWith("?")).toBe(true);
-    expect(encodeHint(full("git push origin HEAD"))).toBe("");
-  });
-
-  test("every hint is worded as a condition, not a cause", () => {
-    const strict: CommandAnalysis = {
-      group: null,
-      reason: "`make` belongs to no credential group",
-      candidates: ["ssh"],
-      refusal: null,
-    };
-    // The wrapper sees an exit status, not what failed.
-    expect(hint("ps aux")).toContain("if this failed");
-    expect(hint("git status && make", [], strict)).toContain("if this failed");
-    expect(hint("printf x > ~/.zshenv")).toContain("if this failed");
-    expect(hint("brew install jq")).toContain("if this failed");
-    expect(hint("echo $GH_TOKEN", ["GH_TOKEN"])).toContain("if this failed");
-  });
-
-  test("names the protected path a write was denied on, however it was spelled", () => {
-    expect(hint("printf x > ~/.zshenv")).toContain("~/.zshenv");
-    // Taken as written, because a protected directory's entry may be a symlink
-    // whose destination is not protected — the guard denies at the link.
-    expect(hint("echo {} > /opt/homebrew/bin/git")).toContain("/opt/homebrew/bin/git");
-    // Relative to the working directory, and through a protected parent.
-    expect(hint("cp evil.ts ../.config/opencode/plugins/evil.ts")).toContain("plugins/evil.ts");
-    expect(hint("printf x > ~/notes.md")).toBe("");
-  });
-
-  test("names a protected path reached through a symlinked parent", () => {
-    // The other direction: the word itself is unremarkable and only resolving
-    // it lands inside a target. Both spellings have to be tested.
-    const root = fs.mkdtempSync(path.join(os.tmpdir(), "guard-hint-"));
-    const plugins = path.join(root, "config", "opencode", "plugins");
-    fs.mkdirSync(plugins, { recursive: true });
-    const link = path.join(root, "shortcut");
-    fs.symlinkSync(plugins, link);
-    const targets = { literals: [], subpaths: [fs.realpathSync(plugins)] };
-
-    const text = failureHint({
-      analysis: quiet,
-      command: `cp evil.ts ${link}/evil.ts`,
-      tamper: targets,
-      scrub: [],
-      home: root,
-      cwd: root,
-    }).text;
-
-    expect(text).toContain("shortcut/evil.ts");
-    fs.rmSync(root, { recursive: true, force: true });
-  });
-
-  test("names an installer that writes a PATH directory it never spells out", () => {
-    expect(hint("brew install jq")).toContain("`brew install`");
-    expect(hint("npm i -g @openai/codex")).toContain("`npm -g`");
-    expect(hint("cargo install ripgrep")).toContain("`cargo install`");
-    expect(hint("npm ci")).toBe("");
-    expect(hint("go test ./...")).toBe("");
-  });
-
-  test("names a scrubbed variable the command asked for, and stays quiet otherwise", () => {
-    expect(hint('curl -H "Authorization: Bearer $GH_TOKEN" https://api', ["GH_TOKEN"]))
-      .toContain("GH_TOKEN");
-    expect(hint("echo ${GH_TOKEN}", ["GH_TOKEN"])).toContain("GH_TOKEN");
-    expect(hint("curl https://api", ["GH_TOKEN"])).toBe("");
-  });
-
-  test("is a single line, so the wrapper's payload stays unambiguous", () => {
-    for (const command of ["printf x > ~/.zshenv", "brew install jq", "echo $GH_TOKEN"]) {
-      expect(hint(command, ["GH_TOKEN"])).not.toContain("\n");
-    }
-  });
-});
-
-describe("buildProfile", () => {
-  const tamper = {
-    literals: ["/Users/test/.config/opencode/opencode.json"],
-    subpaths: ["/Users/test/.config/opencode/plugins", "/opt/homebrew/bin"],
-  };
-  const profile = (group: string | null) =>
-    buildProfile({
-      config,
-      home: "/Users/test",
-      group,
-      gitignore: {
-        repoRoot: repo,
-        subpaths: [path.join(repo, "private-notes")],
-        literals: [path.join(repo, "local.conf")],
-        directories: [path.join(repo, "private-notes/nested")],
-        helmSecretTemplates: [path.join(repo, "templates/postgresql/secret.yaml")],
-      },
-      tamper,
-    });
-
-  test("starts permissive and denies selectively", () => {
-    const text = profile(null);
-    expect(text.startsWith("(version 1)\n(allow default)")).toBe(true);
-    expect(text).toContain('(deny file-read-data file-write* (regex #"/\\.env$"');
-  });
-
-  test("denies data reads but not metadata, so ls keeps working", () => {
-    expect(profile(null)).not.toContain("(deny file-read* ");
-  });
-
-  test("denies gitignored paths for reads only", () => {
-    const text = profile(null);
-    const line = text.split("\n").find((l) => l.startsWith("(deny file-read-data (regex #\"^"));
-    expect(line).toBeDefined();
-    expect(line).not.toContain("file-write*");
-  });
-
-  test("re-allows artefacts after gitignore and reapplies secret patterns", () => {
-    const text = profile(null);
-    const gitignore = text.indexOf(";; 1. .gitignore");
-    const artefacts = text.indexOf("artefact allowlist");
-    const secrets = text.lastIndexOf("secret patterns");
-    expect(gitignore).toBeGreaterThan(-1);
-    expect(artefacts).toBeGreaterThan(gitignore);
-    expect(secrets).toBeGreaterThan(artefacts);
-    expect(text).toContain("(allow file-read-data (regex");
-    expect(text).toContain(`^${repo.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}/`);
-  });
-
-  test("omits the relaxation block under the strict profile", () => {
-    expect(profile(null)).not.toContain("relaxation");
-  });
-
-  test("re-allows sub-directories of ignored trees so readdir keeps working", () => {
-    const text = profile(null);
-    const line = text
-      .split("\n")
-      .find((l: string) => l.startsWith("(allow file-read-data (literal"));
-    expect(line).toContain(path.join(repo, "private-notes/nested"));
-  });
-
-  test("orders the directory allow after the ignore deny and before secrets", () => {
-    const text = profile(null);
-    const ignore = text.indexOf(";; 1. .gitignore");
-    const directories = text.indexOf("stay enumerable");
-    const secrets = text.lastIndexOf("secret patterns");
-    expect(directories).toBeGreaterThan(ignore);
-    expect(secrets).toBeGreaterThan(directories);
-  });
-
-  test("emits the relaxation block for a group", () => {
-    const text = profile("kube");
-    expect(text).toContain('relaxation for the "kube" group');
-    expect(text).toContain("/Users/test/.kube");
-  });
-
-  test("allows Git to access signing keys", () => {
-    expect(profile("ssh")).toContain("/Users/test/.gnupg");
-  });
-
-  test("orders exceptions after denies so the last rule wins", () => {
-    const text = profile(null);
-    expect(text.indexOf("(deny file-read-data file-write* (regex")).toBeLessThan(
-      text.indexOf("(allow file-read-data file-write* (regex"),
-    );
-  });
-
-  test("allows only enumerated Helm templates after the secret deny", () => {
-    const text = profile(null);
-    const allow = text.indexOf("tracked Helm secret templates");
-    expect(allow).toBeGreaterThan(text.indexOf(";; 4. secret patterns"));
-    expect(text.slice(allow)).toContain(`(literal "${path.join(repo, "templates/postgresql/secret.yaml")}")`);
-    expect(text.slice(allow)).not.toContain(`(literal "${path.join(repo, "templates/ignored/secret.yaml")}")`);
-    expect(text.slice(allow)).toContain('#"/secrets/"');
-  });
-
-  test("orders exempt roots last", () => {
-    const text = profile(null);
-    const exempt = text.lastIndexOf("fully exempt");
-    expect(exempt).toBeGreaterThan(text.indexOf("exceptions"));
-    expect(text.slice(exempt)).toContain(path.join(repo, "vault/memory"));
-  });
-
-  test("prevents commands from replacing cached profiles", () => {
-    expect(profile(null)).toContain("generated guard profiles are never writable");
-    expect(profile(null)).toContain("(deny file-write* (subpath");
-  });
-
-  test("makes directory nodes carrying a protected name unrenameable", () => {
-    // `/\.kube/` never matches `~/.kube` itself, so the node needs its own rule,
-    // emitted before the relaxation so the kube group may still rename it.
-    const text = profile(null);
-    const nodes = text.indexOf(";; 5.");
-    expect(nodes).toBeGreaterThan(text.indexOf(";; 4. secret"));
-    expect(nodes).toBeLessThan(text.indexOf(";; 7. exceptions"));
-    const line = text.split("\n")[text.split("\n").findIndex((l) => l.startsWith(";; 5.")) + 1]!;
-    expect(line.startsWith("(deny file-write* ")).toBe(true);
-    expect(line).toContain('#"/\\.kube$"');
-    expect(line).toContain('#"/secrets$"');
-    expect(line).not.toContain("file-read-data");
-  });
-
-  test("protects the ancestors a credential path leads through", () => {
-    // `mv ~/.config ~/c2` would leave ~/.config/gcloud under an unmatched name.
-    const text = profile(null);
-    expect(text).toContain('(literal "/Users/test/.config")');
-    expect(text).toContain('(literal "/Users/test/.config/gcloud")');
-    expect(text).not.toContain('(literal "/Users/test")');
-  });
-
-  test("denies writes to what OpenCode loads at startup, after every exemption", () => {
-    const text = profile(null);
-    const tamperStep = text.indexOf(";; 11.");
-    expect(tamperStep).toBeGreaterThan(text.lastIndexOf("fully exempt"));
-    expect(tamperStep).toBeGreaterThan(text.indexOf(";; 10."));
-    const block = text.slice(tamperStep);
-    expect(block).toContain('(deny file-write* (literal "/Users/test/.config/opencode/opencode.json")');
-    expect(block).toContain('(subpath "/opt/homebrew/bin")');
-    expect(block).not.toContain("file-read-data");
-  });
-});
-
 describe("filterSearchOutput", () => {
   test("keeps every match attached to its file when ripgrep retains trailing newlines", () => {
     // V1 1.18.33 interpolates rg --json's lines.text, including its final newline.
@@ -1281,75 +870,6 @@ describe("plugin hooks", () => {
     ).rejects.toThrow("must be");
   });
 
-  test("guard a patch tool against every path its headers name", async () => {
-    const hooks = v1(config);
-    const patch = (header: string) => ({ patchText: `*** Begin Patch\n${header}\n*** End Patch` });
-
-    for (const header of ["*** Update File: .env", "*** Add File: a\u2028/../.env", "*** Update File: x\n*** Move to: id_rsa"]) {
-      await expect(hooks["tool.execute.before"]({ tool: "apply_patch" }, { args: patch(header) })).rejects.toThrow(/blocked/);
-    }
-    await expect(
-      hooks["tool.execute.before"]({ tool: "apply_patch" }, { args: patch("*** Update File: README.md") }),
-    ).resolves.toBeUndefined();
-  });
-
-  test("resolve a relative file path against the project directory", async () => {
-    const hooks = v1(config);
-
-    await expect(hooks["tool.execute.before"]({ tool: "read" }, { args: { filePath: "local.conf" } })).rejects.toThrow(
-      /blocked/,
-    );
-    await expect(
-      createV1Hooks(config, path.join(repo, "package", "lib"), os.tmpdir())["tool.execute.before"](
-        { tool: "read" },
-        { args: { filePath: "local.conf" } },
-      ),
-    ).resolves.toBeUndefined();
-  });
-
-  test("filter a glob against the project directory", async () => {
-    const hooks = v1(config);
-    const output = { output: [path.join(repo, "local.conf"), path.join(repo, "README.md")].join("\n"), metadata: { count: 2 } };
-
-    await hooks["tool.execute.after"]({ tool: "glob", args: { pattern: "*" } }, output);
-
-    expect(output.output).toBe(path.join(repo, "README.md"));
-    expect(output.metadata).toEqual({ count: 1, truncated: false });
-  });
-
-  test("filter a grep whose first group follows the summary line", async () => {
-    const hooks = v1(config);
-    const output = { output: ["Found 2 matches", ".env:", "  Line 1: TOKEN=live", "", "README.md:", "  Line 1: public"].join("\n"), metadata: { matches: 2 } };
-
-    await hooks["tool.execute.after"]({ tool: "grep", args: { pattern: "T" } }, output);
-
-    expect(output.output).not.toContain("TOKEN=live");
-    expect(output.output).toContain("README.md");
-    expect(output.metadata).toEqual({ matches: 1, truncated: false });
-  });
-
-  test("uses the executed search arguments from the after hook", async () => {
-    const hooks = v1(config);
-    const first = { output: "note.md" };
-    const second = { output: "note.md" };
-
-    await hooks["tool.execute.before"]({ tool: "glob" }, { args: { pattern: "*", path: "." } });
-    await hooks["tool.execute.after"]({ tool: "glob", args: { path: "private-notes" } }, first);
-    await hooks["tool.execute.after"]({ tool: "glob", args: { path: "." } }, second);
-
-    expect(first.output).toBe("No files found");
-    expect(second.output).toBe("note.md");
-  });
-
-  test("filter a glob for a symlink to a secret", async () => {
-    const hooks = v1(config);
-    const output = { output: ["link-to-env", "README.md"].join("\n") };
-
-    await hooks["tool.execute.after"]({ tool: "glob", args: { pattern: "*" } }, output);
-
-    expect(output.output).toBe("README.md");
-  });
-
   test("stop a command when the wrapper has gone since the shell was validated", async () => {
     const packageRoot = path.join(repo, "vanishing-package");
     const wrapper = path.join(packageRoot, "bin", "opencode-secret-guard");
@@ -1364,9 +884,86 @@ describe("plugin hooks", () => {
     fs.rmSync(wrapper);
     await expect(run()).rejects.toThrow(/does not exist/);
   });
+});
+
+// The file-tool layer is the same in both modes; only the shell layer differs.
+describe.each(MODES)("plugin file-tool hooks in %s mode", (mode) => {
+  let modeConfig: GuardConfig;
+  beforeAll(() => {
+    modeConfig = { ...config, mode };
+  });
+
+  test("guard a patch tool against every path its headers name", async () => {
+    const hooks = v1(modeConfig);
+    const patch = (header: string) => ({ patchText: `*** Begin Patch\n${header}\n*** End Patch` });
+
+    for (const header of ["*** Update File: .env", "*** Add File: a\u2028/../.env", "*** Update File: x\n*** Move to: id_rsa"]) {
+      await expect(hooks["tool.execute.before"]({ tool: "apply_patch" }, { args: patch(header) })).rejects.toThrow(/blocked/);
+    }
+    await expect(
+      hooks["tool.execute.before"]({ tool: "apply_patch" }, { args: patch("*** Update File: README.md") }),
+    ).resolves.toBeUndefined();
+  });
+
+  test("resolve a relative file path against the project directory", async () => {
+    const hooks = v1(modeConfig);
+
+    await expect(hooks["tool.execute.before"]({ tool: "read" }, { args: { filePath: "local.conf" } })).rejects.toThrow(
+      /blocked/,
+    );
+    await expect(
+      createV1Hooks(modeConfig, path.join(repo, "package", "lib"), os.tmpdir())["tool.execute.before"](
+        { tool: "read" },
+        { args: { filePath: "local.conf" } },
+      ),
+    ).resolves.toBeUndefined();
+  });
+
+  test("filter a glob against the project directory", async () => {
+    const hooks = v1(modeConfig);
+    const output = { output: [path.join(repo, "local.conf"), path.join(repo, "README.md")].join("\n"), metadata: { count: 2 } };
+
+    await hooks["tool.execute.after"]({ tool: "glob", args: { pattern: "*" } }, output);
+
+    expect(output.output).toBe(path.join(repo, "README.md"));
+    expect(output.metadata).toEqual({ count: 1, truncated: false });
+  });
+
+  test("filter a grep whose first group follows the summary line", async () => {
+    const hooks = v1(modeConfig);
+    const output = { output: ["Found 2 matches", ".env:", "  Line 1: TOKEN=live", "", "README.md:", "  Line 1: public"].join("\n"), metadata: { matches: 2 } };
+
+    await hooks["tool.execute.after"]({ tool: "grep", args: { pattern: "T" } }, output);
+
+    expect(output.output).not.toContain("TOKEN=live");
+    expect(output.output).toContain("README.md");
+    expect(output.metadata).toEqual({ matches: 1, truncated: false });
+  });
+
+  test("uses the executed search arguments from the after hook", async () => {
+    const hooks = v1(modeConfig);
+    const first = { output: "note.md" };
+    const second = { output: "note.md" };
+
+    await hooks["tool.execute.before"]({ tool: "glob" }, { args: { pattern: "*", path: "." } });
+    await hooks["tool.execute.after"]({ tool: "glob", args: { path: "private-notes" } }, first);
+    await hooks["tool.execute.after"]({ tool: "glob", args: { path: "." } }, second);
+
+    expect(first.output).toBe("No files found");
+    expect(second.output).toBe("note.md");
+  });
+
+  test("filter a glob for a symlink to a secret", async () => {
+    const hooks = v1(modeConfig);
+    const output = { output: ["link-to-env", "README.md"].join("\n") };
+
+    await hooks["tool.execute.after"]({ tool: "glob", args: { pattern: "*" } }, output);
+
+    expect(output.output).toBe("README.md");
+  });
 
   test("start without a project directory, refusing relative paths and searches", async () => {
-    const hooks = createV1Hooks(config, path.join(repo, "package", "lib"), undefined);
+    const hooks = createV1Hooks(modeConfig, path.join(repo, "package", "lib"), undefined);
 
     await expect(hooks["tool.execute.before"]({ tool: "read" }, { args: { filePath: "README.md" } })).rejects.toThrow(
       /no project directory/,
@@ -1380,7 +977,7 @@ describe("plugin hooks", () => {
   });
 
   test("withholds malformed search results and arguments", async () => {
-    const hooks = v1(config);
+    const hooks = v1(modeConfig);
     for (const [tool, args, text] of [
       ["glob", undefined, "PRIVATE"],
       ["glob", [], "PRIVATE"],
@@ -1396,7 +993,7 @@ describe("plugin hooks", () => {
   });
 
   test("filters search output against the requested path", async () => {
-    const hooks = v1(config);
+    const hooks = v1(modeConfig);
     const output = {
       output: ["Found 2 matches", ".env:", "  Line 1: TOKEN=live", "", "README.md:", "  Line 1: public"].join(
         "\n",

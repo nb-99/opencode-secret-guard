@@ -6,8 +6,9 @@ import { z } from "zod";
 import { findRepoRoot, gitignoreRules } from "./gitignore.ts";
 import { isInside } from "./paths.ts";
 import type { GuardConfig } from "./policy.ts";
-import { buildProfile, sbplString } from "./profile.ts";
-import { SANDBOX_EXEC, scrubbedEnvironment, validatePlatform } from "./shell.ts";
+import type { SandboxBackend } from "./sandbox.ts";
+import { selectBackend } from "./sandbox.ts";
+import { scrubbedEnvironment } from "./shell.ts";
 import { tamperTargets } from "./tamper.ts";
 
 const argsSchema = z.object({
@@ -17,7 +18,6 @@ const { $schema: _, ...inputJsonSchema } = z.toJSONSchema(argsSchema);
 /** The arguments as JSON Schema, which V2 tool definitions take. */
 export const CLEANUP_INPUT_SCHEMA: Readonly<Record<string, unknown>> = inputJsonSchema;
 const MAX_ENTRIES = 4096;
-const MAX_PROFILE_BYTES = 128 * 1024;
 
 export type CleanupContext = {
   abort: AbortSignal;
@@ -134,39 +134,34 @@ export function prepareCleanup(root: string, paths: string[]): CleanupPlan {
   };
 }
 
-export function cleanupProfile(config: GuardConfig, plan: CleanupPlan): string {
+/** The sandbox command that may delete exactly the plan's entries; `/bin/rm` and its operands follow it. */
+export function cleanupCommand(config: GuardConfig, plan: CleanupPlan, backend: SandboxBackend): string[] {
   const repoRoot = findRepoRoot(plan.root);
-  const profile = buildProfile({
+  const home = os.homedir();
+  return backend.deletionCommand({
     config,
-    home: os.homedir(),
-    group: null,
+    home,
     gitignore: repoRoot
       ? gitignoreRules(config.tools.git, repoRoot, config.artifactAllowlist)
       : { repoRoot: null, subpaths: [], literals: [], directories: [], helmSecretTemplates: [] },
     tamper: tamperTargets({
       repoRoot,
       pathEnvironment: process.env.PATH,
-      home: os.homedir(),
+      home,
       writeProtectedRoots: config.writeProtectedRoots,
     }),
+    entries: plan.entries,
+    root: plan.root,
   });
-  const targets = plan.entries.map((target) => `(literal ${sbplString(target)})`).join(" ");
-  const confined = profile +
-    "\n;; Cleanup only narrows the base policy; secrets and the cache remain protected.\n" +
-    (targets ? `(deny file-write* (require-not (require-any ${targets})))\n` : "(deny file-write*)\n") +
-    `(deny file-write* (literal ${sbplString(plan.root)}))\n` +
-    "(deny file-write-data file-write-create)\n";
-  if (Buffer.byteLength(confined) > MAX_PROFILE_BYTES) fail("cleanup profile is too large; select a smaller subtree");
-  return confined;
 }
 
-function runCleanup(profile: string, targets: string[], config: GuardConfig, signal: AbortSignal): Promise<void> {
+function runCleanup(sandbox: string[], targets: string[], config: GuardConfig, signal: AbortSignal): Promise<void> {
   signal.throwIfAborted();
   const env = { ...process.env };
   for (const name of scrubbedEnvironment(config, null, env)) delete env[name];
 
   return new Promise((resolve, reject) => {
-    const child = spawn(SANDBOX_EXEC, ["-p", profile, "/bin/rm", "-rf", "--", ...targets], {
+    const child = spawn(sandbox[0]!, [...sandbox.slice(1), "/bin/rm", "-rf", "--", ...targets], {
       env,
       signal,
       stdio: ["ignore", "ignore", "pipe"],
@@ -198,11 +193,11 @@ export function createCleanupTool(config: GuardConfig, shellValidated: () => boo
       const { paths } = argsSchema.parse(input);
       if (!shellValidated()) fail("the configured guard shell has not been validated");
       if (config.mode !== "shell+files" || !config.cleanupRoot) fail("guarded cleanup is disabled");
-      validatePlatform(config);
+      const backend = selectBackend(config)!;
       context.abort.throwIfAborted();
 
       const plan = prepareCleanup(config.cleanupRoot, paths);
-      const profile = cleanupProfile(config, plan);
+      const sandbox = cleanupCommand(config, plan, backend);
       const preview = plan.entries.length > 0
         ? plan.entries.map((entry) => `-DELETE ${path.join(config.cleanupRoot!, path.relative(plan.root, entry))}`)
         : ["-No existing targets; no files will be deleted."];
@@ -228,7 +223,7 @@ export function createCleanupTool(config: GuardConfig, shellValidated: () => boo
       ) {
         fail("cleanup targets changed during approval; retry with the current paths");
       }
-      if (plan.entries.length > 0) await runCleanup(profile, plan.targets, config, context.abort);
+      if (plan.entries.length > 0) await runCleanup(sandbox, plan.targets, config, context.abort);
       return `Cleanup completed for ${paths.length} requested temporary path(s), including any already absent.`;
     },
   };

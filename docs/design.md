@@ -25,13 +25,13 @@ Roots may be written with a leading `~`, expanded against the real home.
 `shell+files`, so a policy written before the field existed keeps its full
 boundary rather than silently weakening.
 
-| Mode                    | Bash tool       | File tools | Requires                  |
-| ----------------------- | --------------- | ---------- | ------------------------- |
-| `shell+files` (default) | kernel-enforced | predicate  | macOS with `sandbox-exec` |
-| `files-only`            | **unguarded**   | predicate  | anything                  |
+| Mode                    | Bash tool       | File tools | Requires                     |
+| ----------------------- | --------------- | ---------- | ---------------------------- |
+| `shell+files` (default) | kernel-enforced | predicate  | a shell sandbox backend      |
+| `files-only`            | **unguarded**   | predicate  | anything                     |
 
 `files-only` exists so the portable half of the guard is usable on hosts that
-have no `sandbox-exec`. It is genuinely weaker: any command can read any secret.
+have no shell sandbox backend. It is genuinely weaker: any command can read any secret.
 It therefore has to be asked for explicitly, it prints a warning at startup, and
 the shell wrapper refuses to run at all under it — a wrapper that executed
 commands without a profile would be worse than no wrapper.
@@ -54,11 +54,33 @@ inspection is defeated by shell expansion.
 
 OpenCode uses the packaged `opencode-secret-guard` executable as its configured
 shell. OpenCode passes it the command produced by earlier hooks as
-`-c <command>`; the executable then runs
+`-c <command>`; the executable runs it under the sandbox command of the host's
+backend. On macOS that is
 
 ```sh
 /usr/bin/sandbox-exec -f <profile.sb> /bin/zsh -c '<command>'
 ```
+
+### Sandbox backends
+
+A backend turns the guard's policy into something the host's kernel enforces.
+`lib/sandbox.ts` defines the boundary: a backend has a `name`, says whether it
+`blocksSetuid`, reports through `probe()` whether this host can run it, and
+returns the command words a shell command (`shellCommand`) or a cleanup
+deletion (`deletionCommand`) runs under. The guard picks the first backend
+whose probe succeeds. A policy does not name one.
+
+| Backend        | Module                 | Host  | Mechanism                     |
+| -------------- | ---------------------- | ----- | ----------------------------- |
+| `sandbox-exec` | `lib/sandbox-exec.ts`  | macOS | an SBPL profile, `-f` or `-p` |
+
+A backend must run the command string under `zsh -c`: the command analysis
+and the tamper rules for zsh's startup files assume zsh. Beyond its module and
+its entry in the backend list, a Linux backend also has to change what still
+assumes macOS: the Home Manager module's assertion for `shell+files`, the
+flake's `integration` app and the CI kernel step, which are offered on macOS
+only, and the fixed `/bin/zsh`, `/bin/rm` and `/usr/bin/true` paths, which
+NixOS does not have.
 
 The wrapper and the plugin ship as one package:
 
@@ -68,7 +90,8 @@ opencode-secret-guard/
 ├── lib/index.ts                          # plugin entry point: { id, setup, server }
 ├── lib/v1.ts, lib/v2.ts                  # host adapters
 ├── lib/guard.ts                          # version-independent tool-call policy
-├── lib/cli.ts                            # profile resolver the shell calls
+├── lib/cli.ts                            # resolver the shell calls
+├── lib/sandbox.ts, lib/sandbox-exec.ts   # backend boundary, macOS backend
 └── share/opencode-secret-guard/default-policy.json
 ```
 
@@ -92,10 +115,13 @@ Git's normal exit statuses, 0 for ignored and 1 for not ignored. It rejects
 other statuses without caching a verdict, so a Git failure cannot become an
 allow decision.
 
-One resolver invocation returns the profile path on its first line, a hint on
-the second — prefixed with `!` or `?` for whether it survives a 127 exit — and
-the names to scrub on the following ones, which
-`/usr/bin/env -u …` then removes. The scrub list is the policy's
+One resolver invocation returns the number of words in the sandbox command on
+its first line, those words one per line, then a hint — prefixed with `!` or
+`?` for whether it survives a 127 exit — and the names to scrub on the
+following lines, which `/usr/bin/env -u …` then removes. The resolver refuses
+a word or name the protocol could split, and at most 99 words. The wrapper
+checks the word count and that the first word is an absolute path to an
+executable without `=`, which `env` would take as an assignment. The scrub list is the policy's
 `secretEnvironment` plus every inherited variable whose name matches
 `secretEnvironmentPatterns` (`*_TOKEN`, `*_SECRET`, `*_PASSWORD`, …), minus
 what the resolved group's `allowEnvironment` re-admits — `aws` keeps `AWS_*`,
@@ -115,8 +141,8 @@ permitted` from inside whatever attempted it. Unexplained, an agent retries the
 same shape. When the command exits non-zero the wrapper prints one line, if the
 guard is a plausible cause, in this order:
 
-1. a possible invocation of a macOS setuid binary, with what to use instead
-   if executing that binary failed;
+1. a possible invocation of a setuid binary, with what to use instead if
+   executing that binary failed, when the backend refuses setuid binaries;
 2. the segment that cost the relaxation, why (a path-opening filter, a foreign
    binary, mixed groups, an environment assignment, substitution), and that
    splitting the command is the fix;
@@ -157,8 +183,9 @@ uniformly. The generated shell and profile are exercised end to end by
 `tests/sandbox.test.sh`.
 
 The shell receives whatever command `rtk.ts` has produced. It **fails closed**:
-a missing `sandbox-exec`, an invalid shell invocation, a missing resolver or
-`bun`, or a profile that cannot be generated aborts the command.
+a host without a shell sandbox backend, an invalid shell invocation, a missing
+resolver or `bun`, a malformed sandbox command, or a profile that cannot be
+generated aborts the command.
 
 This is safe only because OpenCode's shell tool (`bash` on V1, `shell` on V2) is not a persistent shell — `cd`
 and exported variables never survived between calls anyway.
@@ -703,7 +730,7 @@ Preflight checks provide useful errors, not a race-proof guarantee. The fixed
 relaxation. Additional deny rules restrict writes to exact inventoried paths,
 protect the root itself, and deny data writes and creation. They never add an
 allow rule, so secret denies and the profile-cache restriction remain effective.
-The profile is passed directly with `sandbox-exec -p`; it does not introduce a
+The macOS backend passes the profile directly with `sandbox-exec -p`; it does not introduce a
 scope-dependent cache entry or nest an existing sandbox. Literal path rules
 leave newly created descendants undeletable even after the preflight checks.
 
@@ -738,15 +765,34 @@ may already have removed some allowed descendants.
 
 ```sh
 nix flake check        # typecheck, unit tests, default-policy and layout checks
-nix run .#integration  # + kernel tests; needs sandbox-exec, so it cannot run
-                       #   inside a nix build
+nix run .#integration  # + kernel tests; needs a shell sandbox backend, so it
+                       #   cannot run inside a nix build
 ```
 
+The tests form a matrix of the two modes and the two kinds of host, one with a
+shell sandbox backend (macOS) and one without (Linux). The unit tests select
+by capability, not by platform, so a new backend changes which cell a host is
+in without edits to them:
+
+- The file-tool layer runs in both modes on every host. A fake backend from
+  `tests/support.ts` stands in for the host's wherever a test is about what the
+  guard plans rather than what a kernel enforces.
+- The macOS backend's profile text is checked on every host
+  (`tests/sandbox-exec.test.ts`).
+- `tests/host-sandbox.test.ts` uses the host's real backend. Without one,
+  `shell+files` must refuse to start and name why; with one, it must start.
+- `tests/wrapper.test.ts` runs the shipped wrapper on every host, against
+  crafted resolver output and a stand-in sandbox.
+- The kernel suite (`tests/sandbox.test.sh`, `tests/cleanup.integration.ts`)
+  runs commands under the host backend's own sandbox command.
+
+CI runs `nix flake check` on macOS and Linux, and the kernel suite on macOS.
+
 The kernel suite must run from a plain terminal. The kernel refuses to apply a
-profile inside an existing sandbox, and its fixtures (a `.env`, ignored trees)
-are what an outer guard denies — so both entry points probe `sandbox-exec` first
-and exit 2 with an explanation rather than failing later as an unexplained
-`EPERM` during fixture setup.
+sandbox inside an existing one, and its fixtures (a `.env`, ignored trees) are
+what an outer guard denies — so both entry points probe the host's backend
+first and exit 2 with an explanation rather than failing later as an
+unexplained `EPERM` during fixture setup.
 
 ### Keeping the two layers in agreement
 

@@ -6,8 +6,9 @@
   outputs =
     { self, nixpkgs }:
     let
-      # The file-tool layer is portable; only "shell+files" mode needs macOS.
-      # Linux is offered so "files-only" installs are buildable there.
+      # The file-tool layer is portable; "shell+files" mode needs a shell sandbox
+      # backend, and only macOS has one so far. Linux is offered so "files-only"
+      # installs are buildable and tested there.
       systems = [
         "aarch64-darwin"
         "x86_64-darwin"
@@ -34,8 +35,8 @@
         }
       );
 
-      # The kernel suite needs /usr/bin/sandbox-exec, which does not exist in a
-      # Nix build sandbox, so it is an app rather than a check.
+      # The kernel suite cannot apply a sandbox inside the Nix build sandbox, so
+      # it is an app rather than a check. It is offered where a backend exists.
       apps = lib.genAttrs (lib.filter isDarwin systems) (system: {
         integration =
           let

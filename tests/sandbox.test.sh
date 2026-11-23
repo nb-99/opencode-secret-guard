@@ -1,12 +1,15 @@
 #!/usr/bin/env bash
-# Kernel-level tests for the generated sandbox profile.
+# Kernel-level tests for the sandbox the host's backend generates. Commands run
+# under the backend's sandbox command, as the guarded shell runs them; the
+# fixtures and some expectations are still written for macOS's sandbox-exec,
+# the only backend so far.
 #
 # Every "deny" case asserts that the secret marker never reaches stdout/stderr,
 # which is the property that actually matters — stronger and less brittle than
 # checking exit codes, since tools such as grep exit non-zero for their own
 # reasons. Every "allow" case asserts the public marker does come through.
 #
-# Must run outside the nix build sandbox: sandbox-exec is unavailable there.
+# Must run outside the nix build sandbox, which cannot nest another sandbox.
 set -uo pipefail
 
 SECRET="S3CRET-LEAK-CANARY"
@@ -40,12 +43,30 @@ export XDG_CACHE_HOME="$scratch/cache"
 export XDG_CONFIG_HOME="$scratch/config"
 mkdir -p "$XDG_CONFIG_HOME/opencode"
 
+# Runs a command string under a generated sandbox command, as the guarded shell
+# does. $1 file holding the sandbox command one word per line, $2 the command;
+# the remaining arguments become its positional parameters.
+confine() {
+  local prefix_file="$1" command="$2" word
+  local -a sandbox=()
+  shift 2
+  while IFS= read -r word; do sandbox+=("$word"); done < "$prefix_file"
+  if ((${#sandbox[@]} == 0)); then
+    echo "FATAL: $prefix_file holds no sandbox command" >&2
+    return 125
+  fi
+  "${sandbox[@]}" "$command" "$@"
+}
+
 # Nested sandboxes are refused by the kernel, and an outer guard profile denies
 # the fixtures below. Probe before writing anything, so the failure names its
 # cause instead of surfacing as EPERM during fixture setup.
-printf '(version 1)\n(allow default)\n' > "$scratch/probe.sb"
-if ! /usr/bin/sandbox-exec -f "$scratch/probe.sb" /usr/bin/true 2>/dev/null; then
-  echo "FATAL: cannot apply a sandbox profile." >&2
+if ! bun "$REPO_ROOT/tests/gen-profile.ts" "$CONFIG" "$scratch" "$scratch" - > "$scratch/probe.cmd"; then
+  echo "FATAL: could not generate a sandbox command; the error above says why." >&2
+  exit 2
+fi
+if ! confine "$scratch/probe.cmd" true 2>/dev/null; then
+  echo "FATAL: cannot apply a sandbox." >&2
   echo "  Run this suite outside opencode's guarded shell, from a plain terminal." >&2
   exit 2
 fi
@@ -162,20 +183,19 @@ gen_profile() {
       "$CONFIG" "$fixture" "$fakehome" "$1"
 }
 
-strict="$scratch/strict.sb"
+strict="$scratch/strict.cmd"
 gen_profile - > "$strict" || { echo "FATAL: could not generate strict profile"; exit 1; }
 for g in kube ssh aws; do
-  gen_profile "$g" > "$scratch/$g.sb" || { echo "FATAL: could not generate $g profile"; exit 1; }
+  gen_profile "$g" > "$scratch/$g.cmd" || { echo "FATAL: could not generate $g profile"; exit 1; }
 done
 # Strict, as resolved for a caller whose PATH holds a user-writable directory.
-PATH="$fakebin:$PATH" gen_profile - > "$scratch/path.sb" || { echo "FATAL: could not generate PATH profile"; exit 1; }
+PATH="$fakebin:$PATH" gen_profile - > "$scratch/path.cmd" || { echo "FATAL: could not generate PATH profile"; exit 1; }
 
 # --- harness -----------------------------------------------------------------
 # $1 description, $2 command, $3 profile (default: strict)
 expect_denied() {
   local description="$1" command="$2" profile="${3:-$strict}" output
-  output="$(cd "$fixture" && HOME="$fakehome" sandbox-exec -f "$profile" \
-    /bin/zsh -c "$command; cat README.md" 2>&1)"
+  output="$(cd "$fixture" && HOME="$fakehome" confine "$profile" "$command; cat README.md" 2>&1)"
   if [[ "$output" != *"$SECRET"* && "$output" == *"$PUBLIC"* ]]; then
     pass=$((pass + 1))
     printf '  ok    %s\n' "$description"
@@ -187,7 +207,7 @@ expect_denied() {
 
 expect_allowed() {
   local description="$1" command="$2" profile="${3:-$strict}" output
-  output="$(cd "$fixture" && HOME="$fakehome" sandbox-exec -f "$profile" /bin/zsh -c "$command" 2>&1)"
+  output="$(cd "$fixture" && HOME="$fakehome" confine "$profile" "$command" 2>&1)"
   if [[ "$output" == *"$PUBLIC"* ]]; then
     pass=$((pass + 1))
     printf '  ok    %s\n' "$description"
@@ -200,7 +220,7 @@ expect_allowed() {
 # A relaxed profile must actually hand the credential over.
 expect_readable() {
   local description="$1" command="$2" profile="$3" output
-  output="$(cd "$fixture" && HOME="$fakehome" sandbox-exec -f "$profile" /bin/zsh -c "$command" 2>&1)"
+  output="$(cd "$fixture" && HOME="$fakehome" confine "$profile" "$command" 2>&1)"
   if [[ "$output" == *"$SECRET"* ]]; then
     pass=$((pass + 1))
     printf '  ok    %s\n' "$description"
@@ -214,7 +234,7 @@ expect_readable() {
 # a constant, useless nuisance.
 expect_quiet() {
   local description="$1" command="$2" profile="${3:-$strict}" output
-  output="$(cd "$fixture" && HOME="$fakehome" sandbox-exec -f "$profile" /bin/zsh -c "$command" 2>&1 >/dev/null)"
+  output="$(cd "$fixture" && HOME="$fakehome" confine "$profile" "$command" 2>&1 >/dev/null)"
   if [[ -z "$output" ]]; then
     pass=$((pass + 1))
     printf '  ok    %s\n' "$description"
@@ -270,7 +290,7 @@ expect_shell_allowed() {
 # $1 description, $2 target path, $3 command, $4 profile (default: strict)
 expect_unwritable() {
   local description="$1" target="$2" command="$3" profile="${4:-$strict}"
-  (cd "$fixture" && HOME="$fakehome" sandbox-exec -f "$profile" /bin/zsh -c "$command" >/dev/null 2>&1)
+  (cd "$fixture" && HOME="$fakehome" confine "$profile" "$command" >/dev/null 2>&1)
   assert_untampered "$description" "$target"
 }
 
@@ -322,7 +342,7 @@ expect_shell_hint() {
 # $1 description, $2 target path, $3 command: the write must land.
 expect_writable() {
   local description="$1" target="$2" command="$3" profile="${4:-$strict}" after
-  (cd "$fixture" && HOME="$fakehome" sandbox-exec -f "$profile" /bin/zsh -c "$command" >/dev/null 2>&1)
+  (cd "$fixture" && HOME="$fakehome" confine "$profile" "$command" >/dev/null 2>&1)
   after="$(cat "$target" 2>/dev/null || true)"
   if [[ "$after" == *"$PUBLIC"* ]]; then
     pass=$((pass + 1))
@@ -426,16 +446,16 @@ echo "== recursive search must skip secrets but keep public hits =="
 expect_allowed "rg still finds public"      'rg --no-messages -uuu "'"$PUBLIC"'" README.md'
 
 echo "== relaxation profiles =="
-expect_readable "kube profile reads kubeconfig"  'cat "$HOME/.kube/config"'      "$scratch/kube.sb"
-expect_readable "ssh profile reads private key"  'cat "$HOME/.ssh/id_ed25519"'   "$scratch/ssh.sb"
-expect_readable "ssh profile reads signing key"  'cat "$HOME/.gnupg/private-keys-v1.d"' "$scratch/ssh.sb"
-expect_readable "aws profile reads credentials"  'cat "$HOME/.aws/credentials"'  "$scratch/aws.sb"
-expect_readable "aws profile reads terraform cloud token" 'cat "$HOME/.terraform.d/credentials.tfrc.json"' "$scratch/aws.sb"
-expect_readable "ssh profile reads gh host token" 'cat "$HOME/.config/gh/hosts.yml"' "$scratch/ssh.sb"
-expect_denied   "ssh profile still hides copilot" 'cat "$HOME/.config/github-copilot/apps.json"' "$scratch/ssh.sb"
-expect_denied   "kube profile still hides .env"  'cat .env'                      "$scratch/kube.sb"
-expect_denied   "kube profile still hides aws"   'cat "$HOME/.aws/credentials"'  "$scratch/kube.sb"
-expect_denied   "ssh profile still hides kube"   'cat "$HOME/.kube/config"'      "$scratch/ssh.sb"
+expect_readable "kube profile reads kubeconfig"  'cat "$HOME/.kube/config"'      "$scratch/kube.cmd"
+expect_readable "ssh profile reads private key"  'cat "$HOME/.ssh/id_ed25519"'   "$scratch/ssh.cmd"
+expect_readable "ssh profile reads signing key"  'cat "$HOME/.gnupg/private-keys-v1.d"' "$scratch/ssh.cmd"
+expect_readable "aws profile reads credentials"  'cat "$HOME/.aws/credentials"'  "$scratch/aws.cmd"
+expect_readable "aws profile reads terraform cloud token" 'cat "$HOME/.terraform.d/credentials.tfrc.json"' "$scratch/aws.cmd"
+expect_readable "ssh profile reads gh host token" 'cat "$HOME/.config/gh/hosts.yml"' "$scratch/ssh.cmd"
+expect_denied   "ssh profile still hides copilot" 'cat "$HOME/.config/github-copilot/apps.json"' "$scratch/ssh.cmd"
+expect_denied   "kube profile still hides .env"  'cat .env'                      "$scratch/kube.cmd"
+expect_denied   "kube profile still hides aws"   'cat "$HOME/.aws/credentials"'  "$scratch/kube.cmd"
+expect_denied   "ssh profile still hides kube"   'cat "$HOME/.kube/config"'      "$scratch/ssh.cmd"
 
 echo "== renaming cannot move a secret out from under its rule =="
 # Path rules match the path at the time of the operation. Renaming the
@@ -456,7 +476,7 @@ expect_denied "hard-linking an ignored file"      'ln local.conf "'"$scratch"'/h
 expect_writable "creating a sibling under a protected ancestor" "$fakehome/.config/fresh/note" \
   'mkdir -p "$HOME/.config/fresh" && printf "%s" "'"$PUBLIC"'" > "$HOME/.config/fresh/note"'
 expect_readable "kube profile may still rename its own directory" \
-  'mv "$HOME/.kube" "$HOME/.kube-tmp" && mv "$HOME/.kube-tmp" "$HOME/.kube" && cat "$HOME/.kube/config"' "$scratch/kube.sb"
+  'mv "$HOME/.kube" "$HOME/.kube-tmp" && mv "$HOME/.kube-tmp" "$HOME/.kube" && cat "$HOME/.kube/config"' "$scratch/kube.cmd"
 
 echo "== the guard's own configuration must be immutable from a command =="
 # Anything OpenCode loads and executes at the next start — its config, plugin
@@ -489,7 +509,7 @@ expect_unwritable "opencode data dir swapped for a symlink" "$fakehome/.local/sh
   'mv "$HOME/.local/share/opencode" "$HOME/.local/share/oc2" 2>/dev/null; ln -s "'"$scratch"'/evil" "$HOME/.local/share/opencode" 2>/dev/null'
 expect_true "opencode data dir is still a directory" test -d "$fakehome/.local/share/opencode" -a ! -L "$fakehome/.local/share/opencode"
 expect_unwritable "PATH parent swapped for a symlink" "$fakebin/git" \
-  'mv "'"$scratch"'/bin" "'"$scratch"'/bin2" 2>/dev/null; ln -s "'"$scratch"'/evil/plugin" "'"$scratch"'/bin" 2>/dev/null' "$scratch/path.sb"
+  'mv "'"$scratch"'/bin" "'"$scratch"'/bin2" 2>/dev/null; ln -s "'"$scratch"'/evil/plugin" "'"$scratch"'/bin" 2>/dev/null' "$scratch/path.cmd"
 expect_true "PATH directory is still a directory" test -d "$fakebin" -a ! -L "$fakebin"
 expect_writable "project prompts stay editable" "$fixture/.opencode/command/x.md" \
   'mkdir -p .opencode/command && printf "%s" "'"$PUBLIC"'" > .opencode/command/x.md'
@@ -553,12 +573,12 @@ SG_SRC="$CONFIG" SG_DEST="$install_config" \
   policy.writeProtectedRoots = process.env.SG_ROOTS.split(":");
   fs.writeFileSync(process.env.SG_DEST, JSON.stringify(policy));
 ' || { echo "FATAL: could not derive the installation policy" >&2; exit 1; }
-install_profile="$scratch/install.sb"
+install_profile="$scratch/install.cmd"
 SG_EXEMPT_ROOTS="$vault/memory" SG_DENY_ROOTS="$vault" \
   bun "$REPO_ROOT/tests/gen-profile.ts" "$install_config" "$fixture" "$fakehome" - > "$install_profile" ||
   { echo "FATAL: could not generate installation profile"; exit 1; }
 # The tamper rule is emitted last, so an exemption around the keg must not reopen it.
-install_exempt_profile="$scratch/install-exempt.sb"
+install_exempt_profile="$scratch/install-exempt.cmd"
 SG_EXEMPT_ROOTS="$vault/memory:$brew" SG_DENY_ROOTS="$vault" \
   bun "$REPO_ROOT/tests/gen-profile.ts" "$install_config" "$fixture" "$fakehome" - > "$install_exempt_profile" ||
   { echo "FATAL: could not generate exempt installation profile"; exit 1; }
@@ -577,7 +597,7 @@ expect_unwritable "a version installed later" "$keg/2.0/bin/tool" \
   'mkdir -p "'"$keg"'/2.0/bin" && printf TAMPER > "'"$keg"'/2.0/bin/tool"' "$install_profile"
 expect_unwritable "app bundle resource" "$bundle/Contents/Resources/app.asar" \
   'printf TAMPER >> "'"$bundle"'/Contents/Resources/app.asar"' "$install_profile"
-(cd "$fixture" && HOME="$fakehome" sandbox-exec -f "$install_profile" /bin/zsh -c \
+(cd "$fixture" && HOME="$fakehome" confine "$install_profile" \
   ': > "'"$tool"'"; chmod 777 "'"$tool"'"; rm -f "'"$tool"'"; mv "'"$brew"'/Cellar" "'"$brew"'/C2"; rm -rf "'"$bundle"'"
    ln -sfn "'"$scratch"'/evil" "'"$brew"'/bin/tool"; rm -f "'"$brew"'/opt/tool"' >/dev/null 2>&1)
 expect_true "installed program survives truncation, chmod and deletion" \
@@ -615,7 +635,7 @@ fi
 drift=0
 conservative=0
 while read -r predicate lookup target; do
-  if output="$(HOME="$fakehome" sandbox-exec -f "$strict" /bin/cat "$target" 2>/dev/null)"; then
+  if output="$(HOME="$fakehome" confine "$strict" '/bin/cat "$1"' cat "$target" 2>/dev/null)"; then
     kernel="allow"
   else
     kernel="deny"

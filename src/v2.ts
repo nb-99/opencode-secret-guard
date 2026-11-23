@@ -13,7 +13,8 @@ import type { GuardConfig } from "./policy.ts";
 import { setupPermissionReview } from "./permission-review.ts";
 import type { ReviewCleanup, ReviewContext, ReviewDependencies, ToolCallBefore, ToolCallIdentity } from "./permission-review.ts";
 import { classifyPaths } from "./predicate.ts";
-import { validatePlatform, validateShell } from "./shell.ts";
+import { selectBackend } from "./sandbox.ts";
+import { validateShell } from "./shell.ts";
 
 type MaybePromise = void | Promise<void>;
 
@@ -256,7 +257,7 @@ export async function setupV2(
   moduleDirectory: string,
   reviewDependencies: Partial<ReviewDependencies> = {},
 ): Promise<ReviewCleanup | undefined> {
-  validatePlatform(guardConfig);
+  selectBackend(guardConfig);
   const base = hostDirectory(ctx.location?.directory);
 
   if (guardConfig.mode === "files-only") {
