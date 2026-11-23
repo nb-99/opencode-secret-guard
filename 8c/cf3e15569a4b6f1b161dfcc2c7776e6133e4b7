@@ -1,0 +1,14 @@
+.github/workflows/check.yml
+  h_b53c9ceee800cb 10-20,35,37
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.7",
+  "base_commit_sha": "8ccf3e15569a4b6f1b161dfcc2c7776e6133e4b7",
+  "prompts": {},
+  "humans": {
+    "h_b53c9ceee800cb": {
+      "author": "nb99 <niklas@beilmann.dev>"
+    }
+  }
+}
