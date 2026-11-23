@@ -60,6 +60,9 @@ successful alias refusals do not clear these regressions.
 - Linux `nix flake check --keep-going -L` reports 746 pass, 12 skip, and 30
   failures. Failure names and multiplicities match the initial baseline exactly.
   Package, TypeScript, policy, merge, shell, layout, and test-path checks pass.
+  These counts are historical: the 30 failures went away once the tests
+  selected by sandbox capability instead of platform (see the Tests section of
+  [the design](design.md#tests)).
 - The installed-layout check runs the real C batch protocol, compares it with
   single-path metadata, rejects malformed input, and accepts full path-count
   and input-byte chunks. On Darwin it requires known root-volume metadata.
