@@ -13,19 +13,15 @@
     "zod": "4.6.7"
   },
   "devDependencies": {
-    "@opentui/core": "0.8.4",
-    "@opentui/solid": "0.8.4",
+    "@opentui/core": "0.9.4",
+    "@opentui/solid": "0.9.4",
     "@types/node": "26.6.6",
-    "solid-js": "1.9.19",
+    "solid-js": "1.9.20",
     "typescript": "7.0.2"
   },
   "peerDependencies": {
     "@opentui/core": ">=0.6.8",
     "@opentui/solid": ">=0.6.8",
     "solid-js": ">=1.9.12"
-  },
-  "overrides": {
-    "seroval": "1.6.12",
-    "seroval-plugins": "1.6.12"
   }
 }
