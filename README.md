@@ -163,7 +163,7 @@ Permission review is off by default. It never denies requests, never saves persi
 | --- | --- | --- |
 | `mode` | `"off"` | `"off"`, `"observe"`, or `"auto"`. |
 | `backend` | `"jev"` | `"jev"` (Jev via OpenCode Zen), `"opencode"` (any model OpenCode can reach), or `"endpoint"` (OpenAI-compatible server). |
-| `confidenceThreshold` | `0.9` | Number in `(0.5, 1]`. Positive checks must reach `t`; negative checks must stay at or below `1 - t`. |
+| `confidenceThreshold` | `0.9` | Number in `(0.5, 1]`. Positive checks must reach `t` (unasked read-only or local-reversible commands on the allow list also pass authorization); negative checks must stay at or below `1 - t`. See [docs/permission-review.md](docs/permission-review.md#how-a-request-is-approved). |
 | `toasts` | `"all"` | `"all"` shows every review phase; `"attention"` shows toasts only when you need to act (progress and auto-approvals stay in the sidebar). |
 | `restrictionScreen` | `true` | Screens omitted context chunks for agent rules when evidence exceeds the request size limit. |
 | `logPayloads` | `false` | When `true`, also writes review request and response bodies to a private local log file. |

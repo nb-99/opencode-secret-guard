@@ -302,6 +302,8 @@ function toolText(content: unknown): string | undefined {
 export function parseContext(context: unknown): ParsedContext {
   if (!Array.isArray(context)) throw new Ineligible("context-shape");
   const parsed: ParsedContext = { users: [], refusals: [], skills: [], attachments: [], compactions: [], ids: [] };
+  // Interrupts in the latest assistant message, by position in `parsed.refusals`.
+  let interrupts: number[] = [];
   context.forEach((message, index) => {
     if (!isRecord(message) || typeof message.type !== "string") throw new Ineligible("context-shape");
     const at = timeOf(message);
@@ -323,6 +325,7 @@ export function parseContext(context: unknown): ParsedContext {
         return;
       }
       case "user": {
+        interrupts = [];
         if (typeof message.text !== "string") throw new Ineligible("context-shape");
         parsed.users.push({ ...place, id, text: message.text });
         for (const field of ["files", "skills"] as const) {
@@ -351,8 +354,10 @@ export function parseContext(context: unknown): ParsedContext {
         return;
       }
       case "assistant": {
+        interrupts = [];
         const ended = endOf(message);
         const own = classifyError(message.error);
+        if (own === "interrupted") interrupts.push(parsed.refusals.length);
         if (own) parsed.refusals.push({ ...placed(ended), kind: own, messageID: id });
         if (!Array.isArray(message.content)) return;
         for (const part of message.content) {
@@ -364,6 +369,7 @@ export function parseContext(context: unknown): ParsedContext {
             const kind = classifyError(part.state.error);
             if (!kind) continue;
             const message = isRecord(part.state.error) ? stringOr(part.state.error.message, undefined) : undefined;
+            if (kind === "interrupted") interrupts.push(parsed.refusals.length);
             parsed.refusals.push({
               ...placed(endOf(part) ?? ended), kind, messageID: id,
               ...(callID === undefined ? {} : { callID }), ...(name === undefined ? {} : { tool: name }),
@@ -380,8 +386,17 @@ export function parseContext(context: unknown): ParsedContext {
         }
         return;
       }
+      case "synthetic": {
+        // execution/restart.ts adds this notice when it resumes a turn that a
+        // server restart interrupted. Those interrupts are the host's, not the user's.
+        if (!isRecord(message.metadata) || message.metadata.notice !== "restart") return;
+        for (const position of interrupts) parsed.refusals[position] = { ...parsed.refusals[position]!, kind: "shutdown" };
+        interrupts = [];
+        parsed.ids.push(["restart", id]);
+        return;
+      }
       default:
-        // Synthetic messages, such as a subagent's result, and other types are not user evidence.
+        // Other synthetic messages, such as a subagent's result, and other types are not user evidence.
         return;
     }
   });
@@ -453,7 +468,8 @@ export interface GateInput {
  * The refusal rules. A turn starts at the latest user message of the session
  * that holds authority: the session itself, or the root of a subagent session.
  * A refusal or an interrupt after it pauses review in the session where it
- * happened. Older refusals become evidence. A live reject pauses its session
+ * happened; an interrupt that a server restart caused does not. Older
+ * refusals become evidence. A live reject pauses its session
  * until the user writes again or gives feedback.
  */
 export function refusalGate(input: GateInput): Gate {

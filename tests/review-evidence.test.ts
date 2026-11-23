@@ -219,6 +219,21 @@ describe("refusalGate", () => {
     expect(gate({ target: interrupted, root }).skip).toMatchObject({ reason: "context-rejected-turn", detail: { refusal: "interrupted" } });
   });
 
+  test("an interrupt that a server restart caused does not pause the turn", () => {
+    const step = (id: string, at: number) => v2.assistant(id, at, [v2.failedShell(`t-${id}`, "bun test", TOOLS_INTERRUPTED)], { error: STEP_INTERRUPTED });
+    const restarted = parseContext([v2.user("m1", "go", 1), step("a", 2), v2.restart("s1", 3), v2.assistant("b", 4)]);
+    expect(restarted.refusals.map((refusal) => refusal.kind)).toEqual(["shutdown", "shutdown"]);
+    expect(open({ target: restarted }).prior).toEqual([]);
+    // Only the interrupts of the assistant message right before the notice are the host's.
+    const earlier = parseContext([v2.user("m1", "go", 1), step("a", 2), v2.assistant("b", 3), v2.restart("s1", 4)]);
+    expect(gate({ target: earlier }).skip).toMatchObject({ reason: "context-rejected-turn", detail: { refusal: "interrupted" } });
+    const otherNotice = { ...v2.restart("s1", 3), metadata: { notice: "subagent" } };
+    expect(gate({ target: parseContext([v2.user("m1", "go", 1), step("a", 2), otherNotice]) }).skip)
+      .toMatchObject({ reason: "context-rejected-turn", detail: { refusal: "interrupted" } });
+    // A notice is new evidence, so a judgment made before it is not reused.
+    expect(restarted.ids).toContainEqual(["restart", "s1"]);
+  });
+
   test("a live pause ends at a later user message, at live feedback, or after its located call", () => {
     const call = { messageID: "a", callID: "t", tool: "shell", command: "git push", directory: "/repo", at: 1_000 };
     const paused = (context: unknown[]) => gate({ target: parseContext(context), live: { pausedSince: 1_000, calls: [call] } });

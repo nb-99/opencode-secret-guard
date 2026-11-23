@@ -387,6 +387,7 @@ describe("resolveGroup — falls back to strict", () => {
     ["awk reading a program file", "git log | awk -f ~/.ssh/id_ed25519"],
     ["awk reading a program file attached", "git log | awk -f~/.ssh/id_ed25519"],
     ["awk redirecting print", "git log | awk '{print > \"/tmp/x\"}'"],
+    ["awk redirecting print after a brace in a string", "git log | awk '{print \"}\" > \"/tmp/x\"}'"],
     ["awk redirecting printf to a variable", "git log | awk '{f=\"x\"; printf \"%s\", $0 > f}'"],
     ["awk piping print", "git log | awk '{print | \"sh\"}'"],
     ["awk getline from a file", "git log | awk '{getline l < \"/etc/passwd\"; print l}'"],

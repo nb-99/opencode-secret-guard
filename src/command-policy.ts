@@ -84,10 +84,13 @@ export const PATTERN_FILTERS = new Set(["rg", "grep", "jq"]);
  * awk fragments that open a file or run a program from inside the script.
  * `getline` (from a file or a command), `system()`, `close()`, `fflush()`,
  * a `print`/`printf` redirected with `>`, `>>` or piped with `|`, and gawk's
- * `@include`/`@load` all reach beyond stdin. A bare comparison such as `NR>1`
- * or `$3 > 100` does not, which is why `>` is only rejected inside a print.
+ * `@include`, `@load` and indirect calls such as `@f()` all reach beyond
+ * stdin. A bare comparison such as `NR>1` or `$3 > 100` does not, which is
+ * why `>` is only rejected after a print. The match ignores strings and
+ * statement ends, since `print "}" > "x"` hides its redirection behind them,
+ * so any later `>` and any `|` count.
  */
-export const AWK_ESCAPES = /getline|system\s*\(|close\s*\(|fflush\s*\(|printf?\b[^;}]*[>|]|@(include|load)|ENVIRON/;
+export const AWK_ESCAPES = /getline|system|close|fflush|ENVIRON|@|\||printf?\b[\s\S]*>/;
 
 /**
  * The names a segment expands, outside single quotes: `$NAME` and `${NAME}`.

@@ -11,17 +11,47 @@ export type ReviewScores = {
   sensitive_effect: number;
   remote_effect: number;
   named_by_user: number;
+  read_only: number;
+  local_reversible: number;
 };
 
 export const SCORE_KEYS: readonly (keyof ReviewScores)[] = [
   "explicitly_authorized", "within_scope", "confirmation_required", "sensitive_effect", "remote_effect", "named_by_user",
+  "read_only", "local_reversible",
 ];
 
-/** The approval checks. `named_by_user` is no check of its own: it only lifts `remote_effect`. */
-export type CheckKey = Exclude<keyof ReviewScores, "named_by_user">;
+/**
+ * The approval checks. `named_by_user` only lifts `remote_effect`, and
+ * `read_only` and `local_reversible` only lift `explicitly_authorized`.
+ */
+export type CheckKey = Exclude<keyof ReviewScores, "named_by_user" | "read_only" | "local_reversible">;
 export const CHECK_KEYS: readonly CheckKey[] = [
   "explicitly_authorized", "within_scope", "confirmation_required", "sensitive_effect", "remote_effect",
 ];
+
+/**
+ * Why an action needs no further authorization: the user asked for it, or it
+ * only reads, or its changes stay local and can be undone. A remote effect
+ * always needs the user's request. The other checks apply to all three.
+ * `explicitOnly` marks an action that code found needs the user's request:
+ * outside the project, or a command it cannot show to be free of commits,
+ * deletes, remote writes and hidden commands.
+ */
+export type ApprovalBasis = "explicit" | "read-only" | "local-reversible";
+
+export function approvalBasis(scores: ReviewScores, threshold: number, explicitOnly = false): ApprovalBasis | undefined {
+  if (scores.explicitly_authorized >= threshold) return "explicit";
+  if (explicitOnly || scores.remote_effect > negativeThreshold(threshold)) return undefined;
+  if (scores.read_only >= threshold) return "read-only";
+  if (scores.local_reversible >= threshold) return "local-reversible";
+  return undefined;
+}
+
+/** The score that `approvalBasis` compares with the threshold. */
+export function authorizationScore(scores: ReviewScores, threshold: number, explicitOnly = false): number {
+  if (explicitOnly || scores.remote_effect > negativeThreshold(threshold)) return scores.explicitly_authorized;
+  return Math.max(scores.explicitly_authorized, scores.read_only, scores.local_reversible);
+}
 
 /** The text API's short, display-only account of its judgment. It never affects a decision. */
 export type ReviewExplanation = { summary: string; rationale: string };
@@ -76,6 +106,8 @@ export type ReviewStatus = {
   scores?: ReviewScores;
   explanation?: ReviewExplanation;
   contextWarnings?: { compacted: boolean; outside_project: boolean };
+  /** Only the user's request can authorize this action; see `approvalBasis`. */
+  explicitOnly?: boolean;
   /** The ask passed the action and call checks, so its context was read. */
   eligible?: boolean;
   /** The restriction screen ran for this review. */
@@ -149,7 +181,7 @@ export function parseReviewStatus(value: unknown): ReviewStatus | undefined {
     if (!record(warnings) || typeof warnings.compacted !== "boolean" || typeof warnings.outside_project !== "boolean") return undefined;
     result.contextWarnings = { compacted: warnings.compacted, outside_project: warnings.outside_project };
   }
-  for (const flag of ["eligible", "screened"] as const) {
+  for (const flag of ["eligible", "screened", "explicitOnly"] as const) {
     if (value[flag] === undefined) continue;
     if (typeof value[flag] !== "boolean") return undefined;
     result[flag] = value[flag];
@@ -157,7 +189,7 @@ export function parseReviewStatus(value: unknown): ReviewStatus | undefined {
   return result;
 }
 
-/** All six scores, each a probability, without other fields. */
+/** All scores, each a probability, without other fields. */
 export function parseScores(value: unknown): ReviewScores | undefined {
   if (!record(value) || !SCORE_KEYS.every((key) => probability(value[key]))) return undefined;
   return Object.fromEntries(SCORE_KEYS.map((key) => [key, value[key]])) as ReviewScores;
@@ -208,10 +240,10 @@ function percent(value: number): string {
 }
 
 /** Whether each check is on the passing side of its limit at this threshold. */
-export function scorePasses(scores: ReviewScores, threshold: number): Record<CheckKey, boolean> {
+export function scorePasses(scores: ReviewScores, threshold: number, explicitOnly = false): Record<CheckKey, boolean> {
   const low = negativeThreshold(threshold);
   return {
-    explicitly_authorized: scores.explicitly_authorized >= threshold,
+    explicitly_authorized: approvalBasis(scores, threshold, explicitOnly) !== undefined,
     within_scope: scores.within_scope >= threshold,
     confirmation_required: scores.confirmation_required <= low,
     sensitive_effect: scores.sensitive_effect <= low,
@@ -220,11 +252,15 @@ export function scorePasses(scores: ReviewScores, threshold: number): Record<Che
   };
 }
 
-export function scoreRows(scores: ReviewScores, threshold: number) {
+export function scoreRows(scores: ReviewScores, threshold: number, explicitOnly = false) {
   const low = negativeThreshold(threshold);
-  const passes = scorePasses(scores, threshold);
+  const passes = scorePasses(scores, threshold, explicitOnly);
   const rows: { key: CheckKey; label: string; score: string; required: string }[] = [
-    { key: "explicitly_authorized", label: "Authorization", score: percent(scores.explicitly_authorized), required: `≥${percent(threshold)}` },
+    {
+      key: "explicitly_authorized", label: "Authorization",
+      score: `explicit ${percent(scores.explicitly_authorized)}, read-only ${percent(scores.read_only)}, undoable ${percent(scores.local_reversible)}`,
+      required: explicitOnly ? `explicit ≥${percent(threshold)}` : `one ≥${percent(threshold)}, explicit if remote`,
+    },
     { key: "within_scope", label: "Within scope", score: percent(scores.within_scope), required: `≥${percent(threshold)}` },
     { key: "confirmation_required", label: "Confirmation required", score: percent(scores.confirmation_required), required: `≤${percent(low)}` },
     { key: "sensitive_effect", label: "Sensitive effect", score: percent(scores.sensitive_effect), required: `≤${percent(low)}` },
@@ -272,7 +308,7 @@ export function reviewLines(status: ReviewStatus): string[] {
     ...head,
     ...(status.phase === "completed" ? [`Proposed: ${status.proposed} · Applied: ${status.applied}`] : []),
     ...(status.reason ? [`Reason: ${status.reason}`] : []),
-    ...(status.scores ? scoreRows(status.scores, status.threshold).map((row) =>
+    ...(status.scores ? scoreRows(status.scores, status.threshold, status.explicitOnly).map((row) =>
       `${row.label}: ${row.score} (${row.required}; ${row.pass ? "pass" : "fail"})`) :
       // The heading already says a review is pending, skipped or failed.
       status.explains ? [] :

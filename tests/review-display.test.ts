@@ -22,10 +22,10 @@ function completed(overrides: Partial<ReviewStatus> = {}): ReviewStatus {
 }
 
 const reviewedScores = {
-  explicitly_authorized: 0.98, within_scope: 0.95, confirmation_required: 0.22, sensitive_effect: 0.05, remote_effect: 0.04, named_by_user: 0.2,
+  explicitly_authorized: 0.98, within_scope: 0.95, confirmation_required: 0.22, sensitive_effect: 0.05, remote_effect: 0.04, named_by_user: 0.2, read_only: 0, local_reversible: 0,
 };
 const reviewedScoreLines = [
-  "Authorization: 98% (≥90%; pass)",
+  "Authorization: explicit 98%, read-only 0%, undoable 0% (one ≥90%, explicit if remote; pass)",
   "Within scope: 95% (≥90%; pass)",
   "Confirmation required: 22% (≤10%; fail)",
   "Sensitive effect: 5% (≤10%; pass)", "Remote effect: 4%, named 20% (≤10% or named ≥90%; pass)",
@@ -162,7 +162,7 @@ describe("review RPC boundary", () => {
       anyOf: [{ type: "string", minLength: 1, maxLength: 80 }, { type: "null" }],
     });
     expect(Object.keys(JevRpc.events.review.schema.properties).sort()).toEqual([
-      "action", "applied", "callID", "contextWarnings", "elapsedMs", "eligible", "explains", "explanation", "messageID", "mode", "modelCalled",
+      "action", "applied", "callID", "contextWarnings", "elapsedMs", "eligible", "explains", "explanation", "explicitOnly", "messageID", "mode", "modelCalled",
       "phase", "proposed", "reason", "reviewID", "scores", "screened", "sessionID", "startedAt", "threshold", "toasts", "workspaceID",
     ]);
     publisher.dispose();
@@ -200,6 +200,7 @@ describe("review RPC boundary", () => {
       reviews: 1, approved: 0, manual: 1, skipped: 0, failed: 0, scored: 1,
       eligible: 0, invalidated: 0, screens: 0, skips: [],
       average: { ...reviewedScores },
+      authorization: 0.98,
       passed: { explicitly_authorized: 1, within_scope: 1, confirmation_required: 0, sensitive_effect: 1, remote_effect: 1 },
     };
     expect(rpc.emitted).toEqual([{ name: "review", data: safe }, { name: "summary", data: summary }]);
@@ -496,7 +497,7 @@ describe("review display boundary", () => {
       title: "Permission review", sessionID: "session-1", variant: "warning", duration: 10_000,
       message: [
         "Would approve; manual approval required", "Observe mode · bash", "Proposed: allow · Applied: ask",
-        "Reason: model-approved", "Authorization: 98% (≥90%; pass)", "Within scope: 95% (≥90%; pass)",
+        "Reason: model-approved", "Authorization: explicit 98%, read-only 0%, undoable 0% (one ≥90%, explicit if remote; pass)", "Within scope: 95% (≥90%; pass)",
         "Confirmation required: 2% (≤10%; pass)", "Sensitive effect: 5% (≤10%; pass)", "Remote effect: 4%, named 20% (≤10% or named ≥90%; pass)",
       ].join("\n"),
     });
@@ -545,7 +546,7 @@ describe("review display boundary", () => {
       {
         message: [
           "Automatically approved", "Auto mode · bash", "Proposed: allow · Applied: allow", "Reason: model-approved",
-          "Authorization: 98% (≥90%; pass)", "Within scope: 95% (≥90%; pass)",
+          "Authorization: explicit 98%, read-only 0%, undoable 0% (one ≥90%, explicit if remote; pass)", "Within scope: 95% (≥90%; pass)",
           "Confirmation required: 2% (≤10%; pass)", "Sensitive effect: 5% (≤10%; pass)", "Remote effect: 4%, named 20% (≤10% or named ≥90%; pass)",
         ].join("\n"),
         variant: "success",
@@ -553,7 +554,7 @@ describe("review display boundary", () => {
       {
         message: [
           "Permission denied; review did not override it", "Auto mode · bash", "Proposed: allow · Applied: deny",
-          "Reason: permission-denied", "Authorization: 98% (≥90%; pass)", "Within scope: 95% (≥90%; pass)",
+          "Reason: permission-denied", "Authorization: explicit 98%, read-only 0%, undoable 0% (one ≥90%, explicit if remote; pass)", "Within scope: 95% (≥90%; pass)",
           "Confirmation required: 2% (≤10%; pass)", "Sensitive effect: 5% (≤10%; pass)", "Remote effect: 4%, named 20% (≤10% or named ≥90%; pass)",
         ].join("\n"),
         variant: "warning",
@@ -575,12 +576,12 @@ describe("review display boundary", () => {
     expect(ui.toasts.map((toast) => toast.message)).toEqual([
       [
         "Review scores passed; approval cancelled", "Auto mode · bash", "Proposed: allow · Applied: ask",
-        "Reason: approval-cancelled", "Authorization: 98% (≥90%; pass)", "Within scope: 95% (≥90%; pass)",
+        "Reason: approval-cancelled", "Authorization: explicit 98%, read-only 0%, undoable 0% (one ≥90%, explicit if remote; pass)", "Within scope: 95% (≥90%; pass)",
         "Confirmation required: 2% (≤10%; pass)", "Sensitive effect: 5% (≤10%; pass)", "Remote effect: 4%, named 20% (≤10% or named ≥90%; pass)",
       ].join("\n"),
       [
         "Review scores passed; approval cancelled", "Observe mode · bash", "Proposed: allow · Applied: ask",
-        "Reason: approval-cancelled", "Authorization: 98% (≥90%; pass)", "Within scope: 95% (≥90%; pass)",
+        "Reason: approval-cancelled", "Authorization: explicit 98%, read-only 0%, undoable 0% (one ≥90%, explicit if remote; pass)", "Within scope: 95% (≥90%; pass)",
         "Confirmation required: 2% (≤10%; pass)", "Sensitive effect: 5% (≤10%; pass)", "Remote effect: 4%, named 20% (≤10% or named ≥90%; pass)",
       ].join("\n"),
     ]);
@@ -924,6 +925,7 @@ describe("review summary display", () => {
     reviews, approved: reviews, manual: 0, skipped: 0, failed: 0, scored: reviews,
     eligible: reviews, invalidated: 0, screens: 0, skips: [],
     average: { ...reviewedScores },
+    authorization: 0.98,
     passed: { explicitly_authorized: reviews, within_scope: reviews, confirmation_required: 0, sensitive_effect: reviews, remote_effect: reviews },
     ...overrides,
   });
