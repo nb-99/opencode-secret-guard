@@ -252,4 +252,21 @@ describe("panelLines", () => {
       "  ⚠ compacted context, outside-project access",
     ]);
   });
+
+  test("tags subagent reviews in latest line and rolls them into the root summary", () => {
+    const store = createReviewSummaryStore();
+    const sub = completed({
+      sessionID: "child-1", rootSessionID: "root-1",
+      proposed: "allow", applied: "allow", reason: "model-approved",
+      scores: scores(0.84, 0.85, 0.04, 0.03), explains: true,
+    });
+    expect(store.add(sub)?.sessionID).toBe("child-1");
+    const rootSummary = store.add(sub, "root-1")!;
+    expect(rootSummary).toMatchObject({
+      sessionID: "root-1", reviews: 1, approved: 1, scored: 1,
+      passed: { explicitly_authorized: 1, within_scope: 1, confirmation_required: 1, sensitive_effect: 1, remote_effect: 1 },
+    });
+    expect(text(panelLines(rootSummary, sub, { ok: true }, clock)).at(-1))
+      .toBe("Latest ✓ bash · subagent · approved · 14:04");
+  });
 });

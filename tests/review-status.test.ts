@@ -9,8 +9,10 @@ import {
   explanationText,
   negativeThreshold,
   parseReviewStatus,
+  positiveThreshold,
   reviewHeading,
   reviewLines,
+  scorePasses,
   scoreRows,
   wantsToast,
   type ReviewScores,
@@ -623,6 +625,59 @@ describe("reviewHeading and reviewLines", () => {
 
   test("a text-mode judgment without an explanation still shows its scores", () => {
     expect(reviewLines(completed({ explains: true, reason: "model-high-impact", scores: scores() }))).toContain("Sensitive effect: 5% (≤10%; pass)");
+  });
+
+  test("subagent statuses tag the mode line, parse rootSessionID, and roll up to root snapshots", () => {
+    expect(parseReviewStatus(status({ sessionID: "child-1", rootSessionID: "root-1" })))
+      .toMatchObject({ sessionID: "child-1", rootSessionID: "root-1" });
+    expect(parseReviewStatus(status({ sessionID: "root-1", rootSessionID: "root-1" }))).toBeUndefined();
+    expect(parseReviewStatus(status({ sessionID: "child-1", rootSessionID: "bad id" as string }))).toBeUndefined();
+    expect(reviewLines(status({ sessionID: "child-1", rootSessionID: "root-1", explains: true })))
+      .toEqual(["Review triggered: checking eligibility", "Auto mode · bash · subagent"]);
+    const store = createReviewStatusStore();
+    expect(store.update(status({ reviewID: "sub-1", sessionID: "child-1" }))).toBeDefined();
+    expect(store.snapshot("root-1")).toEqual([]);
+    // Later phase can attach rootSessionID once resolved, but cannot change an already-set rootSessionID.
+    expect(store.update(status({ reviewID: "sub-1", sessionID: "child-1", rootSessionID: "root-1", phase: "evaluating", modelCalled: true }))).toBeDefined();
+    expect(store.snapshot("root-1").map((item) => item.reviewID)).toEqual(["sub-1"]);
+    expect(store.snapshot("child-1").map((item) => item.reviewID)).toEqual(["sub-1"]);
+    expect(store.update(completed({ reviewID: "sub-1", sessionID: "child-1", rootSessionID: "root-2" }))).toBeUndefined();
+    expect(store.update(completed({ reviewID: "sub-1", sessionID: "child-1", rootSessionID: "root-1" }))).toBeDefined();
+    expect(store.snapshot("root-1")[0]).toMatchObject({ reviewID: "sub-1", phase: "completed", rootSessionID: "root-1" });
+  });
+
+  test("positiveThreshold relaxes positive checks for text API while keeping safety checks strict", () => {
+    expect(positiveThreshold(0.9, false)).toBe(0.9);
+    expect(positiveThreshold(0.9, true)).toBe(0.8);
+    expect(positiveThreshold(0.95, true)).toBe(0.9);
+    expect(positiveThreshold(0.8, true)).toBe(0.65);
+    expect(positiveThreshold(1, true)).toBe(1);
+    const hedged: ReviewScores = {
+      explicitly_authorized: 0.84,
+      within_scope: 0.85,
+      confirmation_required: 0.05,
+      sensitive_effect: 0.05,
+      remote_effect: 0.05,
+      named_by_user: 0.82,
+      read_only: 0,
+      local_reversible: 0,
+    };
+    expect(approvalBasis(hedged, 0.9, false, false)).toBeUndefined();
+    expect(approvalBasis(hedged, 0.9, false, true)).toBe("explicit");
+    expect(scorePasses(hedged, 0.9, false, false)).toMatchObject({ explicitly_authorized: false, within_scope: false });
+    expect(scorePasses(hedged, 0.9, false, true)).toEqual({
+      explicitly_authorized: true, within_scope: true, confirmation_required: true, sensitive_effect: true, remote_effect: true,
+    });
+    // Negative checks stay strict at 1 - threshold (<= 0.10 for threshold 0.9) even in text mode.
+    expect(scorePasses({ ...hedged, confirmation_required: 0.12 }, 0.9, false, true).confirmation_required).toBe(false);
+    expect(scorePasses({ ...hedged, sensitive_effect: 0.12 }, 0.9, false, true).sensitive_effect).toBe(false);
+    expect(scoreRows(hedged, 0.9, false, true).map((row) => row.required)).toEqual([
+      "one ≥80%, explicit if remote",
+      "≥80%",
+      "≤10%",
+      "≤10%",
+      "≤10% or named ≥80%",
+    ]);
   });
 });
 

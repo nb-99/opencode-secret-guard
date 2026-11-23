@@ -39,11 +39,27 @@ export const CHECK_KEYS: readonly CheckKey[] = [
  */
 export type ApprovalBasis = "explicit" | "read-only" | "local-reversible";
 
-export function approvalBasis(scores: ReviewScores, threshold: number, explicitOnly = false): ApprovalBasis | undefined {
-  if (scores.explicitly_authorized >= threshold) return "explicit";
+/**
+ * Positive threshold for `text` API answers. Chat models self-report quantized
+ * scores and routinely write 0.80-0.88 for clear yes answers; negative safety
+ * checks (`confirmation_required`, `sensitive_effect`, `remote_effect`) keep
+ * the strict `negativeThreshold(threshold)`.
+ */
+export function positiveThreshold(threshold: number, explains = false): number {
+  if (!explains) return threshold;
+  const digits = threshold.toString().split(".")[1]?.length ?? 0;
+  const margin = negativeThreshold(threshold);
+  const relaxed = Number((1 - 2 * margin).toFixed(digits));
+  const floor = Number(((threshold + 0.5) / 2).toFixed(Math.max(digits, 4)));
+  return Math.max(floor, relaxed);
+}
+
+export function approvalBasis(scores: ReviewScores, threshold: number, explicitOnly = false, explains = false): ApprovalBasis | undefined {
+  const positive = positiveThreshold(threshold, explains);
+  if (scores.explicitly_authorized >= positive) return "explicit";
   if (explicitOnly || scores.remote_effect > negativeThreshold(threshold)) return undefined;
-  if (scores.read_only >= threshold) return "read-only";
-  if (scores.local_reversible >= threshold) return "local-reversible";
+  if (scores.read_only >= positive) return "read-only";
+  if (scores.local_reversible >= positive) return "local-reversible";
   return undefined;
 }
 
@@ -86,6 +102,8 @@ const explanationField = (value: unknown, limit: number): value is string =>
 export type ReviewStatus = {
   reviewID: string;
   sessionID: string;
+  /** Root session for a subagent review; absent for root-session reviews. */
+  rootSessionID?: string;
   workspaceID: string | null;
   messageID: string | null;
   callID: string | null;
@@ -126,6 +144,10 @@ const identifier = (value: unknown): value is string => typeof value === "string
 const nullableID = (value: unknown) => value === null || identifier(value);
 const probability = (value: unknown): value is number => typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1;
 
+/** Whether a review belongs to `sessionID`, directly or via a subagent whose root it is. */
+export const statusForSession = (status: Pick<ReviewStatus, "sessionID" | "rootSessionID">, sessionID: string): boolean =>
+  status.sessionID === sessionID || status.rootSessionID === sessionID;
+
 /**
  * Strip unknown fields. Status never carries prompts or response bodies, and
  * command text or paths only as far as the bounded model explanation repeats them.
@@ -149,6 +171,10 @@ export function parseReviewStatus(value: unknown): ReviewStatus | undefined {
     modelCalled: value.modelCalled,
     startedAt: value.startedAt, elapsedMs: value.elapsedMs, threshold: value.threshold,
   };
+  if (value.rootSessionID !== undefined) {
+    if (!identifier(value.rootSessionID) || value.rootSessionID === value.sessionID) return undefined;
+    result.rootSessionID = value.rootSessionID;
+  }
   if (value.explains !== undefined) {
     if (typeof value.explains !== "boolean") return undefined;
     result.explains = value.explains;
@@ -203,7 +229,9 @@ export function createReviewStatusStore() {
       const status = parseReviewStatus(value);
       if (!status) return undefined;
       const previous = entries.get(status.reviewID);
-      if (previous && (previous.sessionID !== status.sessionID || previous.workspaceID !== status.workspaceID ||
+      if (previous && (previous.sessionID !== status.sessionID ||
+        (previous.rootSessionID !== undefined && previous.rootSessionID !== status.rootSessionID) ||
+        previous.workspaceID !== status.workspaceID ||
         phases[previous.phase] >= phases[status.phase])) return undefined;
       entries.set(status.reviewID, status);
       if (entries.size > MAX_REVIEW_STATUSES) {
@@ -213,14 +241,14 @@ export function createReviewStatusStore() {
       return structuredClone(status);
     },
     snapshot(sessionID: string): ReviewStatus[] {
-      return [...entries.values()].filter((entry) => entry.sessionID === sessionID)
+      return [...entries.values()].filter((entry) => statusForSession(entry, sessionID))
         .sort((a, b) => Number(a.phase === "completed") - Number(b.phase === "completed") || b.startedAt - a.startedAt)
         .slice(0, MAX_SESSION_REVIEWS).map((entry) => structuredClone(entry));
     },
     reconcile(sessionID: string, values: ReviewStatus[]) {
       const ids = new Set(values.map((value) => value.reviewID));
       for (const [id, value] of entries) {
-        if (value.sessionID === sessionID && !ids.has(id)) entries.delete(id);
+        if (statusForSession(value, sessionID) && !ids.has(id)) entries.delete(id);
       }
       for (const value of values) this.update(value);
     },
@@ -240,34 +268,36 @@ function percent(value: number): string {
 }
 
 /** Whether each check is on the passing side of its limit at this threshold. */
-export function scorePasses(scores: ReviewScores, threshold: number, explicitOnly = false): Record<CheckKey, boolean> {
+export function scorePasses(scores: ReviewScores, threshold: number, explicitOnly = false, explains = false): Record<CheckKey, boolean> {
+  const positive = positiveThreshold(threshold, explains);
   const low = negativeThreshold(threshold);
   return {
-    explicitly_authorized: approvalBasis(scores, threshold, explicitOnly) !== undefined,
-    within_scope: scores.within_scope >= threshold,
+    explicitly_authorized: approvalBasis(scores, threshold, explicitOnly, explains) !== undefined,
+    within_scope: scores.within_scope >= positive,
     confirmation_required: scores.confirmation_required <= low,
     sensitive_effect: scores.sensitive_effect <= low,
     // A remote or publishing action passes when the user named it and its target.
-    remote_effect: scores.remote_effect <= low || scores.named_by_user >= threshold,
+    remote_effect: scores.remote_effect <= low || scores.named_by_user >= positive,
   };
 }
 
-export function scoreRows(scores: ReviewScores, threshold: number, explicitOnly = false) {
+export function scoreRows(scores: ReviewScores, threshold: number, explicitOnly = false, explains = false) {
+  const positive = positiveThreshold(threshold, explains);
   const low = negativeThreshold(threshold);
-  const passes = scorePasses(scores, threshold, explicitOnly);
+  const passes = scorePasses(scores, threshold, explicitOnly, explains);
   const rows: { key: CheckKey; label: string; score: string; required: string }[] = [
     {
       key: "explicitly_authorized", label: "Authorization",
       score: `explicit ${percent(scores.explicitly_authorized)}, read-only ${percent(scores.read_only)}, undoable ${percent(scores.local_reversible)}`,
-      required: explicitOnly ? `explicit ≥${percent(threshold)}` : `one ≥${percent(threshold)}, explicit if remote`,
+      required: explicitOnly ? `explicit ≥${percent(positive)}` : `one ≥${percent(positive)}, explicit if remote`,
     },
-    { key: "within_scope", label: "Within scope", score: percent(scores.within_scope), required: `≥${percent(threshold)}` },
+    { key: "within_scope", label: "Within scope", score: percent(scores.within_scope), required: `≥${percent(positive)}` },
     { key: "confirmation_required", label: "Confirmation required", score: percent(scores.confirmation_required), required: `≤${percent(low)}` },
     { key: "sensitive_effect", label: "Sensitive effect", score: percent(scores.sensitive_effect), required: `≤${percent(low)}` },
     {
       key: "remote_effect", label: "Remote effect",
       score: `${percent(scores.remote_effect)}, named ${percent(scores.named_by_user)}`,
-      required: `≤${percent(low)} or named ≥${percent(threshold)}`,
+      required: `≤${percent(low)} or named ≥${percent(positive)}`,
     },
   ];
   return rows.map(({ key, ...row }) => ({ ...row, pass: passes[key] }));
@@ -287,7 +317,10 @@ export function reviewHeading(status: ReviewStatus): string {
 
 export function reviewLines(status: ReviewStatus): string[] {
   const guidance = status.reason ? guidanceFor(status.reason) : undefined;
-  const head = [reviewHeading(status), `${status.mode === "auto" ? "Auto" : "Observe"} mode · ${status.action}`];
+  const head = [
+    reviewHeading(status),
+    `${status.mode === "auto" ? "Auto" : "Observe"} mode · ${status.action}${status.rootSessionID ? " · subagent" : ""}`,
+  ];
   const tail = [
     ...(guidance ? [`Next: ${guidance}`] : []),
     ...(status.contextWarnings?.compacted ? ["Compacted context"] : []),
@@ -308,7 +341,7 @@ export function reviewLines(status: ReviewStatus): string[] {
     ...head,
     ...(status.phase === "completed" ? [`Proposed: ${status.proposed} · Applied: ${status.applied}`] : []),
     ...(status.reason ? [`Reason: ${status.reason}`] : []),
-    ...(status.scores ? scoreRows(status.scores, status.threshold, status.explicitOnly).map((row) =>
+    ...(status.scores ? scoreRows(status.scores, status.threshold, status.explicitOnly, status.explains).map((row) =>
       `${row.label}: ${row.score} (${row.required}; ${row.pass ? "pass" : "fail"})`) :
       // The heading already says a review is pending, skipped or failed.
       status.explains ? [] :

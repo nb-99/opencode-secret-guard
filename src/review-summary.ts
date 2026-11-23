@@ -86,14 +86,14 @@ export function createReviewSummaryStore() {
   };
   return {
     /** Counts each completed status once; the caller passes only new completions. */
-    add(status: ReviewStatus): ReviewSummary | undefined {
+    add(status: ReviewStatus, sessionID = status.sessionID): ReviewSummary | undefined {
       const outcome = reviewOutcome(status);
       if (!outcome) return undefined;
-      let totals = sessions.get(status.sessionID);
+      let totals = sessions.get(sessionID);
       if (totals && totals.workspaceID !== status.workspaceID) return undefined;
-      sessions.delete(status.sessionID);
+      sessions.delete(sessionID);
       totals ??= {
-        sessionID: status.sessionID, workspaceID: status.workspaceID, mode: status.mode, threshold: status.threshold,
+        sessionID, workspaceID: status.workspaceID, mode: status.mode, threshold: status.threshold,
         reviews: 0, approved: 0, manual: 0, skipped: 0, failed: 0, scored: 0, eligible: 0, invalidated: 0, screens: 0,
         sums: scoreMap(() => 0), authorizationSum: 0, passed: checkMap(() => 0), skipCounts: new Map(),
       };
@@ -111,13 +111,13 @@ export function createReviewSummaryStore() {
       }
       if (status.scores) {
         totals.scored++;
-        const passes = scorePasses(status.scores, status.threshold, status.explicitOnly);
+        const passes = scorePasses(status.scores, status.threshold, status.explicitOnly, status.explains);
         for (const key of SCORE_KEYS) totals.sums[key] += status.scores[key];
         totals.authorizationSum += authorizationScore(status.scores, status.threshold, status.explicitOnly);
         for (const key of CHECK_KEYS) if (passes[key]) totals.passed[key]++;
       }
       // Reinsertion keeps the most recently active session last.
-      sessions.set(status.sessionID, totals);
+      sessions.set(sessionID, totals);
       if (sessions.size > MAX_REVIEW_STATUSES) sessions.delete(sessions.keys().next().value!);
       return view(totals);
     },
@@ -200,7 +200,12 @@ function latestLines(status: ReviewStatus, clock: (ms: number) => string): Panel
     ["…", "info", status.phase];
   const lines: PanelLine[] = [[
     { text: "Latest ", tone: "muted" }, { text: `${symbol} `, tone },
-    ...join([{ text: status.action, tone: "base" }, { text: label, tone }, { text: clock(status.startedAt), tone: "muted" }]),
+    ...join([
+      { text: status.action, tone: "base" },
+      ...(status.rootSessionID ? [{ text: "subagent", tone: "muted" as const }] : []),
+      { text: label, tone },
+      { text: clock(status.startedAt), tone: "muted" },
+    ]),
   ]];
   if (status.reason && status.reason !== "model-approved") lines.push([{ text: `  ${status.reason}`, tone: "muted" }]);
   const guidance = status.reason ? guidanceFor(status.reason) : undefined;

@@ -153,6 +153,47 @@ describe("credentials", () => {
     }
   });
 
+  test("exempts OPENCODE_SECRET_GUARD_CONFIG and pure non-secret variable references while rejecting secret vars or shell syntax", () => {
+    for (const safe of [
+      "OPENCODE_SECRET_GUARD_CONFIG=/tmp/policy.json bun test",
+      "OPENCODE_SECRET_GUARD_CONFIG=$PWD/policy.json bun test",
+      'OPENCODE_SECRET_GUARD_CONFIG="$TMPDIR/opencode/policy.json" bun test',
+      "OPENCODE_SECRET_GUARD_CONFIG=${TMPDIR}/policy.json bun test",
+      "GITHUB_TOKEN=$VAR bun test",
+      'GITHUB_TOKEN="$VAR" bun test',
+      "API_KEY=$TMPDIR/foo/bar.json bun test",
+      'MY_VAULT="${HOME}/config/file.json" bun test',
+    ]) {
+      expect(credentials.token(safe)).toBe(false);
+      expect(credentials.any(safe)).toBe(false);
+      expect(credentials.redactValues(safe)).toBe(safe);
+    }
+    for (const unsafe of [
+      "GITHUB_TOKEN=$SECRET_TOKEN bun test",
+      'API_KEY="$MY_VAULT" bun test',
+      "TOKEN=$HOME/$API_KEY bun test",
+      "TOKEN='$VAR' bun test",
+      "TOKEN=${VAR:-secret} bun test",
+      "TOKEN=$VAR;rm -rf ~",
+      "TOKEN=$VAR&&true",
+      "TOKEN=$(cat /etc/passwd) bun test",
+      "TOKEN=`whoami` bun test",
+      "x=1,TOKEN=a1b2c3d4",
+      "OPENCODE_SECRET_GUARD_CONFIG=ghp_abcdefghijklmnopqrstuvwxyz bun test",
+    ]) {
+      expect(credentials.any(unsafe)).toBe(true);
+    }
+    expect(credentials.removeLines('OPENCODE_SECRET_GUARD_CONFIG="$TMPDIR/policy.json"')).toEqual({
+      text: 'OPENCODE_SECRET_GUARD_CONFIG="$TMPDIR/policy.json"', removed: false,
+    });
+    expect(credentials.removeLines('API_KEY="$TMPDIR/foo.json"')).toEqual({
+      text: 'API_KEY="$TMPDIR/foo.json"', removed: false,
+    });
+    expect(credentials.removeLines('API_KEY="$SECRET_KEY"')).toEqual({
+      text: REMOVED_LINE, removed: true,
+    });
+  });
+
   test("removes a line with a token or a secret-looking value, and keeps prose about credentials", () => {
     const key = (end: boolean) => ["before", "-----BEGIN EC PRIVATE KEY-----", "AAAA", ...(end ? ["-----END EC PRIVATE KEY-----"] : []), "after"].join("\n");
     expect(credentials.removeLines(key(true))).toEqual({ text: `before\n${REMOVED_LINE}\nafter`, removed: true });
