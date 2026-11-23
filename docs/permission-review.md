@@ -740,14 +740,16 @@ context, validates it, and fills it within the backend's evidence limit:
   such as `rtk`), `requested_cwd` (the directory that input asked for, resolved
   against the project directory; not proof of where the command finally runs),
   `project_directory`, optional `scratch_directory` (the resolved `cleanupRoot`
-  when configured), and `permission_resources` (parsed commands for `shell`,
+  when it is a verified directory), and `permission_resources` (parsed commands for `shell`,
   or access targets for `external_directory`).
 - `context_warnings`: `compacted`, `outside_project`, `forked`, `subagent`,
   `credential_removed`, `binary_attachments` and `screen_failed` booleans.
   `outside_project` covers the requested working directory or prior
   external-access permission checks for the same tool call, including `cd`
-  targets within the command, excluding paths inside the configured
-  `cleanupRoot` scratch directory.
+  targets within the command. The scratch root and verified paths beneath it count
+  as local, including new files under a verified directory. A symlink below the
+  root or a lookup error keeps the access external. Before applying a scratch-based
+  approval, the reviewer rechecks the root's identity and the paths.
 - `user_messages`: the text of the user-role messages, oldest first, and live
   refusal feedback (see [Refusals](#refusals)). In a subagent session they come
   from the root session.

@@ -14,7 +14,7 @@
 import { randomUUID } from "node:crypto";
 import * as path from "node:path";
 import { GUARD_REVISION } from "./build-info.ts";
-import { realpath } from "./paths.ts";
+import { inspectScratchRoot, inScratch, sameScratchRoot } from "./scratch-paths.ts";
 import { DEFAULT_PERMISSION_REVIEW, type PermissionReviewMode, type PermissionReviewSettings } from "./policy.ts";
 import { formatNote, LOG_UNAVAILABLE_NOTE, PAYLOAD_LOG_UNAVAILABLE_NOTE } from "./review-notes.ts";
 import { fileReviewLog, PAYLOAD_LOG_LIMITS, payloadLogPath, reviewLogPath, type ReviewLogWriter, type ReviewRecord } from "./review-log.ts";
@@ -235,7 +235,6 @@ function actionEvidence(
   input: unknown,
   location: string,
   credentials: CredentialCheck,
-  scratchDirectory?: string,
 ): { action: ActionEvidence; redacted: boolean } {
   let redacted = false;
   const field = (value: unknown, limit: number, what: string): string => {
@@ -267,7 +266,6 @@ function actionEvidence(
       requested_command: command,
       requested_cwd: cwd,
       project_directory: location,
-      ...(scratchDirectory !== undefined && !credentials.any(scratchDirectory) ? { scratch_directory: scratchDirectory } : {}),
       permission_resources: resources,
     },
     redacted,
@@ -376,7 +374,8 @@ export function createSlots(limit: number) {
 interface PendingCall {
   event: ToolCallBefore;
   seen: number;
-  externalAccess?: boolean;
+  /** Original scratch resources to recheck; null if any external access was not verified as scratch. */
+  externalResources?: string[] | null;
   /**
    * Each permission action is attempted before its first await. V2 repeats
    * pending evaluations after an "always" reply; repeats must not gain approval.
@@ -563,15 +562,18 @@ export async function setupPermissionReview(
   // A local endpoint can need longer than the 10 second default; see review-backends.ts.
   const deadlineMs = settings.endpoint?.deadlineMs ?? settings.opencode?.deadlineMs ?? dependencies.deadlineMs;
   const credentials = credentialCheck(secrets);
-  const scratchRoot = secrets.cleanupRoot ? realpath(secrets.cleanupRoot) : undefined;
-  const inScratchDir = (target: string) =>
-    scratchRoot !== undefined && path.isAbsolute(target) && inside(scratchRoot, realpath(target));
-  const inScratchResource = (resource: string) => {
-    if (scratchRoot === undefined) return false;
-    const candidate = resource.endsWith("/*") ? resource.slice(0, -2) : resource;
-    if (!candidate || !path.isAbsolute(candidate) || /[*?[]/.test(candidate)) return false;
-    return inside(scratchRoot, realpath(candidate));
+  const inspectScratch = () => {
+    try { return secrets.cleanupRoot ? inspectScratchRoot(secrets.cleanupRoot) : undefined; }
+    catch { return undefined; }
   };
+  const scratchPin = inspectScratch();
+  const currentScratch = () => {
+    if (!scratchPin) return undefined;
+    const current = inspectScratch();
+    return current && sameScratchRoot(current, scratchPin) ? current : undefined;
+  };
+  const scratchResource = (scratch: typeof scratchPin, resource: string) =>
+    inScratch(scratch, resource.endsWith("/*") ? resource.slice(0, -2) : resource);
   // Display-only cache for rolling subagent statuses/summaries up to their root
   // session. Security checks always call uncached `resolveSession`.
   const displayRoots = new Map<string, string | null>();
@@ -721,7 +723,7 @@ export async function setupPermissionReview(
       });
     try {
       const before = snapshot(call.event);
-      const { action, redacted } = actionEvidence(evaluation, before.tool, before.input, location, credentials, scratchRoot);
+      const { action, redacted } = actionEvidence(evaluation, before.tool, before.input, location, credentials);
       const queuedAt = dependencies.now();
       let waited = !signal.aborted;
       try {
@@ -731,8 +733,16 @@ export async function setupPermissionReview(
       }
       holding = true;
       info.eligible = true;
-      const outsideProject = (!inside(location, action.requested_cwd) && !inScratchDir(action.requested_cwd)) || call.externalAccess === true;
-      const explicitOnly = outsideProject || needsExplicitConsent((before.input as { command: string }).command);
+      const input = before.input as { command: string; workdir?: string };
+      const cwd = effectiveDirectory(location, input.workdir);
+      const externalCwd = !inside(location, cwd);
+      const outside = (scratch: typeof scratchPin) =>
+        (externalCwd && (input.workdir?.split(path.sep).includes("..") || !inScratch(scratch, cwd))) ||
+        call.externalResources === null || (call.externalResources ?? []).some((resource) => !scratchResource(scratch, resource));
+      const scratch = currentScratch();
+      if (scratch && !credentials.any(scratch.root)) action.scratch_directory = scratch.root;
+      const outsideProject = outside(scratch);
+      const explicitOnly = outsideProject || needsExplicitConsent(input.command);
       const chain = await resolveSession(sessions, sessionID, location, signal);
       rememberDisplayRoot(sessionID, chain.rootID);
       if (chain.rootID !== undefined) {
@@ -845,6 +855,9 @@ export async function setupPermissionReview(
       if (pending.get(callKey!) !== call) return withWarnings(ask("call-ended"));
       if (isUnsafe(callKey!)) return withWarnings(ask("call-ambiguous"));
       if (snapshot(call.event).text !== before.text) return withWarnings(ask("call-changed"));
+      if (!outsideProject && (externalCwd || call.externalResources !== undefined) && outside(currentScratch())) {
+        return withWarnings(ask("scratch-changed"));
+      }
       return withWarnings(outcome);
     } catch (error) {
       if (active.cancelled) return withWarnings(ask(active.cancelled));
@@ -965,8 +978,14 @@ export async function setupPermissionReview(
         const key = pendingKey(evaluation.sessionID, evaluation.source.messageID, evaluation.source.id);
         const call = key === undefined ? undefined : pending.get(key);
         if (call && (evaluation.agent === undefined || call.event.agent === undefined || evaluation.agent === call.event.agent)) {
-          const external = evaluation.resources.length === 0 || evaluation.resources.some((resource) => !inScratchResource(resource));
-          if (external) call.externalAccess = true;
+          if (call.externalResources !== null) {
+            const previous = call.externalResources ?? [];
+            const resources = evaluation.resources;
+            const scratch = currentScratch();
+            call.externalResources = scratch && resources.length > 0 && previous.length + resources.length <= MAX_RESOURCES &&
+              resources.every((resource) => typeof resource === "string" && resource.length <= MAX_COMMAND_CHARS && scratchResource(scratch, resource))
+              ? [...previous, ...resources] : null;
+          }
         }
       }
       if (evaluation.effect !== "ask") return;
