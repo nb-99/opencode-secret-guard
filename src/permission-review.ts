@@ -17,9 +17,13 @@ import { GUARD_REVISION } from "./build-info.ts";
 import { DEFAULT_PERMISSION_REVIEW, type PermissionReviewMode, type PermissionReviewSettings } from "./policy.ts";
 import { formatNote, LOG_UNAVAILABLE_NOTE, PAYLOAD_LOG_UNAVAILABLE_NOTE } from "./review-notes.ts";
 import { fileReviewLog, PAYLOAD_LOG_LIMITS, payloadLogPath, reviewLogPath, type ReviewLogWriter, type ReviewRecord } from "./review-log.ts";
-import { explanationText, MAX_RATIONALE_CHARS, MAX_SUMMARY_CHARS, negativeThreshold, type ReviewExplanation, type ReviewScores } from "./review-status.ts";
+import {
+  approvalBasis, authorizationScore, explanationText, MAX_RATIONALE_CHARS, MAX_SUMMARY_CHARS, negativeThreshold,
+  type ApprovalBasis, type ReviewExplanation, type ReviewScores,
+} from "./review-status.ts";
 import { setupReviewStatus, type ReviewRpcContext } from "./review-rpc.ts";
 import { COMPACTED_QUESTIONS, QUESTION_NAMES, REVIEW_QUESTIONS } from "./review-questions.ts";
+import { needsExplicitConsent } from "./review-consent.ts";
 import {
   createReviewBackend,
   Ineligible,
@@ -56,12 +60,15 @@ export type { SecretNames } from "./review-evidence.ts";
 
 /** Covers session lookup, context, credential resolution and the request. */
 const REVIEW_DEADLINE_MS = 10_000;
-const MAX_CONCURRENT_REVIEWS = 2;
+/** Reviews beyond this wait in order; the wait counts against each review's deadline. */
+const MAX_CONCURRENT_REVIEWS = 4;
 const PENDING_TTL_MS = 15 * 60_000;
 const MAX_PENDING_CALLS = 512;
 const MAX_UNSAFE_CALLS = 1_024;
 /** Open permission requests remembered to map a reject to its call. */
 const MAX_ASKED = 1_024;
+/** The reply codes of v2.0.20 schema permission.ts. */
+const REPLIES = new Set(["once", "always", "reject"]);
 /** Sessions paused by a live reject. When full, every other session waits for its user too. */
 const MAX_PAUSED_SESSIONS = 1_024;
 /** Sessions whose refused calls are kept as evidence, and calls kept per session. */
@@ -173,6 +180,7 @@ const defaultDependencies = (): ReviewDependencies => {
 
 /** A safe identifier for correlation, or null; host ids are not trusted to be short or plain. */
 const safeID = (value: unknown) => (typeof value === "string" && /^[A-Za-z0-9_.:-]{1,80}$/.test(value) ? value : null);
+const safeAction = (value: unknown) => (typeof value === "string" && /^[A-Za-z0-9_.-]{1,40}$/.test(value) ? value : "other");
 const safeVersion = (value: unknown) => (typeof value === "string" && /^[A-Za-z0-9._+-]{1,40}$/.test(value) ? value : null);
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -184,6 +192,10 @@ export type ReviewOutcome = {
   explanation?: ReviewExplanation; contextWarnings?: ContextWarnings;
   /** The approval relied on the user naming a remote or publishing action. */
   remoteNamed?: boolean;
+  /** Why the approved action needed no further authorization. */
+  basis?: ApprovalBasis;
+  /** Only the user's request could authorize the action. */
+  explicitOnly?: boolean;
 };
 
 const ask = (reason: string): ReviewOutcome => ({ allow: false, reason });
@@ -265,26 +277,33 @@ function actionEvidence(
  *
  * A remote or publishing effect passes when the user named the action and
  * its target. Data loss, security, credentials and production stay manual.
+ * An action the user did not ask for passes only when it reads, or changes
+ * only local state that can be undone, and has no remote effect. With
+ * `explicitOnly`, only the user's request authorizes it.
  */
-export function decide(answers: ReviewAnswers, threshold = DEFAULT_PERMISSION_REVIEW.confidenceThreshold): ReviewOutcome {
+export function decide(
+  answers: ReviewAnswers, threshold = DEFAULT_PERMISSION_REVIEW.confidenceThreshold, explicitOnly = false,
+): ReviewOutcome {
   const negativeLimit = negativeThreshold(threshold);
   const scores = Object.fromEntries(QUESTION_NAMES.map((name) => [name, answers[name].noul])) as ReviewScores;
+  const remote = scores.remote_effect > negativeLimit;
   // Display only: the comparisons below decide, not this score.
   const score = Math.min(
-    scores.explicitly_authorized,
+    authorizationScore(scores, threshold, explicitOnly),
     scores.within_scope,
     1 - scores.confirmation_required,
     1 - scores.sensitive_effect,
     Math.max(1 - scores.remote_effect, scores.named_by_user),
   );
-  const scored = (reason: string): ReviewOutcome => ({ allow: false, reason, score, scores });
-  const remote = scores.remote_effect > negativeLimit;
+  const only = explicitOnly ? { explicitOnly } : {};
+  const scored = (reason: string): ReviewOutcome => ({ allow: false, reason, score, scores, ...only });
+  const basis = approvalBasis(scores, threshold, explicitOnly);
   if (scores.confirmation_required > negativeLimit) return scored("model-confirmation-required");
   if (scores.sensitive_effect > negativeLimit) return scored("model-sensitive-effect");
   if (remote && scores.named_by_user < threshold) return scored("model-remote-unnamed");
-  if (scores.explicitly_authorized < threshold) return scored("model-not-authorized");
+  if (!basis) return scored("model-not-authorized");
   if (scores.within_scope < threshold) return scored("model-out-of-scope");
-  return { allow: true, reason: "model-approved", score, scores, ...(remote ? { remoteNamed: true } : {}) };
+  return { allow: true, reason: "model-approved", score, scores, basis, ...only, ...(remote ? { remoteNamed: true } : {}) };
 }
 
 async function apiKey(ctx: ReviewContext, signal: AbortSignal): Promise<string> {
@@ -303,6 +322,43 @@ async function apiKey(ctx: ReviewContext, signal: AbortSignal): Promise<string> 
   if (credential.type !== "key") throw new Ineligible("auth-not-key");
   if (typeof credential.key !== "string" || !credential.key.trim()) throw new Ineligible("auth-empty-key");
   return credential.key.trim();
+}
+
+/**
+ * A first-come slot queue. Resolves true when the review had to wait. A
+ * review whose signal aborts while it waits leaves the queue as `busy`.
+ */
+export function createSlots(limit: number) {
+  let running = 0;
+  const waiting: Array<() => void> = [];
+  return {
+    acquire(signal: AbortSignal): Promise<boolean> {
+      if (signal.aborted) return Promise.reject(new Ineligible("busy"));
+      if (running < limit) {
+        running++;
+        return Promise.resolve(false);
+      }
+      return new Promise<boolean>((resolve, reject) => {
+        const grant = () => {
+          signal.removeEventListener("abort", abort);
+          resolve(true);
+        };
+        const abort = () => {
+          const index = waiting.indexOf(grant);
+          if (index >= 0) waiting.splice(index, 1);
+          reject(new Ineligible("busy"));
+        };
+        waiting.push(grant);
+        signal.addEventListener("abort", abort, { once: true });
+      });
+    },
+    /** Hands the slot to the next waiting review, if any. */
+    release() {
+      const next = waiting.shift();
+      if (next) next();
+      else running--;
+    },
+  };
 }
 
 interface PendingCall {
@@ -414,6 +470,10 @@ interface ReviewInfo {
   tags?: Set<EvidenceTag>;
   screen?: { chunks: number; cached: number; asked: number; selected: number; failed: boolean };
   usage?: ReviewUsage;
+  /** Time spent waiting for a review slot, when the review waited. */
+  queuedMs?: number;
+  /** Size of the judgment request sent to the backend. */
+  requestBytes?: number;
 }
 
 /**
@@ -495,6 +555,7 @@ export async function setupPermissionReview(
   const statuses = await setupReviewStatus(ctx);
   const pending = new Map<string, PendingCall>();
   const reviews = new Set<ActiveReview>();
+  const slots = createSlots(MAX_CONCURRENT_REVIEWS);
   // Call identities that can no longer be bound to one call: two live calls
   // shared them (CodeMode children can), or a call was dropped unfinished (expiry, cap or a session event) and
   // may still be waiting while a later call reuses its identity. Kept for the
@@ -600,13 +661,13 @@ export async function setupPermissionReview(
     call.attempted ??= new Set<ReviewAction>();
     call.attempted.add(evaluation.action);
     if (isUnsafe(callKey!)) return ask("call-ambiguous");
-    if (reviews.size >= MAX_CONCURRENT_REVIEWS) return ask("busy");
 
     const active: ActiveReview = { sessionID: evaluation.sessionID, controller: new AbortController() };
     reviews.add(active);
     const signal = active.controller.signal;
     const timer = setTimeout(() => active.controller.abort("deadline"), deadlineMs);
     const sessionID = evaluation.sessionID;
+    let holding = false;
     let contextWarnings: ContextWarnings | undefined;
     let judged: ReviewOutcome | undefined;
     const withWarnings = (outcome: ReviewOutcome): ReviewOutcome =>
@@ -617,8 +678,17 @@ export async function setupPermissionReview(
     try {
       const before = snapshot(call.event);
       const { action, redacted } = actionEvidence(evaluation, before.tool, before.input, location, credentials);
+      const queuedAt = dependencies.now();
+      let waited = !signal.aborted;
+      try {
+        waited = await slots.acquire(signal);
+      } finally {
+        if (waited) info.queuedMs = dependencies.now() - queuedAt;
+      }
+      holding = true;
       info.eligible = true;
       const outsideProject = !inside(location, action.requested_cwd) || call.externalAccess === true;
+      const explicitOnly = outsideProject || needsExplicitConsent((before.input as { command: string }).command);
       const chain = await resolveSession(sessions, sessionID, location, signal);
       if (chain.rootID !== undefined) active.rootSessionID = chain.rootID;
       // Credentials come before the transcript, so a missing credential never
@@ -706,10 +776,11 @@ export async function setupPermissionReview(
       }
 
       const request: ReviewRequest = { state, questions };
+      info.requestBytes = backend.requestBytes(request);
       const judgment = await channel.judge(request, { signal, trace, onRequest });
       if (judgment.usage) info.usage = judgment.usage;
       const explanation = shownExplanation(judgment.explanation, credentials);
-      const outcome = judged = { ...decide(judgment.answers, threshold), ...(explanation ? { explanation } : {}) };
+      const outcome = judged = { ...decide(judgment.answers, threshold, explicitOnly), ...(explanation ? { explanation } : {}) };
       if (outcome.remoteNamed) evidence.tags.add("remote-named");
       if (!outcome.allow) return withWarnings(outcome);
       // What was reviewed must still be what runs, in the same session state:
@@ -737,6 +808,7 @@ export async function setupPermissionReview(
       // Releases any response body still open, including one refused unread.
       active.controller.abort();
       reviews.delete(active);
+      if (holding) slots.release();
     }
   };
 
@@ -792,8 +864,17 @@ export async function setupPermissionReview(
           }
           // Ephemeral `permission.replied` {sessionID, requestID, reply}.
           if (event.type === "permission.replied") {
+            const requestID = typeof data?.requestID === "string" ? data.requestID : undefined;
+            const request = requestID === undefined ? undefined : asked.get(requestID);
+            // Only identifiers and a fixed code: the decision log holds no content.
+            if (request && REPLIES.has(data?.reply as string)) {
+              record({
+                event: "reply", reply: data!.reply as string, action: safeAction(request.action), sessionID: safeID(request.sessionID),
+                messageID: safeID(request.messageID), callID: safeID(request.callID),
+              });
+            }
             if (data?.reply === "reject") rejected(data);
-            else if (typeof data?.requestID === "string") asked.delete(data.requestID);
+            else if (requestID !== undefined) asked.delete(requestID);
             continue;
           }
           if (!INVALIDATING_EVENTS.has(event.type)) continue;
@@ -838,7 +919,7 @@ export async function setupPermissionReview(
       if (evaluation.effect !== "ask") return;
       const started = dependencies.now();
       const reviewID = randomUUID();
-      const action = /^[A-Za-z0-9_.-]{1,40}$/.test(evaluation.action) ? evaluation.action : "other";
+      const action = safeAction(evaluation.action);
       const identity = {
         reviewID, sessionID: evaluation.sessionID,
         workspaceID: safeID(ctx.location?.workspaceID),
@@ -884,6 +965,10 @@ export async function setupPermissionReview(
         ...(info.screen ? { screen: info.screen } : {}),
         ...(info.usage?.inputTokens === undefined ? {} : { inputTokens: info.usage.inputTokens }),
         ...(info.usage?.outputTokens === undefined ? {} : { outputTokens: info.usage.outputTokens }),
+        ...(info.requestBytes === undefined ? {} : { requestBytes: info.requestBytes }),
+        ...(info.queuedMs === undefined ? {} : { queuedMs: info.queuedMs }),
+        ...(outcome.basis === undefined ? {} : { basis: outcome.basis }),
+        ...(outcome.explicitOnly ? { explicitOnly: true } : {}),
         promptVersion: PROMPT_VERSION,
         threshold,
         reviewID,
@@ -897,6 +982,7 @@ export async function setupPermissionReview(
         proposed: verdict, applied: evaluation.effect, reason: outcome.reason,
         eligible: info.eligible, screened: info.screen !== undefined,
         ...(outcome.scores ? { scores: outcome.scores } : {}),
+        ...(outcome.explicitOnly ? { explicitOnly: true } : {}),
         ...(outcome.explanation ? { explanation: outcome.explanation } : {}),
         ...(outcome.contextWarnings ? {
           contextWarnings: { compacted: outcome.contextWarnings.compacted, outside_project: outcome.contextWarnings.outside_project },

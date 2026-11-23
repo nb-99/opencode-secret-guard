@@ -32,11 +32,11 @@ function completed(overrides: Partial<ReviewStatus> = {}): ReviewStatus {
 }
 
 const scores = {
-  explicitly_authorized: 0.98, within_scope: 0.95, confirmation_required: 0.22, sensitive_effect: 0.05, remote_effect: 0.04, named_by_user: 0.2,
+  explicitly_authorized: 0.98, within_scope: 0.95, confirmation_required: 0.22, sensitive_effect: 0.05, remote_effect: 0.04, named_by_user: 0.2, read_only: 0, local_reversible: 0,
 };
 const completedMessage = [
   "Manual approval required", "Auto mode · bash", "Proposed: ask · Applied: ask",
-  "Reason: model-confirmation-required", "Authorization: 98% (≥90%; pass)",
+  "Reason: model-confirmation-required", "Authorization: explicit 98%, read-only 0%, undoable 0% (one ≥90%, explicit if remote; pass)",
   "Within scope: 95% (≥90%; pass)", "Confirmation required: 22% (≤10%; fail)",
   "Sensitive effect: 5% (≤10%; pass)", "Remote effect: 4%, named 20% (≤10% or named ≥90%; pass)",
 ].join("\n");

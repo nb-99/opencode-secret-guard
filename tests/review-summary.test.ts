@@ -14,7 +14,7 @@ function completed(overrides: Partial<ReviewStatus> = {}): ReviewStatus {
 }
 
 const scores = (a: number, w: number, c: number, s: number, r = 0.02, n = 0.1): ReviewScores =>
-  ({ explicitly_authorized: a, within_scope: w, confirmation_required: c, sensitive_effect: s, remote_effect: r, named_by_user: n });
+  ({ explicitly_authorized: a, within_scope: w, confirmation_required: c, sensitive_effect: s, remote_effect: r, named_by_user: n, read_only: 0, local_reversible: 0 });
 const approved = (id: string, value: ReviewScores) =>
   completed({ reviewID: id, proposed: "allow", applied: "allow", reason: "model-approved", scores: value });
 const passed = (a: number, w: number, c: number, s: number, r: number) =>
@@ -26,6 +26,7 @@ function summary(overrides: Partial<ReviewSummary> = {}): ReviewSummary {
     reviews: 4, approved: 2, manual: 1, skipped: 1, failed: 0, scored: 3,
     eligible: 3, invalidated: 0, screens: 1, skips: [{ reason: "context-rejected-turn", count: 1 }],
     average: scores(0.96, 0.95, 0.07, 0.04, 0.3, 0.6),
+    authorization: 0.96,
     passed: passed(2, 3, 3, 3, 2),
     ...overrides,
   };
@@ -61,7 +62,7 @@ describe("createReviewSummaryStore", () => {
     store.add(completed({ reviewID: "r3", modelCalled: false, reason: "context-rejected-turn" }));
     // At 0.93 the negative limit is exactly 0.07, which passes.
     const last = store.add(completed({ reviewID: "r4", threshold: 0.93, scores: scores(0.9, 0.94, 0.07, 0.08, 0.5, 0.5) }));
-    const { average, ...counts } = last!;
+    const { average, authorization, ...counts } = last!;
     expect(counts).toEqual({
       sessionID: "session-1", workspaceID: null, mode: "auto", threshold: 0.93,
       reviews: 4, approved: 1, manual: 2, skipped: 1, failed: 0, scored: 3,
@@ -70,12 +71,26 @@ describe("createReviewSummaryStore", () => {
       passed: passed(1, 3, 2, 2, 2),
     });
     expect(average!.explicitly_authorized).toBeCloseTo(0.9, 10);
+    expect(authorization).toBeCloseTo(0.9, 10);
     expect(average!.within_scope).toBeCloseTo(0.946667, 6);
     expect(average!.confirmation_required).toBeCloseTo(0.09, 10);
     expect(average!.sensitive_effect).toBeCloseTo(0.06, 10);
     expect(average!.remote_effect).toBeCloseTo(0.466667, 6);
     expect(average!.named_by_user).toBeCloseTo(0.483333, 6);
     expect(store.get("session-1")).toEqual(last);
+  });
+
+  test("averages the authorization score each review compared, such as a read-only one", () => {
+    const store = createReviewSummaryStore();
+    const last = store.add(approved("r1", { ...scores(0.05, 0.95, 0.02, 0.01), read_only: 0.95 }))!;
+    expect(last.average!.explicitly_authorized).toBeCloseTo(0.05, 10);
+    expect(last.authorization).toBeCloseTo(0.95, 10);
+    expect(last.passed.explicitly_authorized).toBe(1);
+    const only = createReviewSummaryStore().add(completed({
+      reviewID: "r2", scores: { ...scores(0.05, 0.95, 0.02, 0.01), read_only: 0.95 }, explicitOnly: true,
+    }))!;
+    expect(only.authorization).toBeCloseTo(0.05, 10);
+    expect(only.passed.explicitly_authorized).toBe(0);
   });
 
   test("counts eligible asks, invalidated approvals, screen runs and skips by reason", () => {
@@ -145,6 +160,7 @@ describe("parseReviewSummary", () => {
     const unscored = summary({ reviews: 1, approved: 0, manual: 0, skipped: 1, scored: 0, eligible: 0, screens: 0,
       passed: passed(0, 0, 0, 0, 0) });
     delete unscored.average;
+    delete unscored.authorization;
     expect(parseReviewSummary(unscored)).toEqual(unscored);
   });
 
@@ -154,6 +170,7 @@ describe("parseReviewSummary", () => {
       null, [], summary({ reviews: 5 }), summary({ approved: 1.5 }), summary({ scored: 5 }),
       summary({ manual: -1, skipped: 3 }), summary({ passed: { ...summary().passed, sensitive_effect: 4 } }),
       summary({ average: scores(0.9, 0.9, 0.1, 1.2) }), summary({ sessionID: "bad session" }),
+      summary({ authorization: 1.5 }), summary({ authorization: undefined }),
       summary({ threshold: 0.5 }), { ...summary(), mode: "off" }, withoutAverage,
       summary({ scored: 0, passed: passed(0, 0, 0, 0, 0) }),
       summary({ eligible: 5 }), summary({ invalidated: 2 }), summary({ screens: -1 }),

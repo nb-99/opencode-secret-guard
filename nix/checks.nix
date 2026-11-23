@@ -401,6 +401,7 @@ in
     test -f ${package}/lib/review-questions.ts
     test -f ${package}/lib/review-evidence.ts
     test -f ${package}/lib/review-screen.ts
+    test -f ${package}/lib/review-consent.ts
     test -f ${package}/lib/review-report.ts
     # The package records its source revision for the decision log.
     grep -q '^export const GUARD_REVISION: string | null = "' ${package}/lib/build-info.ts

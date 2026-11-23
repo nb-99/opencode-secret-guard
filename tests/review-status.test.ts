@@ -4,6 +4,7 @@ import {
   MAX_REVIEW_STATUSES,
   MAX_SESSION_REVIEWS,
   MAX_SUMMARY_CHARS,
+  approvalBasis,
   createReviewStatusStore,
   explanationText,
   negativeThreshold,
@@ -54,6 +55,8 @@ function scores(overrides: Partial<ReviewScores> = {}): ReviewScores {
     sensitive_effect: 0.05,
     remote_effect: 0.04,
     named_by_user: 0.2,
+    read_only: 0,
+    local_reversible: 0,
     ...overrides,
   };
 }
@@ -133,10 +136,10 @@ describe("parseReviewStatus", () => {
     }
   });
 
-  test("requires all six finite scores between 0 and 1", () => {
-    const endpoints = scores({ explicitly_authorized: 0, within_scope: 1, confirmation_required: 0, sensitive_effect: 1, remote_effect: 0, named_by_user: 1 });
+  test("requires all finite scores between 0 and 1", () => {
+    const endpoints = scores({ explicitly_authorized: 0, within_scope: 1, confirmation_required: 0, sensitive_effect: 1, remote_effect: 0, named_by_user: 1, read_only: 1, local_reversible: 0 });
     expect(parseReviewStatus(completed({ scores: endpoints }))?.scores).toEqual(endpoints);
-    for (const field of ["explicitly_authorized", "within_scope", "confirmation_required", "sensitive_effect", "remote_effect", "named_by_user"] as const) {
+    for (const field of ["explicitly_authorized", "within_scope", "confirmation_required", "sensitive_effect", "remote_effect", "named_by_user", "read_only", "local_reversible"] as const) {
       for (const value of [undefined, null, -0.0001, 1.0001, NaN, Infinity, -Infinity, "0.98"]) {
         expect(parseReviewStatus({ ...completed(), scores: { ...scores(), [field]: value } })).toBeUndefined();
       }
@@ -190,7 +193,7 @@ describe("parseReviewStatus", () => {
       proposed: "ask",
       applied: "ask",
       reason: "confirmation-required",
-      scores: { explicitly_authorized: 0.98, within_scope: 0.95, confirmation_required: 0.22, sensitive_effect: 0.05, remote_effect: 0.04, named_by_user: 0.2 },
+      scores: { explicitly_authorized: 0.98, within_scope: 0.95, confirmation_required: 0.22, sensitive_effect: 0.05, remote_effect: 0.04, named_by_user: 0.2, read_only: 0, local_reversible: 0 },
       contextWarnings: { compacted: true, outside_project: true },
     });
   });
@@ -407,7 +410,7 @@ describe("createReviewStatusStore", () => {
 describe("scoreRows", () => {
   test("renders every check with the correct threshold direction", () => {
     expect(scoreRows(scores(), 0.9)).toEqual([
-      { label: "Authorization", score: "98%", required: "≥90%", pass: true },
+      { label: "Authorization", score: "explicit 98%, read-only 0%, undoable 0%", required: "one ≥90%, explicit if remote", pass: true },
       { label: "Within scope", score: "95%", required: "≥90%", pass: true },
       { label: "Confirmation required", score: "22%", required: "≤10%", pass: false },
       { label: "Sensitive effect", score: "5%", required: "≤10%", pass: true },
@@ -417,7 +420,7 @@ describe("scoreRows", () => {
 
   test("accepts equality and rejects scores on the wrong side of each limit", () => {
     expect(scoreRows(scores({ explicitly_authorized: 0.89, within_scope: 0.9, confirmation_required: 0.1, sensitive_effect: 0.11, remote_effect: 0.1 }), 0.9)).toEqual([
-      { label: "Authorization", score: "89%", required: "≥90%", pass: false },
+      { label: "Authorization", score: "explicit 89%, read-only 0%, undoable 0%", required: "one ≥90%, explicit if remote", pass: false },
       { label: "Within scope", score: "90%", required: "≥90%", pass: true },
       { label: "Confirmation required", score: "10%", required: "≤10%", pass: true },
       { label: "Sensitive effect", score: "11%", required: "≤10%", pass: false },
@@ -432,17 +435,39 @@ describe("scoreRows", () => {
     expect(rows(0.11, 0.2)).toMatchObject({ pass: false });
   });
 
+  test("a read-only or local reversible action needs no request, unless it has a remote effect", () => {
+    const unasked = { explicitly_authorized: 0.2 };
+    expect(approvalBasis(scores({ ...unasked, read_only: 0.9 }), 0.9)).toBe("read-only");
+    expect(approvalBasis(scores({ ...unasked, local_reversible: 0.95 }), 0.9)).toBe("local-reversible");
+    expect(approvalBasis(scores({ ...unasked, read_only: 0.89, local_reversible: 0.89 }), 0.9)).toBeUndefined();
+    expect(approvalBasis(scores({ ...unasked, read_only: 0.99, remote_effect: 0.11, named_by_user: 1 }), 0.9)).toBeUndefined();
+    expect(approvalBasis(scores({ read_only: 0.99, remote_effect: 0.9 }), 0.9)).toBe("explicit");
+    expect(scoreRows(scores({ ...unasked, local_reversible: 0.95 }), 0.9)[0]).toEqual({
+      label: "Authorization", score: "explicit 20%, read-only 0%, undoable 95%", required: "one ≥90%, explicit if remote", pass: true,
+    });
+    expect(approvalBasis(scores({ ...unasked, read_only: 0.99 }), 0.9, true)).toBeUndefined();
+    expect(approvalBasis(scores({ read_only: 0.99 }), 0.9, true)).toBe("explicit");
+    expect(scoreRows(scores({ ...unasked, local_reversible: 0.95 }), 0.9, true)[0]).toEqual({
+      label: "Authorization", score: "explicit 20%, read-only 0%, undoable 95%", required: "explicit ≥90%", pass: false,
+    });
+    const shown = parseReviewStatus(status({ phase: "completed", proposed: "ask", applied: "ask", reason: "model-not-authorized",
+      scores: scores({ ...unasked, read_only: 0.99 }), explicitOnly: true }))!;
+    expect(shown.explicitOnly).toBe(true);
+    expect(reviewLines(shown)).toContain("Authorization: explicit 20%, read-only 99%, undoable 0% (explicit ≥90%; fail)");
+    expect(parseReviewStatus({ ...status(), explicitOnly: "yes" })).toBeUndefined();
+  });
+
   test("uses the exact decimal negative limit of 0.07 for a 0.93 threshold", () => {
     expect(negativeThreshold(0.93)).toBe(0.07);
     expect(scoreRows(scores({ explicitly_authorized: 0.93, within_scope: 0.93, confirmation_required: 0.07, sensitive_effect: 0.07, remote_effect: 0.07 }), 0.93)).toEqual([
-      { label: "Authorization", score: "93%", required: "≥93%", pass: true },
+      { label: "Authorization", score: "explicit 93%, read-only 0%, undoable 0%", required: "one ≥93%, explicit if remote", pass: true },
       { label: "Within scope", score: "93%", required: "≥93%", pass: true },
       { label: "Confirmation required", score: "7%", required: "≤7%", pass: true },
       { label: "Sensitive effect", score: "7%", required: "≤7%", pass: true },
       { label: "Remote effect", score: "7%, named 20%", required: "≤7% or named ≥93%", pass: true },
     ]);
     expect(scoreRows(scores({ explicitly_authorized: 0.94, within_scope: 0.92, confirmation_required: 0.0701, sensitive_effect: 0.0699 }), 0.93).slice(0, 4)).toEqual([
-      { label: "Authorization", score: "94%", required: "≥93%", pass: true },
+      { label: "Authorization", score: "explicit 94%, read-only 0%, undoable 0%", required: "one ≥93%, explicit if remote", pass: true },
       { label: "Within scope", score: "92%", required: "≥93%", pass: false },
       { label: "Confirmation required", score: "7.01%", required: "≤7%", pass: false },
       { label: "Sensitive effect", score: "6.99%", required: "≤7%", pass: true },
@@ -471,7 +496,7 @@ describe("reviewHeading and reviewLines", () => {
       "Auto mode · bash",
       "Proposed: ask · Applied: ask",
       "Reason: confirmation-required",
-      "Authorization: 98% (≥90%; pass)",
+      "Authorization: explicit 98%, read-only 0%, undoable 0% (one ≥90%, explicit if remote; pass)",
       "Within scope: 95% (≥90%; pass)",
       "Confirmation required: 22% (≤10%; fail)",
       "Sensitive effect: 5% (≤10%; pass)",
@@ -512,7 +537,7 @@ describe("reviewHeading and reviewLines", () => {
       "Observe mode · bash",
       "Proposed: allow · Applied: ask",
       "Reason: model-approved",
-      "Authorization: 98% (≥90%; pass)",
+      "Authorization: explicit 98%, read-only 0%, undoable 0% (one ≥90%, explicit if remote; pass)",
       "Within scope: 95% (≥90%; pass)",
       "Confirmation required: 2% (≤10%; pass)",
       "Sensitive effect: 5% (≤10%; pass)",
@@ -524,7 +549,7 @@ describe("reviewHeading and reviewLines", () => {
       "Auto mode · bash",
       "Proposed: allow · Applied: allow",
       "Reason: model-approved",
-      "Authorization: 98% (≥90%; pass)",
+      "Authorization: explicit 98%, read-only 0%, undoable 0% (one ≥90%, explicit if remote; pass)",
       "Within scope: 95% (≥90%; pass)",
       "Confirmation required: 2% (≤10%; pass)",
       "Sensitive effect: 5% (≤10%; pass)",

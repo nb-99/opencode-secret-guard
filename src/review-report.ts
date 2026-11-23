@@ -38,13 +38,26 @@ export interface DecisionReport {
   skipped: number;
   /** Passing judgments that code cancelled, such as `context-changed`. */
   invalidated: number;
-  screens: { runs: number; failed: number; selected: number };
-  tokens: { input: number; output: number };
+  /** Proposed approvals by why they needed no further authorization. */
+  bases: Record<string, number>;
+  screens: { runs: number; failed: number; chunks: number; cached: number; asked: number; selected: number };
+  /** Token counts, from the reviews whose backend reported them. */
+  tokens: { reported: number; input: number; output: number };
+  /** Judgment request sizes, from the reviews that sent one. */
+  requests: { count: number; bytes: number; maxBytes: number };
+  /** Reviews that waited for a review slot. */
+  queued: { count: number; maxMs: number };
+  /** The user's answers to the prompts this plugin saw, by reply code. */
+  replies: Record<string, number>;
+  /** Scored model reviews against the user's answer to the same call. */
+  agreement: { approvedAllowed: number; approvedRejected: number; manualAllowed: number; manualRejected: number };
   skips: Record<string, number>;
   reasons: Record<string, number>;
   evidence: Record<string, number>;
   /** Proposed approvals that relied on evidence this reviewer did not use before; read these first. */
   approvalsWithEvidence: ReviewedApproval[];
+  /** Proposed approvals of calls the user then rejected. */
+  approvalsRejected: ReviewedApproval[];
   /** Lines that were not JSON objects. */
   malformed: number;
 }
@@ -66,11 +79,20 @@ export function summarizeDecisionLog(lines: Iterable<string>): DecisionReport {
   const report: DecisionReport = {
     from: null, to: null, starts: 0, versions: [],
     reviews: 0, eligible: 0, modelCalls: 0, proposedApprovals: 0, appliedApprovals: 0,
-    manual: 0, failed: 0, skipped: 0, invalidated: 0,
-    screens: { runs: 0, failed: 0, selected: 0 }, tokens: { input: 0, output: 0 },
-    skips: {}, reasons: {}, evidence: {}, approvalsWithEvidence: [], malformed: 0,
+    manual: 0, failed: 0, skipped: 0, invalidated: 0, bases: {},
+    screens: { runs: 0, failed: 0, chunks: 0, cached: 0, asked: 0, selected: 0 },
+    tokens: { reported: 0, input: 0, output: 0 }, requests: { count: 0, bytes: 0, maxBytes: 0 }, queued: { count: 0, maxMs: 0 },
+    replies: {}, agreement: { approvedAllowed: 0, approvedRejected: 0, manualAllowed: 0, manualRejected: 0 },
+    skips: {}, reasons: {}, evidence: {}, approvalsWithEvidence: [], approvalsRejected: [], malformed: 0,
   };
   const versions = new Set<string>();
+  // The latest review of each call and action, when it was scored. Its record
+  // precedes the prompt, so a reply joins the review the user saw.
+  const judged = new Map<string, { approved: boolean; approval: ReviewedApproval }>();
+  const callKey = (entry: Record<string, unknown>) => {
+    const ids = [text(entry.sessionID), text(entry.messageID), text(entry.callID), text(entry.action)];
+    return ids.includes(null) ? undefined : JSON.stringify(ids);
+  };
   for (const line of lines) {
     if (!line.trim()) continue;
     let entry: unknown;
@@ -99,6 +121,17 @@ export function summarizeDecisionLog(lines: Iterable<string>): DecisionReport {
       }
       continue;
     }
+    if (entry.event === "reply") {
+      const reply = text(entry.reply) ?? "unknown";
+      bump(report.replies, reply);
+      const key = callKey(entry);
+      const review = key === undefined ? undefined : judged.get(key);
+      const allowed = reply === "once" || reply === "always";
+      if (!review || (!allowed && reply !== "reject")) continue;
+      report.agreement[`${review.approved ? "approved" : "manual"}${allowed ? "Allowed" : "Rejected"}`]++;
+      if (review.approved && !allowed) report.approvalsRejected.push(review.approval);
+      continue;
+    }
     if (entry.event !== "review") continue;
     report.reviews++;
     const reason = text(entry.reason) ?? "unknown";
@@ -107,12 +140,24 @@ export function summarizeDecisionLog(lines: Iterable<string>): DecisionReport {
     if (entry.applied === "allow") report.appliedApprovals++;
     const evidence = Array.isArray(entry.evidence) ? entry.evidence.map(text).filter((tag): tag is string => tag !== null) : [];
     for (const tag of evidence) bump(report.evidence, tag);
+    const key = callKey(entry);
+    if (key !== undefined) judged.delete(key);
+    if (entry.inputTokens !== undefined || entry.outputTokens !== undefined) report.tokens.reported++;
     report.tokens.input += count(entry.inputTokens);
     report.tokens.output += count(entry.outputTokens);
+    if (entry.requestBytes !== undefined) {
+      report.requests.count++;
+      report.requests.bytes += count(entry.requestBytes);
+      report.requests.maxBytes = Math.max(report.requests.maxBytes, count(entry.requestBytes));
+    }
+    if (entry.queuedMs !== undefined) {
+      report.queued.count++;
+      report.queued.maxMs = Math.max(report.queued.maxMs, count(entry.queuedMs));
+    }
     if (isRecord(entry.screen)) {
       report.screens.runs++;
       if (entry.screen.failed === true) report.screens.failed++;
-      report.screens.selected += count(entry.screen.selected);
+      for (const field of ["chunks", "cached", "asked", "selected"] as const) report.screens[field] += count(entry.screen[field]);
     }
     if (entry.modelCalled !== true) {
       report.skipped++;
@@ -124,26 +169,32 @@ export function summarizeDecisionLog(lines: Iterable<string>): DecisionReport {
       report.failed++;
       continue;
     }
+    const approval: ReviewedApproval = {
+      time, reviewID: text(entry.reviewID), sessionID: text(entry.sessionID), messageID: text(entry.messageID),
+      callID: text(entry.callID), action: text(entry.action), mode: text(entry.mode), applied: text(entry.applied), evidence,
+    };
+    if (key !== undefined) judged.set(key, { approved: reason === "model-approved", approval });
     if (reason !== "model-approved") {
       report.manual++;
       if (entry.proposed === "allow") report.invalidated++;
       continue;
     }
     report.proposedApprovals++;
-    if (evidence.length) {
-      report.approvalsWithEvidence.push({
-        time, reviewID: text(entry.reviewID), sessionID: text(entry.sessionID), messageID: text(entry.messageID),
-        callID: text(entry.callID), action: text(entry.action), mode: text(entry.mode), applied: text(entry.applied), evidence,
-      });
-    }
+    bump(report.bases, text(entry.basis) ?? "unknown");
+    if (evidence.length) report.approvalsWithEvidence.push(approval);
   }
   return report;
 }
 
 const sorted = (counts: Record<string, number>) =>
   Object.entries(counts).sort(([a, x], [b, y]) => y - x || a.localeCompare(b)).map(([key, value]) => `  ${key}: ${value}`);
+const list = (approvals: ReviewedApproval[]) => approvals.map((approval) =>
+  `  ${approval.time ?? "?"} ${approval.mode ?? "?"} ${approval.action ?? "?"} applied=${approval.applied ?? "?"} ` +
+  `session=${approval.sessionID ?? "?"} message=${approval.messageID ?? "?"} call=${approval.callID ?? "?"}` +
+  (approval.evidence.length ? ` evidence=${approval.evidence.join(",")}` : ""));
 
 export function formatReport(report: DecisionReport): string {
+  const { screens, tokens, requests, queued, agreement } = report;
   const lines = [
     `Decision log ${report.from ?? "?"} to ${report.to ?? "?"}`,
     "Unverified: any process that can write the log file can add lines to it.",
@@ -153,16 +204,23 @@ export function formatReport(report: DecisionReport): string {
     `Asks reviewed: ${report.reviews}; eligible: ${report.eligible}; model calls: ${report.modelCalls}`,
     `Proposed approvals: ${report.proposedApprovals}; applied approvals: ${report.appliedApprovals}`,
     `Manual: ${report.manual} (invalidated approvals: ${report.invalidated}); failed: ${report.failed}; skipped: ${report.skipped}`,
-    `Restriction screen: ${report.screens.runs} runs, ${report.screens.failed} failed, ${report.screens.selected} chunks selected`,
-    `Tokens: ${report.tokens.input} input, ${report.tokens.output} output`,
+    `Restriction screen: ${screens.runs} runs, ${screens.failed} failed; chunks ${screens.chunks}, ` +
+      `cached ${screens.cached}, asked ${screens.asked}, selected ${screens.selected}`,
+    // The `opencode` text backend returns no usage, so zero would mislead.
+    tokens.reported ? `Tokens: ${tokens.input} input, ${tokens.output} output (${tokens.reported} reviews reported)` : "Tokens: not reported",
+    requests.count ?
+      `Request size: ${requests.count} requests, ${Math.round(requests.bytes / requests.count)} bytes average, ${requests.maxBytes} maximum` :
+      "Request size: not recorded",
+    `Queued reviews: ${queued.count}${queued.count ? `, longest wait ${queued.maxMs} ms` : ""}`,
     ...(report.malformed ? [`Malformed lines: ${report.malformed}`] : []),
+    "Approval basis:", ...sorted(report.bases),
+    "Replies:", ...sorted(report.replies),
+    `Model against reply: approved and allowed ${agreement.approvedAllowed}, approved but rejected ${agreement.approvedRejected}, ` +
+      `manual but allowed ${agreement.manualAllowed}, manual and rejected ${agreement.manualRejected}`,
     "Skips by reason:", ...sorted(report.skips),
     "Evidence used:", ...sorted(report.evidence),
-    `Proposed approvals with new evidence (${report.approvalsWithEvidence.length}):`,
-    ...report.approvalsWithEvidence.map((approval) =>
-      `  ${approval.time ?? "?"} ${approval.mode ?? "?"} ${approval.action ?? "?"} applied=${approval.applied ?? "?"} ` +
-      `session=${approval.sessionID ?? "?"} message=${approval.messageID ?? "?"} call=${approval.callID ?? "?"} ` +
-      `evidence=${approval.evidence.join(",")}`),
+    `Proposed approvals with new evidence (${report.approvalsWithEvidence.length}):`, ...list(report.approvalsWithEvidence),
+    `Proposed approvals the user rejected (${report.approvalsRejected.length}):`, ...list(report.approvalsRejected),
   ];
   return `${lines.join("\n")}\n`;
 }

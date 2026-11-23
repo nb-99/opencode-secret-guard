@@ -1,4 +1,6 @@
-import { createReviewStatusStore, MAX_RATIONALE_CHARS, MAX_SESSION_REVIEWS, MAX_SUMMARY_CHARS, type ReviewStatus } from "./review-status.ts";
+import {
+  CHECK_KEYS, createReviewStatusStore, MAX_RATIONALE_CHARS, MAX_SESSION_REVIEWS, MAX_SUMMARY_CHARS, SCORE_KEYS, type ReviewStatus,
+} from "./review-status.ts";
 import { createReviewSummaryStore, MAX_SKIP_REASONS, type ReviewSummary } from "./review-summary.ts";
 
 // OpenCode 2.2.5 builds RPC validators with Effect 4, which rejects JSON Schema
@@ -6,8 +8,8 @@ import { createReviewSummaryStore, MAX_SKIP_REASONS, type ReviewSummary } from "
 const id = { type: "string", minLength: 1, maxLength: 80 };
 const probability = { type: "number", minimum: 0, maximum: 1 };
 const count = { type: "integer", minimum: 0 };
-const SCORE_NAMES = ["explicitly_authorized", "within_scope", "confirmation_required", "sensitive_effect", "remote_effect", "named_by_user"];
-const CHECK_NAMES = SCORE_NAMES.filter((name) => name !== "named_by_user");
+const SCORE_NAMES = [...SCORE_KEYS];
+const CHECK_NAMES = [...CHECK_KEYS];
 const scores = {
   type: "object", additionalProperties: false,
   properties: Object.fromEntries(SCORE_NAMES.map((name) => [name, probability])),
@@ -30,6 +32,7 @@ const summary = {
       },
     },
     average: scores,
+    authorization: probability,
     passed: {
       type: "object", additionalProperties: false,
       properties: Object.fromEntries(CHECK_NAMES.map((name) => [name, count])),
@@ -77,6 +80,7 @@ const status = {
     },
     eligible: { type: "boolean" },
     screened: { type: "boolean" },
+    explicitOnly: { type: "boolean" },
   },
   required: ["reviewID", "sessionID", "workspaceID", "messageID", "callID", "action", "mode", "phase", "modelCalled", "startedAt", "elapsedMs", "threshold"],
   additionalProperties: false,
