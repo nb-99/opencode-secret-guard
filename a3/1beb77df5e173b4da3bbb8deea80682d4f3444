@@ -1,0 +1,23 @@
+src/policy.ts
+  s_f6e3fe21ebc5f7::t_755c9fd7b220c6 171
+  s_f6e3fe21ebc5f7::t_ef7a27740ba7ac 208-213
+src/sandbox.ts
+  s_f6e3fe21ebc5f7::t_44902a04442481 1-3,6-82
+  s_f6e3fe21ebc5f7::t_b382259531fd6f 4-5
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.7",
+  "base_commit_sha": "a31beb77df5e173b4da3bbb8deea80682d4f3444",
+  "prompts": {},
+  "sessions": {
+    "s_f6e3fe21ebc5f7": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_df7461f99ffeDnNlhXeUKGhrSd",
+        "model": "github-copilot/claude-opus-5.5"
+      },
+      "human_author": "nb99 <niklas@beilmann.dev>"
+    }
+  }
+}
