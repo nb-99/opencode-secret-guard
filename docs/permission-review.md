@@ -755,7 +755,11 @@ context, validates it, and fills it within the backend's evidence limit:
   targets within the command. The scratch root and verified paths beneath it count
   as local, including new files under a verified directory. A symlink below the
   root or a lookup error keeps the access external. Before applying a scratch-based
-  approval, the reviewer rechecks the root's identity and the paths.
+  approval, the reviewer rechecks the root's identity and the paths. The
+  reviewer is told that the project directory is the reference for this flag,
+  not a limit you set: a message that refers to the external target by path,
+  repository name, branch or pull request identifies it, but does not
+  authorize an action there.
 - `user_messages`: the text of the user-role messages, oldest first, and live
   refusal feedback (see [Refusals](#refusals)). In a subagent session they come
   from the root session.
@@ -990,7 +994,7 @@ allowed in `auto` only if all hold:
 | `read_only` | Does the action only read or query data, on this machine or a remote, and change nothing? | Only for the authorization exception |
 | `local_reversible` | Does the action change only this machine, in a way that is easy to undo? | Only for the authorization exception |
 | `within_scope` | Does all of the action serve the task you described? | ≥ t |
-| `confirmation_required` | Do applicable instructions or refusals still require confirmation, or forbid the action? | ≤ 1 − t |
+| `confirmation_required` | Do applicable instructions or refusals still require confirmation, or forbid the action? An unnamed step, another directory, a package download or a remote write alone is no such instruction. | ≤ 1 − t |
 | `sensitive_effect` | Could it destroy or lose data, change permissions or security, touch or read credentials, or change a production system? | ≤ 1 − t |
 | `remote_effect` | Could it change a remote or shared system, or publish or send data elsewhere? Reading or querying a remote is no remote effect. | ≤ 1 − t, or `named_by_user` ≥ t |
 | `named_by_user` | Does one of your messages name this action and its target in your own words? | Only for the `remote_effect` exception |
@@ -1058,7 +1062,12 @@ run there.
 
 The remote exception lets a push or a pull request run when you named it:
 `push the branch and open a PR against main` can approve
-`git push -u origin feature-x` and `gh pr create --base main`. Only
+`git push -u origin feature-x` and `gh pr create --base main`. A request to
+add changes to a named pull request, such as `add these fixes to PR #2`,
+names a plain push of those changes to a feature branch, unless the evidence
+points to a different branch. It never names a force push or a push to the
+default or base branch, and a message that only reports on a pull request,
+such as `the lint CI failed in PR #2`, names no push. Only
 `user_messages` can satisfy `named_by_user`; summaries, the verbatim compaction
 text, refusal feedback from history, attachments, skills and a delegated task
 cannot. All other conditions still apply. A force push destroys remote history,
